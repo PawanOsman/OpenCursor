@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/pawanosman-opencursor-badge.png)](https://mseep.ai/app/pawanosman-opencursor)
+
 <div align="center">
 
 <img src="media/readme/hero.png" alt="OpenCursor — the open-source AI coding agent for VS Code" width="900"/>
