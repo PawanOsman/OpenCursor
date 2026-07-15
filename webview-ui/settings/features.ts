@@ -73,7 +73,7 @@ export interface Persona {
   builtin?: boolean;
 }
 
-export type ProviderKind = "openai" | "anthropic" | "google" | "openrouter" | "ollama" | "llamacpp";
+export type ProviderKind = "openai" | "anthropic" | "google" | "openrouter" | "atlascloud" | "ollama" | "llamacpp";
 
 export interface ProviderConfig {
   id: string;
@@ -91,12 +91,13 @@ export const PROVIDER_PRESETS: Record<ProviderKind, { label: string; baseUrl: st
   anthropic: { label: "Anthropic", baseUrl: "https://api.anthropic.com/v1", needsKey: true },
   google: { label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", needsKey: true },
   openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", needsKey: true },
+  atlascloud: { label: "Atlas Cloud", baseUrl: "https://api.atlascloud.ai/v1", needsKey: true },
   ollama: { label: "Ollama", baseUrl: "http://localhost:11434/v1", needsKey: false },
   llamacpp: { label: "llama.cpp", baseUrl: "http://localhost:8080/v1", needsKey: false },
 };
 
 /** Built-in "popular" providers shown as connect-by-key cards. */
-export const POPULAR_KINDS: ProviderKind[] = ["anthropic", "openai", "google", "openrouter"];
+export const POPULAR_KINDS: ProviderKind[] = ["anthropic", "openai", "google", "openrouter", "atlascloud"];
 
 export interface ModelOption {
   key: string;

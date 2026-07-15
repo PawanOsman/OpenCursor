@@ -45,7 +45,7 @@ export interface HookDef {
 	enabled: boolean;
 }
 
-export type ProviderKind = "openai" | "anthropic" | "google" | "openrouter" | "ollama" | "llamacpp";
+export type ProviderKind = "openai" | "anthropic" | "google" | "openrouter" | "atlascloud" | "ollama" | "llamacpp";
 
 /** Where a model can be served from: API provider kinds + OAuth account kinds. */
 export type ModelKind = ProviderKind | "claude-code" | "codex" | "antigravity";
@@ -272,6 +272,7 @@ export const PROVIDER_PRESETS: Record<ProviderKind, { label: string; baseUrl: st
 	anthropic: { label: "Anthropic", baseUrl: "https://api.anthropic.com/v1", needsKey: true },
 	google: { label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", needsKey: true },
 	openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", needsKey: true },
+	atlascloud: { label: "Atlas Cloud", baseUrl: "https://api.atlascloud.ai/v1", needsKey: true },
 	ollama: { label: "Ollama", baseUrl: "http://localhost:11434/v1", needsKey: false },
 	llamacpp: { label: "llama.cpp", baseUrl: "http://localhost:8080/v1", needsKey: false },
 };
