@@ -36,7 +36,7 @@ Ask questions in plain language — *"where do we refresh the auth token?"* — 
 <img src="media/readme/providers.png" alt="Supported providers: OAuth sign-in and API/local providers" width="900"/>
 
 - **OAuth sign-in** — connect your existing **Claude Code**, **OpenAI Codex**, or **Google Antigravity** account and use your subscription's models directly in VS Code.
-- **API keys** — OpenAI, Anthropic, Gemini, OpenRouter presets out of the box.
+- **API keys** — OpenAI, Anthropic, Gemini, OpenRouter, Atlas Cloud presets out of the box.
 - **Custom providers** — add any OpenAI-compatible or Anthropic-style endpoint (base URL + key). Run multiple providers at once; models are fetched live and mixable in the picker.
 - **Auto mode** — a judge model routes each task to the best enabled model. Per-model reasoning effort, thinking mode, and context-size options.
 
@@ -59,7 +59,7 @@ Ask questions in plain language — *"where do we refresh the auth token?"* — 
 2. Open the OpenCursor sidebar and pick a provider:
    - **Local:** one-click llama.cpp install, or point at a running Ollama.
    - **Account:** sign in with Claude Code / OpenAI Codex / Google Antigravity.
-   - **API:** paste a key for OpenAI, Anthropic, Gemini, OpenRouter, or any custom endpoint.
+   - **API:** paste a key for OpenAI, Anthropic, Gemini, OpenRouter, Atlas Cloud, or any custom endpoint.
 3. Start chatting. `Ctrl+L` sends your selection to the chat.
 
 > Native runtime dependencies (ONNX runtime, image processing) are downloaded once on first activation with integrity checks — they're too heavy to ship in the VSIX.
