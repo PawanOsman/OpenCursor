@@ -48,6 +48,9 @@ export class IpcSocketServer {
 		});
 
 		this.server.listen(this.socketPath, () => {
+			if (process.platform !== "win32") {
+				try { fs.chmodSync(this.socketPath, 0o600); } catch (e) { logError("ipc.start.chmod", e); }
+			}
 			getLog().appendLine(`[IPC] OpenCursor socket server listening on ${this.socketPath}`);
 		});
 	}

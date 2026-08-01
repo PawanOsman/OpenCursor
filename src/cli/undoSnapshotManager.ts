@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import * as readline from "readline";
 import { execSync } from "child_process";
 
 export async function handleUndoCommand() {
@@ -13,6 +14,16 @@ export async function handleUndoCommand() {
 			return;
 		}
 
+		console.log(`\x1b[33mThis will discard ALL local changes (including untracked files).\x1b[0m`);
+		const confirmed = await new Promise<boolean>((resolve) => {
+			if (!process.stdin.isTTY) { resolve(false); return; }
+			const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+			rl.question("Continue? [y/N] ", (answer: string) => { rl.close(); resolve(/^y(es)?$/i.test(answer.trim())); });
+		});
+		if (!confirmed) {
+			console.log(`\x1b[90mAborted.\x1b[0m\n`);
+			return;
+		}
 		console.log(`\x1b[33mDiscarding unstaged changes across modified files...\x1b[0m`);
 		execSync("git checkout -- .", { cwd });
 		execSync("git clean -fd", { cwd });

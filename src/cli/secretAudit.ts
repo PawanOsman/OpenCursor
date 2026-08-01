@@ -29,6 +29,7 @@ export async function handleAuditSecretsCommand() {
 					const lines = content.split("\n");
 					lines.forEach((line, idx) => {
 						SECRET_PATTERNS.forEach((p) => {
+							p.regex.lastIndex = 0;
 							if (p.regex.test(line)) {
 								leaks.push({ file: path.relative(cwd, full), line: idx + 1, type: p.name });
 							}

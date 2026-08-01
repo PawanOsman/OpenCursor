@@ -1,13 +1,15 @@
 import * as fs from "fs";
 import * as path from "path";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 
 export async function handleDiffViewerCommand(targetFile?: string) {
 	const cwd = process.env.OPEN_CURSOR_WORKSPACE_ROOT || process.cwd();
 	console.log(`\n\x1b[1m\x1b[36m[oc diff] Interactive Terminal Diff Viewer...\x1b[0m\n`);
 
 	try {
-		const gitDiff = execSync(`git diff ${targetFile ? `"${targetFile}"` : ""}`, { cwd, encoding: "utf8" });
+		const args = ["diff"];
+		if (targetFile) args.push("--", targetFile);
+		const gitDiff = execFileSync("git", args, { cwd, encoding: "utf8" });
 		if (!gitDiff.trim()) {
 			console.log(`\x1b[32m✔ No unstaged changes detected in workspace.\x1b[0m\n`);
 			return;
