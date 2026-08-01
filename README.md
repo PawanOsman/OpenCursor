@@ -127,7 +127,7 @@ OpenCursor is designed to work **without internet** once set up:
 - **🦙 llama.cpp built in** — search Hugging Face for GGUF models, pick a quantization, download, and OpenCursor spawns and manages `llama-server` for you. Full launch control: context size, GPU layers, flash attention, KV cache types, speculative decoding, vision (`--mmproj`), and more.
 - **🐋 Ollama** — pull, manage, and chat with models from the Ollama library, zero config.
 - **🧠 Local embeddings** — semantic codebase search powered by an on-device ONNX MiniLM model. No embedding API, no key, no code leaving your machine.
-- **🔎 SearXNG Web Search** — search the web privately. Configure your self-hosted SearXNG endpoint in `~/.config/opencursor/config.json`:
+- **🔎 SearXNG Web Search** — search the web privately. Configure your self-hosted SearXNG endpoint in `~/.ocursor/config.json`:
   ```json
   {
     "searxng_url": "http://localhost:8080"

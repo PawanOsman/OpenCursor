@@ -79,6 +79,13 @@ export class RawInteractiveRepl {
 	private autoApprove = true;
 	private selectedMenuIndex = 0;
 
+	private readLine(prompt: string): Promise<string> {
+		return new Promise((resolve) => {
+			const rl = require("readline").createInterface({ input: process.stdin, output: process.stdout });
+			rl.question(prompt, (answer: string) => { rl.close(); resolve(answer); });
+		});
+	}
+
 	constructor(private config: any, initialMode?: Mode, initialCwd?: string) {
 		this.currentModel = config.model || "gpt-4o";
 		this.currentMode = initialMode || "agent";
@@ -398,7 +405,16 @@ export class RawInteractiveRepl {
 				const answers: Record<string, string[]> = {};
 				for (let idx = 0; idx < questions.length; idx++) {
 					const q = questions[idx];
-					answers[String(idx)] = [q.question];
+					if (q.options && q.options.length > 0) {
+						console.log(`${q.question}`);
+						q.options.forEach((o: string, i: number) => console.log(`  ${i + 1}. ${o}`));
+						const choice = await this.readLine(`Choice [1-${q.options.length}]: `);
+						const ci = parseInt(choice, 10) - 1;
+						answers[String(idx)] = [q.options[ci >= 0 && ci < q.options.length ? ci : 0]];
+					} else {
+						const response = await this.readLine(`${q.question}: `);
+						answers[String(idx)] = [response || "(no answer)"];
+					}
 				}
 				return answers;
 			},
@@ -409,7 +425,8 @@ export class RawInteractiveRepl {
 				this.stopSpinner();
 				const detail = JSON.stringify(toolInput);
 				process.stdout.write(renderApprovalPrompt(toolName, detail.length > 60 ? detail.slice(0, 57) + "..." : detail));
-				return true;
+				const answer = await this.readLine("Allow? [y/N] ");
+				return /^y(es)?$/i.test(answer.trim());
 			},
 			onRetry: (attempt, max, delayMs, errMsg) => {
 				this.stopSpinner();

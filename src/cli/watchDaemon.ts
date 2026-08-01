@@ -25,7 +25,9 @@ export async function handleWatchCommand(cwd = process.cwd()) {
 
 	let debounceTimer: NodeJS.Timeout | undefined;
 
-	fs.watch(cwd, { recursive: true }, (eventType, filename) => {
+	const recursive = process.platform !== "linux";
+	if (!recursive) console.log(`${dim}[watch] Note: Recursive watch is not supported on Linux; watching top-level directory only.${reset}`);
+	fs.watch(cwd, { recursive }, (eventType, filename) => {
 		if (!filename || filename.includes("node_modules") || filename.includes(".git") || filename.includes("dist")) {
 			return;
 		}

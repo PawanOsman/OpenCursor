@@ -300,7 +300,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 				enableFileReading,
 				enableTerminalSuggestions,
 				enableWorkspaceContext,
-				approve: undefined, // Subagents execute autonomously without parent UI prompts
+				approve,
 				isSubagent: true,
 				// Nested Task disabled; child still needs hooks for compaction etc.
 				onHook,
