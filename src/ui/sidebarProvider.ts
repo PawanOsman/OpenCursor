@@ -122,6 +122,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /** Post a message prompt to the active session (used by IPC socket bridge). */
+  public async postMessageToSession(prompt: string, mode?: Mode, model?: string) {
+    if (mode) this._currentMode = mode;
+    await this._handleMessage(prompt, undefined, { model, mode });
+  }
+
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
     _context: vscode.WebviewViewResolveContext,

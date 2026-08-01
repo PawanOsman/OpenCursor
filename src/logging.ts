@@ -7,18 +7,44 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-import * as vscode from "vscode";
+function getVscode() {
+  try {
+    return require("vscode");
+  } catch {
+    return undefined;
+  }
+}
 
-let output: vscode.OutputChannel | undefined;
+let output: any | undefined;
 
-export function initLog(context: vscode.ExtensionContext): vscode.OutputChannel {
-  output ??= vscode.window.createOutputChannel("OpenCursor");
-  context.subscriptions.push(output);
+const fallbackChannel: any = {
+  name: "OpenCursor",
+  appendLine: (value: string) => console.log(value),
+  append: (value: string) => process.stdout.write(value),
+  clear: () => {},
+  show: () => {},
+  hide: () => {},
+  dispose: () => {},
+};
+
+export function initLog(context: any): any {
+  const vsc = getVscode();
+  if (vsc?.window?.createOutputChannel) {
+    output ??= vsc.window.createOutputChannel("OpenCursor");
+    context?.subscriptions?.push?.(output);
+  } else {
+    output ??= fallbackChannel;
+  }
   return output;
 }
 
-export function getLog(): vscode.OutputChannel {
-  return (output ??= vscode.window.createOutputChannel("OpenCursor"));
+export function getLog(): any {
+  if (output) return output;
+  const vsc = getVscode();
+  if (vsc?.window?.createOutputChannel) {
+    return (output = vsc.window.createOutputChannel("OpenCursor"));
+  }
+  return (output = fallbackChannel);
 }
 
 export function errorText(error: unknown): string {

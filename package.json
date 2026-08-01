@@ -31,6 +31,10 @@
 	],
 	"activationEvents": [],
 	"main": "./dist/extension.js",
+	"bin": {
+		"oc": "./dist/cli.js",
+		"open-cursor": "./dist/cli.js"
+	},
 	"contributes": {
 		"commands": [
 			{

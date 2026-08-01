@@ -7,11 +7,38 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { defineTool } from "./types";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-/** Decode the handful of HTML entities that show up in result text. */
+// ---------------------------------------------------------------------------
+// Config — reads searxng_url from ~/.ocursor/config.json if present.
+// ---------------------------------------------------------------------------
+function loadSearxngUrl(): string | null {
+  try {
+    const cfgPath = path.join(os.homedir(), ".ocursor", "config.json");
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+      if (cfg.searxng_url && typeof cfg.searxng_url === "string") {
+        return cfg.searxng_url.replace(/\/$/, "");
+      }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Shared types
+// ---------------------------------------------------------------------------
+interface SearchHit {
+  title: string;
+  url: string;
+  snippet?: string;
+}
+
 function decodeEntities(s: string): string {
   return s
     .replace(/<[^>]+>/g, "")
@@ -26,7 +53,38 @@ function decodeEntities(s: string): string {
     .trim();
 }
 
-/** DuckDuckGo wraps external links as /l/?uddg=<encoded>. Unwrap to the real URL. */
+// ---------------------------------------------------------------------------
+// SearXNG backend — JSON API
+// ---------------------------------------------------------------------------
+async function searxngSearch(
+  term: string,
+  baseUrl: string,
+  signal: AbortSignal | undefined,
+  limit: number,
+): Promise<SearchHit[]> {
+  const url = `${baseUrl}/search?q=${encodeURIComponent(term)}&format=json&categories=general&language=en`;
+  const r = await fetch(url, {
+    headers: { "user-agent": UA, accept: "application/json" },
+    signal,
+  });
+  if (!r.ok) throw new Error(`SearXNG HTTP ${r.status}`);
+  const data = (await r.json()) as { results?: { title?: string; url?: string; content?: string }[] };
+  const hits: SearchHit[] = [];
+  for (const res of data.results ?? []) {
+    if (!res.url) continue;
+    hits.push({
+      title: decodeEntities(res.title || "(untitled)"),
+      url: res.url,
+      snippet: res.content ? decodeEntities(res.content) : undefined,
+    });
+    if (hits.length >= limit) break;
+  }
+  return hits;
+}
+
+// ---------------------------------------------------------------------------
+// DuckDuckGo fallback — HTML scrape
+// ---------------------------------------------------------------------------
 function unwrapDdg(href: string): string {
   const m = href.match(/[?&]uddg=([^&]+)/);
   let url = m ? decodeURIComponent(m[1]) : href;
@@ -34,16 +92,8 @@ function unwrapDdg(href: string): string {
   return url;
 }
 
-interface SearchHit {
-  title: string;
-  url: string;
-  snippet?: string;
-}
-
-/** Parse the DuckDuckGo HTML endpoint (rich: title + url + snippet). */
 function parseDdgHtml(html: string, limit: number): SearchHit[] {
   const hits: SearchHit[] = [];
-  // Each result block contains a result__a link and (usually) a result__snippet.
   const blockRe = /<div class="result__body">([\s\S]*?)<\/div>\s*<\/div>/g;
   let bm: RegExpExecArray | null;
   while ((bm = blockRe.exec(html)) && hits.length < limit) {
@@ -57,7 +107,6 @@ function parseDdgHtml(html: string, limit: number): SearchHit[] {
       snippet: snip ? decodeEntities(snip[1]) : undefined,
     });
   }
-  // Fallback: simpler anchor-only parse (covers the lite endpoint / layout drift).
   if (hits.length === 0) {
     const re = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
     let m: RegExpExecArray | null;
@@ -73,28 +122,47 @@ async function ddgSearch(term: string, endpoint: string, signal: AbortSignal | u
     headers: { "user-agent": UA, "accept-language": "en-US,en;q=0.9" },
     signal,
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(`DDG HTTP ${r.status}`);
   return parseDdgHtml(await r.text(), limit);
 }
 
-// ---- WebSearch ----
-// Returns ranked results (title, URL, snippet) from DuckDuckGo, with the lite
-// endpoint as a fallback when the HTML endpoint returns nothing.
+// ---------------------------------------------------------------------------
+// Unified search: SearXNG first, DDG fallback
+// ---------------------------------------------------------------------------
+async function search(term: string, signal: AbortSignal | undefined, limit: number): Promise<{ hits: SearchHit[]; engine: string }> {
+  const searxngUrl = loadSearxngUrl();
+
+  if (searxngUrl) {
+    try {
+      const hits = await searxngSearch(term, searxngUrl, signal, limit);
+      if (hits.length > 0) return { hits, engine: "SearXNG" };
+    } catch (e) {
+      // fall through to DDG
+    }
+  }
+
+  // DuckDuckGo fallback
+  let hits = await ddgSearch(term, "https://html.duckduckgo.com/html/", signal, limit);
+  if (hits.length === 0) {
+    hits = await ddgSearch(term, "https://lite.duckduckgo.com/lite/", signal, limit);
+  }
+  return { hits, engine: "DuckDuckGo" };
+}
+
+// ---------------------------------------------------------------------------
+// WebSearch tool
+// ---------------------------------------------------------------------------
 export const webSearchTool = defineTool("WebSearch", false, async (input, abortSignal) => {
   const term = String(input.search_term || "").trim();
   if (!term) return { output: "error: search_term is required" };
   const LIMIT = 10;
 
   try {
-    let hits = await ddgSearch(term, "https://html.duckduckgo.com/html/", abortSignal, LIMIT);
-    if (hits.length === 0) {
-      // Fallback engine/endpoint.
-      hits = await ddgSearch(term, "https://lite.duckduckgo.com/lite/", abortSignal, LIMIT);
-    }
+    const { hits, engine } = await search(term, abortSignal, LIMIT);
     if (hits.length === 0) return { output: `No results for "${term}".` };
 
     const explanation = input.explanation ? String(input.explanation).trim() : "";
-    const header = `Web results for "${term}"${explanation ? ` — ${explanation}` : ""}:`;
+    const header = `Web results for "${term}" [via ${engine}]${explanation ? ` — ${explanation}` : ""}:`;
     const body = hits
       .map((h, i) => {
         const lines = [`${i + 1}. ${h.title}`, `   ${h.url}`];
@@ -108,13 +176,12 @@ export const webSearchTool = defineTool("WebSearch", false, async (input, abortS
   }
 });
 
-// Content types we refuse (binary / non-webpage). Per the schema, WebFetch does
-// not support media or PDFs — the model should use Shell for those.
+// ---------------------------------------------------------------------------
+// WebFetch tool (unchanged)
+// ---------------------------------------------------------------------------
 const BINARY_CT = /^(image|audio|video|font)\/|application\/(pdf|zip|octet-stream|gzip|x-tar|vnd\.|wasm|java-archive)/i;
 
-/** Convert an HTML document into compact, readable markdown. */
 function htmlToMarkdown(html: string): string {
-  // Prefer the <body>; drop non-content elements entirely.
   let s = html.replace(/[\s\S]*?<body[^>]*>/i, "").replace(/<\/body>[\s\S]*$/i, "");
   s = s
     .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -123,7 +190,6 @@ function htmlToMarkdown(html: string): string {
     .replace(/<head[\s\S]*?<\/head>/gi, "")
     .replace(/<!--[\s\S]*?-->/g, "");
 
-  // Structural elements -> markdown.
   s = s
     .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_m, t) => `\n\n# ${t}\n\n`)
     .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_m, t) => `\n\n## ${t}\n\n`)
@@ -139,7 +205,6 @@ function htmlToMarkdown(html: string): string {
     .replace(/<(em|i)[^>]*>([\s\S]*?)<\/(em|i)>/gi, (_m, _g, t) => `*${t}*`)
     .replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, (_m, t) => `\`${decodeEntities(t)}\``);
 
-  // Strip whatever tags remain, decode entities, normalise whitespace.
   s = s
     .replace(/<[^>]+>/g, " ")
     .replace(/&amp;/g, "&")
@@ -155,10 +220,6 @@ function htmlToMarkdown(html: string): string {
   return s;
 }
 
-// ---- WebFetch ----
-// Fetches a URL and returns its content as readable markdown. Read-only.
-// Rejects non-http(s) URLs, auth-required pages, non-200 responses, and binary
-// content (use Shell for static assets / media / PDFs).
 export const webFetchTool = defineTool("WebFetch", false, async (input, abortSignal) => {
   const raw = String(input.url || "").trim();
   if (!raw) return { output: "error: url is required" };

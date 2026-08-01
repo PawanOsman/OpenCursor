@@ -68,4 +68,8 @@ export interface RunAgentOptions {
 	onHook?: (event: "beforeMcp" | "beforeReadFile" | "subagentStop" | "preCompact", context: Record<string, string>, tool?: string) => Promise<string | undefined> | void;
 	signal: AbortSignal;
 	emit: (e: AgentEvent) => void;
+	/** Called before each retry attempt. Useful for surfacing wait messages to the user. */
+	onRetry?: (attempt: number, max: number, delayMs: number, error: string) => void;
+	/** Override the default max retry attempts (default 8). */
+	maxRetries?: number;
 }

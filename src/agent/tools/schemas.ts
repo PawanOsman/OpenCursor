@@ -57,7 +57,7 @@ def({
   parameters: {
     type: "object",
     properties: {
-      target_directory: { type: "string", description: "Absolute path to directory to search for files in. If not provided, defaults to Cursor workspace root." },
+      target_directory: { type: "string", description: "Absolute path to directory to search for files in. If not provided, defaults to OpenCursor workspace root." },
       glob_pattern: { type: "string", description: "The glob pattern to match files against.\nPatterns not starting with \"**/\" are automatically prepended with \"**/\" to enable recursive searching.\n\nExamples:\n\t- \"*.js\" (becomes \"**/*.js\") - find all .js files\n\t- \"**/node_modules/**\" - find all node_modules directories\n\t- \"**/test/**/test_*.ts\" - find all test_*.ts files in any test directory" },
     },
     required: ["glob_pattern"],
@@ -66,12 +66,12 @@ def({
 
 def({
   name: "Grep",
-  description: "A powerful search tool built on ripgrep\nUsage:\n- Prefer using Grep for search tasks when you know the exact symbols or strings to search for. Whenever possible, use this tool instead of invoking grep or rg as a terminal command. The Grep tool has been optimized for speed and file restrictions inside Cursor.\n- Supports full regex syntax (e.g., \"log.*Error\", \"function\\s+\\w+\")\n- Filter files with glob parameter (e.g., \".js\", \"**/.tsx\") or type parameter (e.g., \"js\", \"py\", \"rust\")\n- Output modes: \"content\" shows matching lines (default), \"files_with_matches\" shows only file paths, \"count\" shows match counts\n- Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use interface\\{\\} to find interface{} in Go code)\n- Multiline matching: By default patterns match within single lines only. For cross-line patterns like struct \\{[\\s\\S]*?field, use multiline: true\n- Results are capped to several thousand output lines for responsiveness; when truncation occurs, the results report \"at least\" counts, but are otherwise accurate.\n- Content output formatting closely follows ripgrep output format: '-' for context lines, ':' for match lines, and all context/match lines below each file group.",
+  description: "A powerful search tool built on ripgrep\nUsage:\n- Prefer using Grep for search tasks when you know the exact symbols or strings to search for. Whenever possible, use this tool instead of invoking grep or rg as a terminal command. The Grep tool has been optimized for speed and file restrictions inside OpenCursor.\n- Supports full regex syntax (e.g., \"log.*Error\", \"function\\s+\\w+\")\n- Filter files with glob parameter (e.g., \".js\", \"**/.tsx\") or type parameter (e.g., \"js\", \"py\", \"rust\")\n- Output modes: \"content\" shows matching lines (default), \"files_with_matches\" shows only file paths, \"count\" shows match counts\n- Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use interface\\{\\} to find interface{} in Go code)\n- Multiline matching: By default patterns match within single lines only. For cross-line patterns like struct \\{[\\s\\S]*?field, use multiline: true\n- Results are capped to several thousand output lines for responsiveness; when truncation occurs, the results report \"at least\" counts, but are otherwise accurate.\n- Content output formatting closely follows ripgrep output format: '-' for context lines, ':' for match lines, and all context/match lines below each file group.",
   parameters: {
     type: "object",
     properties: {
       pattern: { type: "string", description: "The regular expression pattern to search for in file contents" },
-      path: { type: "string", description: "File or directory to search in (rg pattern -- PATH). Defaults to Cursor workspace root." },
+      path: { type: "string", description: "File or directory to search in (rg pattern -- PATH). Defaults to OpenCursor workspace root." },
       glob: { type: "string", description: "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg --glob" },
       output_mode: { type: "string", enum: ["content", "files_with_matches", "count"], description: "Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"content\"." },
       "-B": { type: "number", description: "Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise." },

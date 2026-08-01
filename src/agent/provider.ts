@@ -150,9 +150,12 @@ function isAnthropic(apiBaseUrl: string): boolean {
 
 /** Error carrying the HTTP status of a failed chat request (for retry decisions). */
 export class ChatHTTPError extends Error {
-  constructor(public status: number, message: string) {
+  /** If set, the number of ms to wait before retrying (from X-RateLimit-Reset or Retry-After). */
+  retryAfterMs?: number;
+  constructor(public status: number, message: string, retryAfterMs?: number) {
     super(message);
     this.name = "ChatHTTPError";
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -179,12 +182,13 @@ export const sleep = (ms: number, signal?: AbortSignal) =>
  * Run a streaming request with retry. Each attempt re-invokes `make()` to get a
  * fresh response; partial output from a failed attempt is discarded so the agent
  * only sees clean output. Retries on transient errors with exponential backoff.
+ * For 429 rate-limit errors, honours the retryAfterMs hint from the response.
  */
 async function* streamWithRetry(
   make: () => AsyncGenerator<ProviderEvent>,
   signal: AbortSignal,
   onRetry?: (attempt: number, max: number, delayMs: number, error: string) => void,
-  maxAttempts = 3,
+  maxAttempts = 8,
 ): AsyncGenerator<ProviderEvent> {
   for (let attempt = 1; ; attempt++) {
     // Stream live. Retry is only safe before the first event is emitted — once we
@@ -204,7 +208,13 @@ async function* streamWithRetry(
       if (emitted || attempt >= maxAttempts || !isRetryableError(e)) {
         throw e;
       }
-      const delay = Math.min(1000 * 2 ** (attempt - 1), 8000);
+      // For 429, use the server-supplied reset window; otherwise exponential backoff.
+      let delay: number;
+      if (e instanceof ChatHTTPError && e.status === 429 && e.retryAfterMs && e.retryAfterMs > 0) {
+        delay = Math.min(e.retryAfterMs + 500, 65000); // respect reset window + 500ms buffer
+      } else {
+        delay = Math.min(1000 * 2 ** (attempt - 1), 16000);
+      }
       onRetry?.(attempt, maxAttempts, delay, e instanceof Error ? e.message : String(e));
       await sleep(delay, signal);
     }
@@ -460,14 +470,14 @@ function cleanTitle(s: string): string {
 export function streamChat(opts: StreamChatOpts): AsyncGenerator<ProviderEvent> {
   if (opts.oauthKind) {
     const make = () => streamOAuthChat(opts.oauthKind!, { model: opts.model, messages: opts.messages, tools: opts.tools, maxTokens: opts.maxTokens, modelParams: opts.modelParams, signal: opts.signal });
-    return streamWithRetry(make, opts.signal, opts.onRetry, opts.maxRetries ?? 3);
+    return streamWithRetry(make, opts.signal, opts.onRetry, opts.maxRetries ?? 8);
   }
   const useAnthropic = opts.anthropic ?? isAnthropic(opts.apiBaseUrl);
   if (useAnthropic && !opts.apiKey) {
     throw new Error("API Key not set");
   }
   const make = () => (useAnthropic ? streamAnthropic(opts) : streamOpenAI(opts));
-  return streamWithRetry(make, opts.signal, opts.onRetry, opts.maxRetries ?? 3);
+  return streamWithRetry(make, opts.signal, opts.onRetry, opts.maxRetries ?? 8);
 }
 
 async function* streamOpenAI(opts: StreamChatOpts): AsyncGenerator<ProviderEvent> {
@@ -503,7 +513,32 @@ async function* streamOpenAI(opts: StreamChatOpts): AsyncGenerator<ProviderEvent
   });
   if (!r.ok || !r.body) {
     const detail = await r.text().catch(() => "");
-    throw new ChatHTTPError(r.status, `chat ${r.status}: ${detail.slice(0, 500)}`);
+    // Parse OpenRouter / standard rate-limit reset time so the retry can wait exactly right.
+    let retryAfterMs: number | undefined;
+    if (r.status === 429) {
+      const resetHeader = r.headers.get("X-RateLimit-Reset") || r.headers.get("x-ratelimit-reset");
+      if (resetHeader) {
+        const resetTs = Number(resetHeader);
+        if (!isNaN(resetTs)) {
+          // If it looks like an epoch ms value (> 1e12) use it directly, else treat as seconds.
+          const resetEpochMs = resetTs > 1e12 ? resetTs : resetTs * 1000;
+          retryAfterMs = Math.max(0, resetEpochMs - Date.now());
+        }
+      }
+      if (!retryAfterMs) {
+        // Fallback: parse from JSON body (OpenRouter embeds it)
+        try {
+          const parsed = JSON.parse(detail);
+          const resetTs = Number(parsed?.error?.metadata?.headers?.["X-RateLimit-Reset"]);
+          if (!isNaN(resetTs) && resetTs > 0) {
+            const resetEpochMs = resetTs > 1e12 ? resetTs : resetTs * 1000;
+            retryAfterMs = Math.max(0, resetEpochMs - Date.now());
+          }
+        } catch { /* not JSON */ }
+      }
+      if (!retryAfterMs) retryAfterMs = 61000; // safe default: wait ~1 min for free-tier reset
+    }
+    throw new ChatHTTPError(r.status, `chat ${r.status}: ${detail.slice(0, 500)}`, retryAfterMs);
   }
 
   const toolAcc: Record<number, { id: string; name: string; args: string }> = {};

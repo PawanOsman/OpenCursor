@@ -4,6 +4,18 @@ All notable changes to the "ocursor" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.1.1] - 2026-08-01
+
+### Added
+
+- Terminal CLI Agent (`oc` / `open-cursor`) with interactive REPL mode and single-prompt support
+- 47 specialized CLI subcommands (`oc review`, `scaffold`, `diagram`, `types`, `trace`, `ci-monitor`, `devcontainer`, `shrink-docker`, `audit-secrets`, `codemod`, `migrate`, `db`, `swarm`, `fix`, etc.)
+- Bi-directional IPC socket server bridge (`/tmp/opencursor-ipc.sock` / `\\.\pipe\opencursor-ipc`) for seamless communication between CLI and VS Code host
+- Standalone execution host fallback with headless `vscodeShim` when VS Code is not running
+- Private SearXNG search engine support (`searxng_url`) in WebSearch with automatic DuckDuckGo fallback
+- Workspace rules (`.cursor/rules/*.md`) and agent skills (`.cursor/skills/*.md`) integration
+- Automatic rate-limit retry parser for OpenRouter `X-RateLimit-Reset` response headers
+
 ## [0.1.0] - 2026-07-27
 
 ### Added

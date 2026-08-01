@@ -38,10 +38,38 @@ async function main() {
 		external: ['vscode', '@huggingface/transformers', '@huggingface/hub', 'onnxruntime-node', 'sharp'],
 		logLevel: 'silent',
 		plugins: [
-			/* add to the end of plugins array */
 			esbuildProblemMatcherPlugin,
 		],
 	});	
+
+	const vscodeShimPlugin = {
+		name: 'vscode-shim',
+		setup(build) {
+			build.onResolve({ filter: /^vscode$/ }, () => ({
+				path: require('path').resolve(__dirname, 'src/vscodeShim.ts'),
+			}));
+		},
+	};
+
+	// CLI binary bundle (node)
+	const cliCtx = await esbuild.context({
+		entryPoints: [
+			'src/cli/bin.ts'
+		],
+		bundle: true,
+		format: 'cjs',
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		platform: 'node',
+		outfile: 'dist/cli.js',
+		external: ['@huggingface/transformers', '@huggingface/hub', 'onnxruntime-node', 'sharp'],
+		logLevel: 'silent',
+		plugins: [
+			vscodeShimPlugin,
+			esbuildProblemMatcherPlugin,
+		],
+	});
 
 	// React webview bundles (browser)
 	const webviewCtx = await esbuild.context({
@@ -64,10 +92,11 @@ async function main() {
 	});
 
 	if (watch) {
-		await Promise.all([ctx.watch(), webviewCtx.watch()]);
+		await Promise.all([ctx.watch(), cliCtx.watch(), webviewCtx.watch()]);
 	} else {
-		await Promise.all([ctx.rebuild(), webviewCtx.rebuild()]);
+		await Promise.all([ctx.rebuild(), cliCtx.rebuild(), webviewCtx.rebuild()]);
 		await ctx.dispose();
+		await cliCtx.dispose();
 		await webviewCtx.dispose();
 	}
 }

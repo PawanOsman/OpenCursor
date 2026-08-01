@@ -7,11 +7,22 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-import * as vscode from "vscode";
 import * as path from "path";
 
+function getVscode() {
+	try {
+		return require("vscode");
+	} catch {
+		return undefined;
+	}
+}
+
 export function getWorkspaceRoot(): string {
-	const folders = vscode.workspace.workspaceFolders;
+	if (process.env.OPEN_CURSOR_WORKSPACE_ROOT) {
+		return path.resolve(process.env.OPEN_CURSOR_WORKSPACE_ROOT);
+	}
+	const vsc = getVscode();
+	const folders = vsc?.workspace?.workspaceFolders;
 	if (folders && folders.length > 0) {
 		return folders[0].uri.fsPath;
 	}
@@ -22,8 +33,10 @@ export function getWorkspaceRoot(): string {
 export function getRecentFiles(): string[] {
 	const root = getWorkspaceRoot();
 	const out: string[] = [];
-	for (const tab of vscode.window.tabGroups.all.flatMap((g) => g.tabs)) {
-		const input = tab.input as { uri?: vscode.Uri } | undefined;
+	const vsc = getVscode();
+	if (!vsc?.window?.tabGroups?.all) return out;
+	for (const tab of vsc.window.tabGroups.all.flatMap((g: any) => g.tabs)) {
+		const input = tab.input as { uri?: any } | undefined;
 		const uri = input?.uri;
 		if (uri && uri.scheme === "file" && uri.fsPath.startsWith(root)) {
 			const rel = path.relative(root, uri.fsPath).split(path.sep).join("/");
@@ -44,7 +57,12 @@ export function normalizePathInput(rel: string): string {
 	// file:///C:/foo%20bar or file://localhost/C:/...
 	if (/^file:\/\//i.test(s)) {
 		try {
-			s = decodeURIComponent(vscode.Uri.parse(s).fsPath);
+			const vsc = getVscode();
+			if (vsc?.Uri?.parse) {
+				s = decodeURIComponent(vsc.Uri.parse(s).fsPath);
+			} else {
+				throw new Error("no vscode uri");
+			}
 		} catch {
 			s = s.replace(/^file:\/\/\/?/i, "").replace(/\//g, path.sep);
 			try {

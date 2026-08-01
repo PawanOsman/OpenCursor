@@ -7,11 +7,18 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-import * as vscode from "vscode";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { spawn } from "child_process";
 import { getWorkspaceRoot } from "./workspaceUtils";
+
+function getVscode() {
+  try {
+    return require("vscode");
+  } catch {
+    return undefined;
+  }
+}
 
 const IGNORE = new Set([".git", "node_modules", "dist", "out", ".next", "build", ".cache", "coverage"]);
 
@@ -59,7 +66,9 @@ export async function getFileTree(): Promise<string> {
 export function getOpenFiles(): string[] {
   const root = getWorkspaceRoot();
   const out: string[] = [];
-  for (const editor of vscode.window.visibleTextEditors) {
+  const vsc = getVscode();
+  if (!vsc?.window?.visibleTextEditors) return out;
+  for (const editor of vsc.window.visibleTextEditors) {
     const fsPath = editor.document.uri.fsPath;
     if (fsPath.startsWith(root)) {
       out.push(path.relative(root, fsPath).split(path.sep).join("/"));
@@ -69,7 +78,8 @@ export function getOpenFiles(): string[] {
 }
 
 export function getActiveSelection(): string | undefined {
-  const editor = vscode.window.activeTextEditor;
+  const vsc = getVscode();
+  const editor = vsc?.window?.activeTextEditor;
   if (!editor || editor.selection.isEmpty) {
     return undefined;
   }

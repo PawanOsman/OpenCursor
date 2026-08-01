@@ -25,6 +25,10 @@ import { initModelRegistry, applyEmbedModel } from './stores/modelRegistry';
 import { initRuntimeDeps } from './runtimeDeps';
 import { initLog, logError } from './logging';
 
+import { IpcSocketServer } from './bridge/socketServer';
+
+let ipcServer: IpcSocketServer | undefined;
+
 export function activate(context: vscode.ExtensionContext) {
   const log = initLog(context);
   log.appendLine(`[${new Date().toISOString()}] OpenCursor activated`);
@@ -71,8 +75,21 @@ export function activate(context: vscode.ExtensionContext) {
       // hidden/collapsed or switched away, so reopening never resets to a blank chat.
       webviewOptions: { retainContextWhenHidden: true },
     })
-
   );
+
+  // Start IPC server for CLI bridge
+  try {
+    ipcServer = new IpcSocketServer({
+      onSubmitPrompt: (data) => sidebarProvider.postMessageToSession(data.prompt, data.mode, data.model),
+      onResolveApproval: (_reqId, _approve) => {},
+      onAnswerQuestion: (_callId, _answers) => {},
+      onCancelRun: () => {},
+    });
+    ipcServer.start();
+    context.subscriptions.push({ dispose: () => ipcServer?.stop() });
+  } catch (e) {
+    logError("startup.ipc-server", e);
+  }
 
   // Inline diff view for agent edits + changed-line decorations (no git needed).
   registerInlineReview(context);
@@ -95,4 +112,5 @@ export function activate(context: vscode.ExtensionContext) {
 export function deactivate() {
   mcpManager.disposeAll();
   disposeLlamacpp();
+  ipcServer?.stop();
 }

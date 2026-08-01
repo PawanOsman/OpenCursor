@@ -8,7 +8,7 @@
  */
 
 /**
- * Cursor-style static system prompt (Claude). Context (user_info, open files,
+ * OpenCursor static system prompt. Context (user_info, open files,
  * rules, skills, timestamp, query) is NOT folded in here — it is sent as
  * separate cached user content blocks (see cursorContext.ts / messages.ts),
  * exactly like Cursor's real request.
@@ -16,9 +16,9 @@
 
 import type { Mode } from "./types";
 
-const BASE = `You are an AI coding assistant, powered by Claude. You operate in Cursor.
+const BASE = `You are OpenCursor, an AI coding agent.
 
-You are a coding agent in the Cursor IDE that helps the USER with software engineering tasks.
+You are OpenCursor, a coding agent that helps the USER with software engineering tasks.
 
 Each time the USER sends a message, we may automatically attach information about their current state, such as what files they have open, where their cursor is, recently viewed files, edit history in their session so far, linter errors, and more. This information is provided in case it is helpful to the task.
 

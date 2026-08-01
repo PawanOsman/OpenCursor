@@ -7,7 +7,6 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-import * as vscode from "vscode";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { safePath, getWorkspaceRoot } from "../../context/workspaceUtils";
@@ -15,6 +14,14 @@ import { pendingChanges } from "../../stores/pendingChanges";
 import { defineTool, type Tool, type ToolResult, type ToolContext } from "./types";
 import { IGNORE, makeDiff, firstDiffLine } from "./shared";
 import { scanFilesCached, compileGlob, normalizeGlobPattern, scorePath } from "./fileScan";
+
+function getVscode() {
+	try {
+		return require("vscode");
+	} catch {
+		return undefined;
+	}
+}
 
 // Image extensions the Read tool returns as base64 blocks to the model.
 const IMAGE_MIME: Record<string, string> = {
@@ -693,8 +700,12 @@ export const editNotebookTool = defineTool("EditNotebook", true, async (input, _
 
 // ---- ReadLints ----
 export const readLintsTool = defineTool("ReadLints", false, async (input) => {
+	const vsc = getVscode();
+	if (!vsc?.languages?.getDiagnostics) {
+		return { output: "(diagnostics unavailable in standalone CLI mode)" };
+	}
 	const root = getWorkspaceRoot();
-	const all = vscode.languages.getDiagnostics();
+	const all = vsc.languages.getDiagnostics();
 
 	// Normalize each requested path (absolute OR workspace-relative) to a
 	// workspace-relative, forward-slashed prefix. A path equal to the workspace
@@ -725,13 +736,13 @@ export const readLintsTool = defineTool("ReadLints", false, async (input) => {
 
 	const out: string[] = [];
 	for (const [uri, diags] of all) {
-		const relRaw = path.relative(root, uri.fsPath).split(path.sep).join("/");
+		const relRaw = path.relative(root, (uri as any).fsPath).split(path.sep).join("/");
 		if (relRaw.startsWith("..")) continue; // outside workspace
 		const rel = norm(relRaw);
 		if (!allFiles && filtersN.length && !filtersN.some((f) => rel === f || rel.startsWith(f + "/"))) continue;
-		for (const d of diags) {
-			if (d.severity > vscode.DiagnosticSeverity.Warning) continue;
-			const sev = d.severity === vscode.DiagnosticSeverity.Error ? "error" : "warning";
+		for (const d of diags as any[]) {
+			if (d.severity > (vsc.DiagnosticSeverity?.Warning ?? 1)) continue;
+			const sev = d.severity === (vsc.DiagnosticSeverity?.Error ?? 0) ? "error" : "warning";
 			out.push(`${relRaw}:${d.range.start.line + 1}:${d.range.start.character + 1} ${sev}: ${d.message}`);
 		}
 	}
