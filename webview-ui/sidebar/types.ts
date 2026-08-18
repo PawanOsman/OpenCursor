@@ -57,7 +57,7 @@ export interface ModelOption {
   value: string;
 }
 
-export type ModelKind = "openai" | "anthropic" | "google" | "openrouter" | "ollama" | "llamacpp" | "claude-code" | "codex" | "antigravity";
+export type ModelKind = "openai" | "anthropic" | "google" | "openrouter" | "ollama" | "llamacpp" | "mimo" | "atlascloud" | "astraflow" | "claude-code" | "codex" | "antigravity";
 
 export interface ModelDef {
   id: string;

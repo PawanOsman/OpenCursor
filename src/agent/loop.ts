@@ -209,11 +209,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 	const { apiBaseUrl, apiKey, model, prompt, attachments, history: persistedHistory, maxTokens, maxSteps, autoContinue, contextTokens, sampling, modelParams, anthropic, oauthKind, systemPromptOverride, extraInstructions, enableFileReading, enableTerminalSuggestions, enableWorkspaceContext, approve, isSubagent, customSubagents, teams, activeTeamIds, subagentModel, availableModels, registerSubagentAbort, askUser, onAfterRun, onBeforeShell, onAfterEdit, onHook, signal, emit: rawEmit } = opts;
 	// Model history is disposable and may be compacted when the window fills.
 	// Persisted history remains lossless for chat display/export, including full
-	// tool output/thinking.
-	const history: Step[] = persistedHistory.map((s) => structuredClone(s));
+	// tool output/thinking. Shallow clone suffices: economizeHistory/stripThinking
+	// replaces entries via spread (never mutates originals), and new steps are
+	// pushed as fresh objects.
+	const history: Step[] = [...persistedHistory];
 	const pushHistory = (...steps: Step[]) => {
 		history.push(...steps);
-		persistedHistory.push(...steps.map((s) => structuredClone(s)));
+		persistedHistory.push(...steps);
 	};
 	const emit = coalesceEmit(rawEmit);
 	/** Loop-injected note. Marked synthetic so it never poses as the user's request. */
@@ -517,6 +519,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 		let planNudged = false;
 		// One-shot nudge when the model stops with unfinished todos.
 		let todoNudged = false;
+		// Anti-loop: count consecutive text-only turns (no tool calls). After
+		// CONSECUTIVE_TEXT_LIMIT in a row, the model is stuck in a resume loop —
+		// break out instead of nudging again.
+		let consecutiveTextTurns = 0;
+		const CONSECUTIVE_TEXT_LIMIT = 3;
+		// Hard cap on total nudge injections per run to prevent infinite re-nudge.
+		let nudgeCount = 0;
+		const MAX_NUDGES = 5;
 
 		// Feed already-finished (but unreported) background subagent results into the
 		// conversation, so the model always knows what has completed. Returns count.
@@ -631,9 +641,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 		};
 
 		const stepLimit = maxSteps && maxSteps > 0 ? maxSteps : MAX_STEPS;
+		// Hard cap: even with autoContinue, never exceed this absolute maximum
+		// to prevent infinite loops (e.g. stuck in nudge echo chamber).
+		const HARD_CAP = Math.max(stepLimit, MAX_STEPS) * 2;
 		let hitStepLimit = false;
 		for (let step = 0; ; step++) {
-			if (!autoContinue && step >= stepLimit) {
+			if (step >= HARD_CAP || (!autoContinue && step >= stepLimit)) {
 				hitStepLimit = true;
 				break;
 			}
@@ -791,11 +804,23 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 				pushHistory({ kind: "assistant", text: "", calls });
 			}
 
-			if (!calls.length) {
+		if (!calls.length) {
+				// Anti-loop: if the model keeps producing text-only turns (no tool
+				// calls), it's stuck in a "resume" echo chamber. Break after N
+				// consecutive text-only turns to prevent infinite nudge cycles.
+				consecutiveTextTurns++;
+				if (consecutiveTextTurns >= CONSECUTIVE_TEXT_LIMIT) {
+					finalText = assistantText;
+					break;
+				}
+				// Nudge budget: stop injecting system reminders after MAX_NUDGES
+				// total across the run to prevent infinite re-nudge loops.
+				const canNudge = nudgeCount < MAX_NUDGES;
 				// Plan mode must persist a plan file. If the model tries to end without
 				// calling write_plan, force it once.
-				if (mode === "plan" && !planWritten && !planNudged) {
+				if (canNudge && mode === "plan" && !planWritten && !planNudged) {
 					planNudged = true;
+					nudgeCount++;
 					pushSystemNote(
 						"You are in PLAN MODE and have not written the plan yet. Call the WritePlan tool now with a title and the complete Markdown plan. Do not respond with the plan as plain text — it must be saved via WritePlan.",
 					);
@@ -814,7 +839,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 				}
 				// Truncated response (hit max output tokens): the model didn't choose to
 				// stop — never treat this as a final answer. Ask it to continue.
-				if (isAgentic() && /length|max_tokens|max_output_tokens/i.test(finishReason)) {
+				if (canNudge && isAgentic() && /length|max_tokens|max_output_tokens/i.test(finishReason)) {
+					nudgeCount++;
 					pushSystemNote(
 						"Your previous response was cut off because it hit the output-token limit. Continue exactly where you left off; re-issue any tool call that was truncated.",
 					);
@@ -822,7 +848,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 				}
 				// Thinking-only turn (reasoned but produced no answer and no tool calls):
 				// the task isn't done — nudge it to act instead of silently stopping.
-				if (isAgentic() && !assistantText.trim() && thinking.trim()) {
+				if (canNudge && isAgentic() && !assistantText.trim() && thinking.trim()) {
+					nudgeCount++;
 					pushSystemNote(
 						"You produced only internal reasoning with no answer or tool calls. Continue working on the task now — make the necessary tool calls, or reply with your final answer if fully finished.",
 					);
@@ -831,17 +858,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 				const prev = history[history.length - 2];
 				// Empty turn right after a tool result → nudge for more work. If it
 				// produced any text, that's its final answer — stop.
-				if (isAgentic() && !assistantText.trim() && !thinking.trim() && prev && prev.kind === "tool-result") {
+				if (canNudge && isAgentic() && !assistantText.trim() && !thinking.trim() && prev && prev.kind === "tool-result") {
+					nudgeCount++;
 					pushSystemNote(
 						"If you need to make more tool calls to complete the task, please do so now. If you are fully finished, reply normally without calling any tools.",
 					);
 					continue;
 				}
 				// Unfinished todo list → one nudge to finish or explicitly wrap up.
-				if (isAgentic() && !isSubagent && !todoNudged) {
+				if (canNudge && isAgentic() && !isSubagent && !todoNudged) {
 					const open = toolCtx.todos.filter((t) => t.status === "pending" || t.status === "in_progress");
 					if (open.length) {
 						todoNudged = true;
+						nudgeCount++;
 						pushSystemNote(
 							`Your todo list still has ${open.length} unfinished item${open.length > 1 ? "s" : ""}: ${open.map((t) => `"${t.content}"`).join(", ")}. Continue working on them now. If they are actually done or no longer needed, update the todo list, then give your final answer.`,
 						);
@@ -850,6 +879,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 				}
 				finalText = assistantText;
 				break;
+			} else {
+				// Model called tools — reset text-only counter.
+				consecutiveTextTurns = 0;
 			}
 
 			const parsed = calls.map((call) => {

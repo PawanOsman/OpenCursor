@@ -82,6 +82,11 @@ async function doFetch(): Promise<AllModels> {
   const seen = new Set<string>();
 
   // All providers + OAuth in parallel (was sequential — multi-provider lag).
+  // Per-provider timeout prevents a slow/unresponsive provider from blocking startup.
+  const PROVIDER_TIMEOUT_MS = 8000;
+  const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+
   const [providerBatches, ...oauthBatches] = await Promise.all([
     Promise.all(
       enabled.map(async (p) => {
@@ -89,7 +94,7 @@ async function doFetch(): Promise<AllModels> {
         const anthropic = p.kind === "anthropic";
         if (!key && anthropic) return [] as { id: string; p: typeof p }[];
         try {
-          const fetched = await listModels(p.baseUrl, key, anthropic);
+          const fetched = await withTimeout(listModels(p.baseUrl, key, anthropic), PROVIDER_TIMEOUT_MS);
           return fetched.map((m) => ({ id: m.id, p }));
         } catch {
           return [] as { id: string; p: typeof p }[];
@@ -99,7 +104,7 @@ async function doFetch(): Promise<AllModels> {
     ...(["claude-code", "codex", "antigravity"] as oauth.OAuthKind[]).map(async (kind) => {
       if (!oauth.isConnected(kind)) return { kind, ids: [] as string[] };
       try {
-        return { kind, ids: await oauth.listOAuthModels(kind) };
+        return { kind, ids: await withTimeout(oauth.listOAuthModels(kind), PROVIDER_TIMEOUT_MS) };
       } catch {
         return { kind, ids: [] as string[] };
       }

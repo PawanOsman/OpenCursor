@@ -2048,9 +2048,9 @@ body {
 	flex: 0 0 auto;
 }
 .thinking-card .thinking-body {
-	padding: var(--sp-3) var(--sp-6) var(--sp-5);
+	padding: var(--sp-2) var(--sp-4) var(--sp-3);
 	font-size: var(--fs-sm);
-	line-height: var(--lh-normal);
+	line-height: 1.4;
 	color: var(--fg-faint);
 	white-space: pre-wrap;
 	border-top: 1px solid var(--line-soft);

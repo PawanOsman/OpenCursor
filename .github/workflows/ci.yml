@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm run check-types
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Unit tests (vitest)
+        run: pnpm run test:unit
+
+      - name: Build production
+        run: node esbuild.js --production
+
+      - name: Package extension
+        if: matrix.node-version == 22
+        run: npx @vscode/vsce package --no-dependencies
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for leaked secrets
+        run: |
+          # Ensure no .env files committed
+          if git ls-files | grep -E '\.(env|env\..*)$'; then
+            echo "ERROR: .env files found in repo!"
+            exit 1
+          fi
+          # Check no API keys in source
+          if grep -rE '(sk-|tp-|vbk_|Bearer [A-Za-z0-9]{20,})' src/ --include='*.ts' --include='*.tsx' 2>/dev/null; then
+            echo "ERROR: Potential API keys found in source code!"
+            exit 1
+          fi
+          echo "Security scan passed."

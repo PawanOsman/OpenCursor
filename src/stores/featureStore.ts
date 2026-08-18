@@ -50,7 +50,7 @@ export interface HookDef {
 	enabled: boolean;
 }
 
-export type ProviderKind = "openai" | "anthropic" | "google" | "openrouter" | "ollama" | "llamacpp";
+export type ProviderKind = "openai" | "anthropic" | "google" | "openrouter" | "ollama" | "llamacpp" | "mimo" | "atlascloud" | "astraflow";
 
 /** Where a model can be served from: API provider kinds + OAuth account kinds. */
 export type ModelKind = ProviderKind | "claude-code" | "codex" | "antigravity";
@@ -169,6 +169,9 @@ export const MODEL_CATALOG: ModelDef[] = [
 	{ id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", kind: "google", options: [effort("high", ["low", "medium", "high"]), ctx(["1m"], "1m")] },
 	{ id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", kind: "google", options: [effort("high", ["low", "medium", "high"]), ctx(["1m"], "1m")] },
 	{ id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", kind: "google", options: [effort("medium", ["none", "low", "medium", "high"]), ctx(["1m"], "1m")] },
+	// Xiaomi MIMO — OpenAI-compatible API. Reasoning models.
+	{ id: "mimo-v2.5-pro", name: "MIMO V2.5 Pro", kind: "mimo" },
+	{ id: "mimo-v2.5", name: "MIMO V2.5", kind: "mimo" },
 
 	// Models exposed by Google Antigravity accounts.
 	{ id: "gemini-3-flash-agent", name: "Gemini 3.5 Flash (High)", kind: "antigravity", enabled: true },
@@ -328,6 +331,9 @@ export const PROVIDER_PRESETS: Record<ProviderKind, { label: string; baseUrl: st
 	openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", needsKey: true },
 	ollama: { label: "Ollama", baseUrl: "http://localhost:11434/v1", needsKey: false },
 	llamacpp: { label: "llama.cpp", baseUrl: "http://localhost:8080/v1", needsKey: false },
+	mimo: { label: "Xiaomi MIMO", baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1", needsKey: true },
+	atlascloud: { label: "Atlas Cloud", baseUrl: "https://api.atlascloud.ai/v1", needsKey: true },
+	astraflow: { label: "Astraflow", baseUrl: "https://api-us-ca.umodelverse.ai/v1", needsKey: true },
 };
 
 const KEY = "ocursor.features";

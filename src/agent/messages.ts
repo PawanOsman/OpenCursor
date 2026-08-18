@@ -33,8 +33,8 @@ export function fitStepsToBudget(steps: Step[], overheadTokens: number, budgetTo
   const budget = budgetTokens - overheadTokens;
   if (budget <= 0) return steps;
 
-  // Clone so we do not mutate the live history; strip UI-only thinking only.
-  const work = steps.map((s) => structuredClone(s));
+  // Shallow clone suffices: stripThinking replaces entries via spread (never mutates originals).
+  const work = [...steps];
   economizeHistoryHard(work);
 
   const liveIdx = lastRealUserIndex(work);

@@ -83,7 +83,7 @@ export interface Persona {
   builtin?: boolean;
 }
 
-export type ProviderKind = "openai" | "anthropic" | "google" | "openrouter" | "ollama" | "llamacpp";
+export type ProviderKind = "openai" | "anthropic" | "google" | "openrouter" | "ollama" | "llamacpp" | "mimo" | "atlascloud" | "astraflow";
 
 export interface ProviderConfig {
   id: string;
@@ -103,6 +103,9 @@ export const PROVIDER_PRESETS: Record<ProviderKind, { label: string; baseUrl: st
   openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", needsKey: true },
   ollama: { label: "Ollama", baseUrl: "http://localhost:11434/v1", needsKey: false },
   llamacpp: { label: "llama.cpp", baseUrl: "http://localhost:8080/v1", needsKey: false },
+  mimo: { label: "Xiaomi MIMO", baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1", needsKey: true },
+  atlascloud: { label: "Atlas Cloud", baseUrl: "https://api.atlascloud.ai/v1", needsKey: true },
+  astraflow: { label: "Astraflow", baseUrl: "https://api-us-ca.umodelverse.ai/v1", needsKey: true },
 };
 
 /** Built-in "popular" providers shown as connect-by-key cards. */
