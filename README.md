@@ -79,6 +79,8 @@ Press `F5` in VS Code to launch the Extension Development Host. Build a package 
 
 Issues and PRs welcome — see [issues](https://github.com/PawanOsman/OpenCursor/issues).
 
+Optional phone spectator: [docs/gbr.md](docs/gbr.md) (Build Remote Agent, `gbr/1`).
+
 ## License
 
 [MIT](LICENSE)
