@@ -27,6 +27,16 @@ describe("built-in WebSearch provider routing", () => {
   it("distinguishes empty success from failure", async () => {
     setWebSearchProvider("parallel"); bridge.callTool.mockResolvedValue(JSON.stringify({ results: [] })); expect((await webSearchTool.execute({ search_term: "example" })).output).toContain("No results found");
   });
+  it("preserves structured warning messages and details", async () => {
+    setWebSearchProvider("parallel");
+    const warning = { type: "query_shortened", message: "Query shortened", detail: "Only the first 200 characters were searched" };
+    bridge.callTool.mockResolvedValue(JSON.stringify({ results: [], warnings: [warning] }));
+    const result = await webSearchTool.execute({ search_term: "example" });
+    expect(result.output).toContain(warning.message);
+    expect(result.output).toContain(warning.detail);
+    expect(result.output).toContain(warning.type);
+    expect(result.output).not.toContain("[object Object]");
+  });
   it("cancels bridge initialization", async () => {
     setWebSearchProvider("parallel"); const abort = new AbortController(); bridge.connect.mockImplementationOnce(async () => { abort.abort(); });
     expect((await webSearchTool.execute({ search_term: "example" }, abort.signal)).output).toContain("aborted"); expect(bridge.callTool).not.toHaveBeenCalled(); expect(bridge.dispose).toHaveBeenCalled();
