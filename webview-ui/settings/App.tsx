@@ -1030,6 +1030,12 @@ export function App() {
                 <Row title="Web Search Tool" desc="Allow the agent to search the web for relevant information.">
                   <Toggle checked={features.webSearchEnabled !== false} onChange={(v) => setFeatures({ webSearchEnabled: v })} />
                 </Row>
+                <Row title="Web Search Provider" desc="DuckDuckGo is the default. Parallel needs Node.js and no API key; queries and search context go to Parallel when selected. Free access is rate limited.">
+                  <select value={features.webSearchProvider ?? "duckduckgo"} onChange={(e) => setFeatures({ webSearchProvider: e.target.value as "duckduckgo" | "parallel" })}>
+                    <option value="duckduckgo">DuckDuckGo</option>
+                    <option value="parallel">Parallel (free, no key)</option>
+                  </select>
+                </Row>
                 <Row title="Web Fetch Tool" desc="Allow the agent to fetch content from URLs.">
                   <Toggle checked={features.webFetchEnabled !== false} onChange={(v) => setFeatures({ webFetchEnabled: v })} />
                 </Row>

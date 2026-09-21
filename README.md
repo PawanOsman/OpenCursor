@@ -64,6 +64,12 @@ Ask questions in plain language — *"where do we refresh the auth token?"* — 
 
 > Native runtime dependencies (ONNX runtime, image processing) are downloaded once on first activation with integrity checks — they're too heavy to ship in the VSIX.
 
+## Web search
+
+DuckDuckGo remains the default. To use Parallel, open OpenCursor Settings > Agents > Context and select **Parallel (free, no key)** as the Web Search Provider.
+
+Parallel uses the [free Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp) through a stdio bridge. It needs Node.js (with `npx`) on your PATH, internet access, and no Parallel account or API key. The first search downloads the bridge. Free access is rate limited. When selected, search queries go to `https://search.parallel.ai/mcp`; the agent may search under your existing web approval settings. Web Fetch keeps its existing behavior. Switching back to DuckDuckGo restores the original search path.
+
 ## Building from source
 
 ```bash

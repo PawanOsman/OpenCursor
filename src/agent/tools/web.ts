@@ -8,6 +8,15 @@
  */
 
 import { defineTool } from "./types";
+import { parallelSearch } from "../../integrations/parallelSearch";
+
+let extensionVersion: string | undefined;
+let webSearchProvider: "duckduckgo" | "parallel" = "duckduckgo";
+
+export function setWebSearchProvider(provider: "duckduckgo" | "parallel" | undefined, version?: string): void {
+  webSearchProvider = provider ?? "duckduckgo";
+  extensionVersion = version;
+}
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
@@ -110,6 +119,7 @@ export const webSearchTool = defineTool("WebSearch", false, async (input, abortS
   const LIMIT = 10;
 
   try {
+    if (webSearchProvider === "parallel") return { output: await parallelSearch(term, abortSignal, extensionVersion) };
     let hits = await ddgSearch(term, "https://html.duckduckgo.com/html/", abortSignal, LIMIT);
     if (hits.length === 0) {
       // Fallback engine/endpoint.

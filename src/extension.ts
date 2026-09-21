@@ -15,6 +15,7 @@ import { registerGitSync } from './integrations/gitSync';
 import { SettingsPanel } from './ui/settingsPanel';
 import { FeatureStore } from './stores/featureStore';
 import { setToolTimeoutOverrides } from './agent/tools/shared';
+import { setWebSearchProvider } from './agent/tools/web';
 import { mcpManager } from './integrations/mcpClient';
 import { setIndexStorageDir } from './agent/semanticIndex';
 import { setDocsStorageDir, setDocSourcesProvider } from './agent/docsIndex';
@@ -36,7 +37,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   const settingsManager = new SettingsManager(context);
   const featureStore = new FeatureStore(context);
-  const syncToolTimeouts = () => setToolTimeoutOverrides(featureStore.get().toolTimeoutsSec);
+  const syncToolTimeouts = () => {
+    setToolTimeoutOverrides(featureStore.get().toolTimeoutsSec);
+    setWebSearchProvider(featureStore.get().webSearchProvider, context.extension.packageJSON.version);
+  };
   syncToolTimeouts();
   context.subscriptions.push(featureStore.onDidChange(syncToolTimeouts));
   initOAuth(context);

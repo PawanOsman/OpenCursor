@@ -276,6 +276,8 @@ export interface FeatureConfig {
 	completionSound: boolean;
 	/** Allow the agent to use the WebSearch tool. */
 	webSearchEnabled: boolean;
+	/** Backend used by the built-in WebSearch tool. */
+	webSearchProvider: "duckduckgo" | "parallel";
 	/** Allow the agent to use the WebFetch tool. */
 	webFetchEnabled: boolean;
 	/** Per-action-type approval policy (shell/edits/delete/mcp/web). */
@@ -326,6 +328,7 @@ const DEFAULTS: FeatureConfig = {
 	autoContinue: false,
 	completionSound: false,
 	webSearchEnabled: true,
+	webSearchProvider: "duckduckgo",
 	webFetchEnabled: true,
 	approvalPolicy: DEFAULT_APPROVAL,
 	docSources: [],

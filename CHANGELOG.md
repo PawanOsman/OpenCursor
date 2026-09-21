@@ -4,6 +4,12 @@ All notable changes to the "ocursor" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [Unreleased]
+
+### Added
+
+- Optional Parallel provider for WebSearch in Settings > Agents > Context, using free Search MCP without an API key; DuckDuckGo remains the default
+
 ## [0.1.4] - 2026-09-11
 
 ### Added
