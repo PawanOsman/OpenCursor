@@ -141,3 +141,15 @@ describe("current flagship catalog boundaries", () => {
     expect(store.defFor("gemini-3.1-pro-preview", "google")).toBeDefined();
   });
 });
+
+describe("web search provider settings", () => {
+  it("keeps existing installs on DuckDuckGo and persists an explicit Parallel choice", async () => {
+    const store = storeWith({});
+    expect(store.get().webSearchProvider).toBe("duckduckgo");
+    await store.set({ webSearchProvider: "parallel" });
+    expect(store.get().webSearchProvider).toBe("parallel");
+    await store.set({ webSearchEnabled: false });
+    expect(store.get().webSearchProvider).toBe("parallel");
+    expect(store.get().webSearchEnabled).toBe(false);
+  });
+});

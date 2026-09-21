@@ -285,6 +285,8 @@ export interface FeatureConfig {
   autoContinue: boolean;
   completionSound: boolean;
   webSearchEnabled: boolean;
+	/** Backend used by the built-in WebSearch tool. */
+	webSearchProvider: "duckduckgo" | "parallel";
   webFetchEnabled: boolean;
   approvalPolicy: ApprovalPolicy;
   indexingEnabled: boolean;
@@ -379,6 +381,7 @@ export const EMPTY_FEATURES: FeatureConfig = {
   autoContinue: false,
   completionSound: false,
   webSearchEnabled: true,
+	webSearchProvider: "duckduckgo",
   webFetchEnabled: true,
   approvalPolicy: DEFAULT_APPROVAL,
   indexingEnabled: true,
