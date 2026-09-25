@@ -8,9 +8,11 @@
  */
 
 import * as React from "react";
+import { SettingsDialog } from "./SettingsDialog";
 import { Icon } from "../../shared/icons";
 import { ModelSelect } from "../../shared/ModelSelect";
 import { FeatureConfig, ModelDef, SubagentDef, TeamDef, uid } from "../features";
+import { BUILTIN_TEAM_SUBAGENTS, isBuiltinTeamSubagent } from "../../../src/agent/teams";
 
 export function SubagentsPanel({
   features,
@@ -36,33 +38,27 @@ export function SubagentsPanel({
   const [confirm, setConfirm] = React.useState<{ kind: "subagent" | "team"; id: string; name: string } | null>(null);
 
   const saveSub = (value: SubagentDef) => {
-    // Built-in presets always come from source — saving an edited builtin clones it.
-    if (value.builtin) {
-      const taken = new Set(subagents.map((s) => s.name.toLowerCase()));
-      let name = value.name.trim();
-      if (taken.has(name.toLowerCase())) {
-        name = /(?:-custom| \(copy\))$/i.test(name) ? `${name}-2` : `${name}-custom`;
-      }
-      const clone: SubagentDef = { ...value, id: uid("sub"), name, builtin: false };
-      setFeatures({ subagents: [...subagents.filter((s) => !s.builtin), clone] });
-      setSubDraft(null);
-      return;
-    }
-    const customs = subagents.filter((s) => !s.builtin);
-    const exists = customs.some((s) => s.id === value.id);
+    const saved = { ...value, builtin: isBuiltinTeamSubagent(value.id) };
+    const exists = subagents.some((s) => s.id === value.id);
     setFeatures({
       subagents: exists
-        ? subagents.map((s) => (s.id === value.id ? { ...value, builtin: false } : s))
-        : [...customs, { ...value, builtin: false }],
+        ? subagents.map((s) => (s.id === value.id ? saved : s))
+        : [...subagents, saved],
     });
     setSubDraft(null);
   };
-  const deleteSub = (id: string) =>
+  const resetSub = (id: string) => {
+    const preset = BUILTIN_TEAM_SUBAGENTS.find(sub => sub.id === id);
+    if (preset) setFeatures({ subagents: subagents.map(sub => sub.id === id ? { ...preset } : sub) });
+  };
+  const deleteSub = (id: string) => {
+    if (isBuiltinTeamSubagent(id)) return;
     setFeatures({
       subagents: subagents.filter((s) => s.id !== id),
       // Keep teams consistent: a removed member can't stay on a roster.
       teams: teams.map((t) => (t.subagentIds.includes(id) ? { ...t, subagentIds: t.subagentIds.filter((x) => x !== id) } : t)),
     });
+  };
 
   const saveTeam = (value: TeamDef) => {
     if (value.builtin) {
@@ -125,6 +121,7 @@ export function SubagentsPanel({
           <button className="btn-secondary" onClick={() => setSubDraft({ value: { id: uid("sub"), name: "", description: "", prompt: "", readonly: true }, isNew: true })}>New Subagent</button>
         </div>
       ) : (
+        <div className="cfg-table-scroll" role="region" aria-label="Subagents" tabIndex={0}>
         <table className="cfg-table">
           <thead>
             <tr>
@@ -148,9 +145,12 @@ export function SubagentsPanel({
                 </td>
                 <td className="c-model" title={sub.model || "Inherits the subagent / chat model"}>{sub.model || "inherit"}</td>
                 <td className="c-actions">
-                  <button className="btn-ghost sm" onClick={() => setSubDraft({ value: sub, isNew: false })} title={sub.builtin ? "View / clone preset" : "Edit"}>
-                    {sub.builtin ? "View" : "Edit"}
+                  <button className="btn-ghost sm" onClick={() => setSubDraft({ value: sub, isNew: false })} title="Edit subagent">
+                    Edit
                   </button>
+                  {sub.builtin && <button className="icon-btn" title="Reset subagent to defaults" aria-label={`Reset ${sub.name} to defaults`} onClick={() => resetSub(sub.id)}>
+                    <Icon name="reset" size={13} />
+                  </button>}
                   {!sub.builtin && (
                     <button className="icon-btn" title="Delete subagent" onClick={() => setConfirm({ kind: "subagent", id: sub.id, name: sub.name })}>
                       <Icon name="trash" size={13} />
@@ -161,6 +161,7 @@ export function SubagentsPanel({
             ))}
           </tbody>
         </table>
+        </div>
       )}
 
       <div className="rss-section-head" style={{ marginTop: 28 }}>
@@ -177,6 +178,7 @@ export function SubagentsPanel({
           <button className="btn-secondary" onClick={() => setTeamDraft({ value: { id: uid("team"), name: "", description: "", subagentIds: [] }, isNew: true })}>New Team</button>
         </div>
       ) : (
+        <div className="cfg-table-scroll" role="region" aria-label="Teams" tabIndex={0}>
         <table className="cfg-table">
           <thead>
             <tr>
@@ -225,6 +227,7 @@ export function SubagentsPanel({
             })}
           </tbody>
         </table>
+        </div>
       )}
 
       {subDraft && (
@@ -304,18 +307,11 @@ function SubagentModal({
           : "";
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal modal-lg" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h2>{isNew ? "New Subagent" : subagent.builtin ? "Built-in Subagent" : "Edit Subagent"}</h2>
-          <button className="icon-btn close" onClick={onClose} title="Close">
-            <Icon name="close" size={16} />
-          </button>
-        </div>
+    <SettingsDialog title={isNew ? "New Subagent" : subagent.builtin ? "Built-in Subagent" : "Edit Subagent"} onClose={onClose} className="modal-lg">
         <div className="modal-body">
           <label className="fc-field">
             <span>Name</span>
-            <input value={draft.name} onChange={(e) => set({ name: e.target.value })} placeholder="Backend Developer" autoFocus />
+            <input value={draft.name} onChange={(e) => set({ name: e.target.value })} placeholder="Backend Developer" data-dialog-autofocus />
             <span className="fc-help">Display name used as <code>subagent_type</code> when the agent delegates (e.g. Backend Developer).</span>
           </label>
           <label className="fc-field">
@@ -351,18 +347,17 @@ function SubagentModal({
             <span className="fc-help">Replaces the persona for this subagent's run. Leave empty to inherit the chat's system prompt.</span>
           </label>
           {subagent.builtin && (
-            <div className="row-desc">This is a shipped preset. Saving creates a custom copy; the original stays available for Project mode teams.</div>
+            <div className="row-desc">Changes apply to this built-in subagent and its teams. You can reset it to the shipped defaults; it cannot be deleted.</div>
           )}
           {error && <div className="fc-error">{error}</div>}
         </div>
         <div className="modal-foot">
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
           <button className="btn-primary" disabled={!!error} onClick={() => onSave({ ...draft, name, description: draft.description.trim() })}>
-            {isNew ? "Create Subagent" : subagent.builtin ? "Clone as Custom" : "Save Changes"}
+            {isNew ? "Create Subagent" : "Save Changes"}
           </button>
         </div>
-      </div>
-    </div>
+    </SettingsDialog>
   );
 }
 
@@ -388,18 +383,11 @@ function TeamModal({
   const error = !name ? "A name is required." : draft.subagentIds.length === 0 ? "Select at least one member." : "";
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal modal-lg" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h2>{isNew ? "New Team" : team.builtin ? "Built-in Team" : "Edit Team"}</h2>
-          <button className="icon-btn close" onClick={onClose} title="Close">
-            <Icon name="close" size={16} />
-          </button>
-        </div>
+    <SettingsDialog title={isNew ? "New Team" : team.builtin ? "Built-in Team" : "Edit Team"} onClose={onClose} className="modal-lg">
         <div className="modal-body">
           <label className="fc-field">
             <span>Name</span>
-            <input value={draft.name} onChange={(e) => set({ name: e.target.value })} placeholder="Feature Squad" autoFocus />
+            <input value={draft.name} onChange={(e) => set({ name: e.target.value })} placeholder="Feature Squad" data-dialog-autofocus />
           </label>
           <label className="fc-field">
             <span>Description</span>
@@ -440,8 +428,7 @@ function TeamModal({
             {isNew ? "Create Team" : team.builtin ? "Clone as Custom" : "Save Changes"}
           </button>
         </div>
-      </div>
-    </div>
+    </SettingsDialog>
   );
 }
 
@@ -460,14 +447,7 @@ function ConfirmDeleteModal({
   onConfirm: () => void;
 }) {
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h2>Delete {kind}</h2>
-          <button className="icon-btn close" onClick={onClose} title="Close">
-            <Icon name="close" size={16} />
-          </button>
-        </div>
+    <SettingsDialog title={`Delete ${kind}`} onClose={onClose} className="modal-sm">
         <div className="modal-body">
           <p className="confirm-text">
             Delete the {kind} <b>{name || "(unnamed)"}</b>? This cannot be undone.
@@ -478,7 +458,6 @@ function ConfirmDeleteModal({
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
           <button className="btn-danger" onClick={onConfirm}>Delete</button>
         </div>
-      </div>
-    </div>
+    </SettingsDialog>
   );
 }

@@ -16,6 +16,8 @@ import type { ToolOutcome } from "../agent/toolOutcome";
 export type Mode = "agent" | "ask" | "plan" | "multitask" | "project" | "debug";
 
 export type AgentEvent =
+  | { type: "user-steering"; text: string; requestId?: string }
+  | { type: "verification"; summary: import("../agent/verification").VerificationSnapshot }
   | { type: "text-delta"; text: string }
   | { type: "thinking-delta"; text: string }
   | { type: "tool-call-started"; callId: string; name: string; input: any; timeoutMs?: number; startedAt?: number }
@@ -103,11 +105,14 @@ export interface MaxStepsBlock {
   /** Set once the user continued (hides the button). */
   resumed?: boolean;
 }
-export type AssistantBlock = TextBlock | ThinkingBlock | ToolBlock | ErrorBlock | CompactionBlock | MaxStepsBlock;
+export interface VerificationBlock { kind: "verification"; summary: import("../agent/verification").VerificationSnapshot }
+export type AssistantBlock = TextBlock | ThinkingBlock | ToolBlock | ErrorBlock | CompactionBlock | MaxStepsBlock | VerificationBlock;
 
 export interface UserTurn {
   role: "user";
   text: string;
+  /** Guidance consumed inside the current run rather than a new run boundary. */
+  steering?: true;
   attachments?: Attachment[];
   /** Model id this message was sent with (shown on the bubble). */
   model?: string;
@@ -164,6 +169,13 @@ export function renderMentionTokens(text: string, target: "display" | "html" = "
 export interface AssistantTurn {
   role: "assistant";
   blocks: AssistantBlock[];
+  /** Wall-clock boundaries of this assistant segment, in epoch milliseconds. */
+  startedAt?: number;
+  endedAt?: number;
+  /** Elapsed time retained once this segment settles. */
+  durationMs?: number;
+  /** The concluding reply identified by the agent after its work finishes. */
+  finalText?: string;
 }
 export type Turn = UserTurn | AssistantTurn;
 
@@ -288,31 +300,95 @@ export function applyToBlocks(blocksIn: AssistantBlock[], ev: AgentEvent): Assis
   return blocks;
 }
 
-/**
- * Index of the tool block with `callId` in the trailing assistant turn, or -1.
- * Searched from the end because streaming always targets the newest call.
- */
-function lastIndexOfTool(turns: Turn[], callId: string): number {
-  const last = turns[turns.length - 1];
-  if (!last || last.role !== "assistant") return -1;
-  for (let i = last.blocks.length - 1; i >= 0; i--) {
-    const b = last.blocks[i];
-    if (b.kind === "tool" && b.callId === callId) return i;
+interface ToolLocation {
+  turnIndex: number;
+  blockIndex: number;
+  block: ToolBlock;
+}
+
+/** Usually the newest tool; background work can belong to a turn before steering. */
+function findTool(turns: Turn[], callId: string): ToolLocation | undefined {
+  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex--) {
+    const turn = turns[turnIndex];
+    if (turn.role === "user") {
+      if (!turn.steering) break;
+      continue;
+    }
+    for (let blockIndex = turn.blocks.length - 1; blockIndex >= 0; blockIndex--) {
+      const block = turn.blocks[blockIndex];
+      if (block.kind === "tool" && block.callId === callId) return { turnIndex, blockIndex, block };
+    }
   }
-  return -1;
+  return undefined;
+}
+
+/** Copy only the owning turn and block so newer turns and memoized cards stay intact. */
+function updateTool(turns: Turn[], location: ToolLocation, block: ToolBlock): Turn[] {
+  const list = [...turns];
+  const turn = turns[location.turnIndex] as AssistantTurn;
+  const blocks = [...turn.blocks];
+  blocks[location.blockIndex] = block;
+  list[location.turnIndex] = { ...turn, blocks };
+  return list;
+}
+
+function settleTurn(turn: AssistantTurn, endedAt = Date.now()): AssistantTurn {
+  if (turn.startedAt == null || turn.endedAt != null) return turn;
+  const end = Math.max(turn.startedAt, endedAt);
+  return { ...turn, endedAt: end, durationMs: end - turn.startedAt };
+}
+
+function settleTrailingTurn(turns: Turn[]): Turn[] {
+  const last = turns[turns.length - 1];
+  if (last?.role !== "assistant") return turns;
+  const settled = settleTurn(last);
+  return settled === last ? turns : [...turns.slice(0, -1), settled];
 }
 
 // Apply a streaming agent event to the turns array (immutably).
 export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
+  if (ev.type === "user-steering") return [...settleTrailingTurn(closeTrailingThinking(turns)), { role: "user", text: ev.text, steering: true }];
   const ensureAssistant = (list: Turn[]): { list: Turn[]; turn: AssistantTurn } => {
     const last = list[list.length - 1];
     if (last && last.role === "assistant") {
-      const cloned: AssistantTurn = { role: "assistant", blocks: [...last.blocks] };
+      const cloned: AssistantTurn = { ...last, blocks: [...last.blocks] };
       return { list: [...list.slice(0, -1), cloned], turn: cloned };
     }
-    const turn: AssistantTurn = { role: "assistant", blocks: [] };
+    const turn: AssistantTurn = { role: "assistant", blocks: [], startedAt: Date.now() };
     return { list: [...list, turn], turn };
   };
+
+  if (ev.type === "run-status") {
+    if (ev.status !== "running") return settleTrailingTurn(closeTrailingThinking(turns));
+    const last = turns[turns.length - 1];
+    if (last?.role === "assistant" && last.startedAt != null && last.endedAt == null) return turns;
+    if (last?.role === "assistant" && last.endedAt != null) {
+      return [...turns, { role: "assistant", blocks: [], startedAt: Date.now() }];
+    }
+    const { list, turn } = ensureAssistant(turns);
+    turn.startedAt ??= Date.now();
+    return list;
+  }
+
+  if (ev.type === "run-result") {
+    const last = turns[turns.length - 1];
+    if (last?.role !== "assistant") return turns;
+    const turn = settleTurn(last);
+    // A result duration covers the whole run. Steering produces independent
+    // assistant segments, so never attribute that total to its final segment.
+    const preceding = turns[turns.length - 2];
+    const duration = preceding?.role === "user" && preceding.steering
+      ? turn.durationMs
+      : Number.isFinite(ev.durationMs) && ev.durationMs >= 0
+        ? Math.max(turn.durationMs ?? 0, ev.durationMs)
+        : turn.durationMs;
+    const endedAt = turn.endedAt ?? Date.now();
+    return [...turns.slice(0, -1), {
+      ...turn,
+      ...(duration == null ? {} : { startedAt: endedAt - duration, endedAt, durationMs: duration }),
+      finalText: ev.text,
+    }];
+  }
 
   const dropRetryNote = (turn: AssistantTurn) => {
     const last = turn.blocks[turn.blocks.length - 1];
@@ -323,6 +399,16 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
     const last = turn.blocks[turn.blocks.length - 1];
     if (last && last.kind === "thinking" && !last.endedAt) turn.blocks[turn.blocks.length - 1] = { ...last, endedAt: Date.now() };
   };
+
+  if (ev.type === "verification") {
+    const { list, turn } = ensureAssistant(turns);
+    closeThinking(turn);
+    const existing = turn.blocks.findIndex((block) => block.kind === "verification");
+    const block: VerificationBlock = { kind: "verification", summary: structuredClone(ev.summary) };
+    if (existing >= 0) turn.blocks[existing] = block;
+    else turn.blocks.push(block);
+    return list;
+  }
 
   if (ev.type === "text-delta") {
     const { list, turn } = ensureAssistant(turns);
@@ -350,69 +436,63 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
   }
 
   if (ev.type === "tool-call-started") {
-    const { list, turn } = ensureAssistant(turns);
-    closeThinking(turn);
-    const existing = turn.blocks.findIndex((b) => b.kind === "tool" && b.callId === ev.callId);
+    const existing = findTool(turns, ev.callId);
     const timeoutMs = ev.timeoutMs && ev.timeoutMs > 0 ? ev.timeoutMs : undefined;
     // startedAt only when provided (execute time). Stream preview may omit it.
     const startedAt = ev.startedAt;
-    if (existing >= 0) {
-      const prev = turn.blocks[existing] as ToolBlock;
+    if (existing) {
+      const prev = existing.block;
       // Never reopen a settled tool (timeout/cancel may race a late start).
-      if (prev.status !== "running") return list;
-      turn.blocks[existing] = {
+      if (prev.status !== "running") return turns;
+      return updateTool(turns, existing, {
         ...prev,
         name: ev.name,
         input: mergeToolInput(prev.input, ev.input),
         status: "running",
         timeoutMs: timeoutMs ?? prev.timeoutMs,
         startedAt: startedAt ?? prev.startedAt,
-      } as AssistantBlock;
-    } else {
-      turn.blocks.push({
-        kind: "tool",
-        callId: ev.callId,
-        name: ev.name,
-        input: ev.input,
-        status: "running",
-        timeoutMs,
-        startedAt,
       });
     }
+    const { list, turn } = ensureAssistant(turns);
+    closeThinking(turn);
+    turn.blocks.push({
+      kind: "tool",
+      callId: ev.callId,
+      name: ev.name,
+      input: ev.input,
+      status: "running",
+      timeoutMs,
+      startedAt,
+    });
     return list;
   }
 
   if (ev.type === "tool-call-args") {
     // Index lookup + single splice: map() would allocate a new object for every
     // block on every args frame, defeating memoized tool cards downstream.
-    const i = lastIndexOfTool(turns, ev.callId);
-    if (i < 0) return turns;
-    const { list, turn } = ensureAssistant(turns);
-    const b = turn.blocks[i] as ToolBlock;
+    const location = findTool(turns, ev.callId);
+    if (!location) return turns;
+    const b = location.block;
     const input = parsePartialArgs(ev.argsText, b.input);
     if (input === b.input) return turns;
-    turn.blocks[i] = { ...b, input };
-    return list;
+    return updateTool(turns, location, { ...b, input });
   }
 
   if (ev.type === "tool-call-progress") {
-    const i = lastIndexOfTool(turns, ev.callId);
-    if (i < 0) return turns;
-    const prev = (turns[turns.length - 1] as AssistantTurn).blocks[i] as ToolBlock;
+    const location = findTool(turns, ev.callId);
+    if (!location) return turns;
+    const prev = location.block;
     // Never overwrite a settled result with a late progress frame.
     if (prev.status !== "running" || prev.result === ev.text) return turns;
-    const { list, turn } = ensureAssistant(turns);
-    turn.blocks[i] = { ...prev, result: ev.text };
-    return list;
+    return updateTool(turns, location, { ...prev, result: ev.text });
   }
 
   if (ev.type === "tool-call-completed") {
-    const i = lastIndexOfTool(turns, ev.callId);
-    if (i < 0) return turns;
-    const { list, turn } = ensureAssistant(turns);
-    const b = turn.blocks[i] as ToolBlock;
+    const location = findTool(turns, ev.callId);
+    if (!location) return turns;
+    const b = location.block;
     // Never reopen a settled tool if a late/duplicate completion races in.
-    turn.blocks[i] =
+    return updateTool(turns, location,
       b.status !== "running" && b.status === ev.status
         ? {
             ...b,
@@ -430,8 +510,7 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
             startLine: ev.startLine,
             endLine: ev.endLine,
             outcome: ev.outcome ?? b.outcome,
-          };
-    return list;
+          });
   }
 
   if (ev.type === "retry") {
@@ -469,24 +548,23 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
   }
 
   if (ev.type === "subagent-event") {
-    const i = lastIndexOfTool(turns, ev.callId);
-    if (i < 0) return turns;
+    const location = findTool(turns, ev.callId);
+    if (!location) return turns;
     const child = ev.event;
     if (child.type === "run-result") return turns; // summary lands in tool result
-    const { list, turn } = ensureAssistant(turns);
-    const b = turn.blocks[i] as ToolBlock;
-    turn.blocks[i] =
+    const b = location.block;
+    if (child.type === "run-status" && child.status === "running" && b.subStatus && b.subStatus !== "running") return turns;
+    return updateTool(turns, location,
       child.type === "run-status"
         ? { ...b, subStatus: child.status }
-        : { ...b, subBlocks: applyToBlocks(b.subBlocks ?? [], child) };
-    return list;
+        : { ...b, subBlocks: applyToBlocks(b.subBlocks ?? [], child) });
   }
 
   return turns;
 }
 
 /** Mark every still-open tool / subagent / thinking block as cancelled or closed. */
-export function forceSettleOpenWork(turns: Turn[], reason: "cancelled" | "error" = "cancelled"): Turn[] {
+export function forceSettleOpenWork(turns: Turn[], reason: "cancelled" | "error" = "cancelled", endedAt = Date.now()): Turn[] {
   const msg = reason === "error" ? "(error)" : "(cancelled)";
   const subSt = reason === "error" ? "error" : "cancelled";
   return turns.map((turn) => {
@@ -495,7 +573,7 @@ export function forceSettleOpenWork(turns: Turn[], reason: "cancelled" | "error"
     const blocks = turn.blocks.map((b) => {
       if (b.kind === "thinking" && !b.endedAt) {
         changed = true;
-        return { ...b, endedAt: Date.now() };
+        return { ...b, endedAt };
       }
       if (b.kind === "tool") {
         let next: ToolBlock = b;
@@ -512,7 +590,7 @@ export function forceSettleOpenWork(turns: Turn[], reason: "cancelled" | "error"
           next = { ...next, subStatus: subSt as ToolBlock["subStatus"] };
         }
         if (next.subBlocks?.length) {
-          const nested = forceSettleOpenWork([{ role: "assistant", blocks: next.subBlocks }], reason)[0] as AssistantTurn;
+          const nested = forceSettleOpenWork([{ role: "assistant", blocks: next.subBlocks }], reason, endedAt)[0] as AssistantTurn;
           if (nested.blocks !== next.subBlocks) {
             changed = true;
             next = { ...next, subBlocks: nested.blocks };
@@ -526,7 +604,7 @@ export function forceSettleOpenWork(turns: Turn[], reason: "cancelled" | "error"
       }
       return b;
     });
-    return changed ? { role: "assistant" as const, blocks } : turn;
+    return settleTurn(changed ? { ...turn, blocks } : turn, endedAt);
   });
 }
 
@@ -536,7 +614,7 @@ export function closeTrailingThinking(turns: Turn[]): Turn[] {
   if (lt && lt.role === "assistant") {
     const lb = lt.blocks[lt.blocks.length - 1];
     if (lb && lb.kind === "thinking" && !lb.endedAt) {
-      const cloned: AssistantTurn = { role: "assistant", blocks: [...lt.blocks.slice(0, -1), { ...lb, endedAt: Date.now() }] };
+      const cloned: AssistantTurn = { ...lt, blocks: [...lt.blocks.slice(0, -1), { ...lb, endedAt: Date.now() }] };
       return [...turns.slice(0, -1), cloned];
     }
   }
@@ -557,6 +635,7 @@ export function setQuestionAnswers(turns: Turn[], callId: string, answers: Recor
 export function turnsToTranscript(turns: Turn[], maxChars = 6000): string {
   const blockText = (block: AssistantBlock): string => {
     if (block.kind === "text") return block.text;
+    if (block.kind === "verification") return `Verification: ${block.summary.status}\n${block.summary.checks.map((check) => `${check.command}: ${check.status} (exit ${check.exitCode ?? "unknown"}, revision ${check.revision})`).join("\n")}`;
     if (block.kind === "tool") return [
       `${block.name}: ${block.result ?? ""}`,
       block.answers ? `Answers: ${JSON.stringify(block.answers)}` : "",

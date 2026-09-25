@@ -1,3 +1,12 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
 // A launch configuration that compiles the extension and then opens it inside a new window
 // Use IntelliSense to learn about possible attributes.
 // Hover to view descriptions of existing attributes.
@@ -9,6 +18,8 @@
 			"name": "Run Extension",
 			"type": "extensionHost",
 			"request": "launch",
+			// Run immediately; the optional Debug configurations attach after startup.
+			"noDebug": true,
 			"args": [
 				"--extensionDevelopmentPath=${workspaceFolder}",
 				"--new-window",
@@ -24,6 +35,7 @@
 			"name": "Run Extension (clean profile)",
 			"type": "extensionHost",
 			"request": "launch",
+			"noDebug": true,
 			"args": [
 				"--extensionDevelopmentPath=${workspaceFolder}",
 				"--user-data-dir=${workspaceFolder}/.vscode-dev-profile",
@@ -36,6 +48,28 @@
 				"${workspaceFolder}/dist/**/*.js"
 			],
 			"preLaunchTask": "${defaultBuildTask}"
+		},
+		{
+			"name": "Debug Extension",
+			"type": "node",
+			"request": "attach",
+			"address": "127.0.0.1",
+			"port": 9333,
+			"autoAttachChildProcesses": false,
+			"outFiles": ["${workspaceFolder}/dist/**/*.js"],
+			"skipFiles": ["<node_internals>/**"],
+			"preLaunchTask": "start:extension:debug"
+		},
+		{
+			"name": "Debug Extension (clean profile)",
+			"type": "node",
+			"request": "attach",
+			"address": "127.0.0.1",
+			"port": 9334,
+			"autoAttachChildProcesses": false,
+			"outFiles": ["${workspaceFolder}/dist/**/*.js"],
+			"skipFiles": ["<node_internals>/**"],
+			"preLaunchTask": "start:extension:debug:clean"
 		}
 	]
 }

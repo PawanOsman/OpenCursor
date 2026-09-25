@@ -33,7 +33,7 @@ function pdfFixture() {
     await fs.writeFile(path.join(dir,'node_modules','vscode','index.js'), `module.exports={workspace:{workspaceFolders:[{uri:{fsPath:process.cwd()}}],textDocuments:[]},window:{withProgress:async(_o,fn)=>fn({report:({message})=>console.log(message)})},ProgressLocation:{Notification:1}};`);
     await fs.writeFile(path.join(dir,'fixture.pdf'), pdfFixture());
     await esbuild.build({ ...hostBuildOptions, minify:true, outfile:path.join(dir,'features.cjs'), stdin:{
-      contents: "export {readFileTool} from './src/agent/tools/files'; export {initRuntimeDeps,importRuntimeDep} from './src/runtimeDeps';",
+      contents: "export {readFileTool} from './src/agent/tools/files'; export {initRuntimeDeps,importRuntimeDep} from './src/runtimeDeps'; export {spawnPtyCommand} from './src/agent/ptyRuntime';",
       resolveDir:path.resolve(__dirname,'..'), loader:'ts',
     }});
     await fs.writeFile(path.join(dir,'run.cjs'), `
@@ -47,6 +47,18 @@ api.initRuntimeDeps(process.env.OPENCURSOR_RUNTIME_SMOKE_CACHE || path.join(proc
  const hub=await api.importRuntimeDep('@huggingface/hub');
  if(typeof hub.downloadFile!=='function')throw new Error('Hub initialization failed');
  console.log('Pinned hub runtime initialized');
+ const ptyModule=await api.importRuntimeDep('@lydell/node-pty');
+ const nativeSpawn=ptyModule.spawn || ptyModule.default?.spawn;
+ if(typeof nativeSpawn!=='function')throw new Error('PTY runtime initialization failed');
+ const terminal=await api.spawnPtyCommand('node -e "console.log(Boolean(process.stdout.isTTY))"',process.cwd(),80,24);
+ await new Promise((resolve,reject)=>{
+   let output='';
+   const timeout=setTimeout(()=>{terminal.kill();reject(new Error('Packaged PTY process did not exit'));},10000);
+   terminal.stdout.on('data',chunk=>{output+=String(chunk);});
+   terminal.stderr.resume();
+   terminal.once('close',exitCode=>{clearTimeout(timeout);exitCode===0 && output.includes('true')?resolve():reject(new Error('Packaged PTY failed: '+output));});
+ });
+ console.log('Pinned native PTY runtime executed in isolation');
  if(process.env.OPENCURSOR_SMOKE_NATIVE==='1'){
    const transformers=await api.importRuntimeDep('@huggingface/transformers');
    if(typeof transformers.pipeline!=='function')throw new Error('Transformers initialization failed');

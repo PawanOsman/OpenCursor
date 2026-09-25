@@ -33,10 +33,12 @@ export interface ToolImage {
   base64: string;
 }
 
-/** Opaque Responses state, replayed only to the model and provider that issued it. */
+/** Opaque Responses state, replayed only to the model, provider, and credential that issued it. */
 export interface ResponsesReasoning {
   model: string;
   provider: "openai" | "codex";
+  /** Stable account ID or key fingerprint, never an access token or API key. */
+  credential?: string;
   /** Phase is safe as a fallback only when all original assistant items agree. */
   phase?: "commentary" | "final_answer" | null;
   /** Preserve item boundaries when a response contains different output phases. */
@@ -47,6 +49,14 @@ export interface ResponsesReasoning {
     summary: unknown[];
     encrypted_content: string;
   }>;
+}
+
+/** Exact Chat Completions reasoning returned by a supported compatible API.
+ * Kept separate from display thinking; replay is scoped to its endpoint/model. */
+export interface ChatReasoning {
+  endpoint: string;
+  model: string;
+  content: string;
 }
 
 /** Context captured once when a user turn is created; never refreshed in place. */
@@ -66,7 +76,7 @@ export type Step =
    *  compaction summaries) — they are not the user's request and must never be
    *  treated as one when placing context blocks or bounding the live turn. */
   | { kind: "user"; text: string; attachments?: Attachment[]; synthetic?: boolean; context?: UserContextSnapshot }
-  | { kind: "assistant"; text: string; thinking?: string; calls: ToolCall[]; responsesReasoning?: ResponsesReasoning }
+  | { kind: "assistant"; text: string; thinking?: string; calls: ToolCall[]; responsesReasoning?: ResponsesReasoning; chatReasoning?: ChatReasoning }
   | { kind: "tool-result"; callId: string; name: string; output: string; status: "completed" | "error"; image?: ToolImage; outcome?: ToolOutcome };
 
 export interface ToolSchema {
@@ -85,7 +95,7 @@ export type WireContentPart =
 export type WireMessage =
   | { role: "system"; content: string | WireContentPart[] }
   | { role: "user"; content: string | WireContentPart[] }
-  | { role: "assistant"; content: string | null; tool_calls?: WireToolCall[]; responsesReasoning?: ResponsesReasoning }
+  | { role: "assistant"; content: string | null; tool_calls?: WireToolCall[]; responsesReasoning?: ResponsesReasoning; chatReasoning?: ChatReasoning }
   | { role: "tool"; tool_call_id: string; content: string | WireContentPart[] };
 
 export interface WireToolCall {
@@ -101,6 +111,8 @@ export type ProviderEvent =
   | { type: "thinking-delta"; text: string }
   /** Complete, validated reasoning state for one response; never a UI event. */
   | { type: "responses-reasoning"; reasoning: ResponsesReasoning }
+  /** Complete reasoning_content received from a compatible API; never a UI event. */
+  | { type: "chat-reasoning"; reasoning: ChatReasoning }
   // Streaming tool-call progress: fires when a call first appears (name known)
   | { type: "tool-call-start"; index: number; id: string; name: string }
   // ...and as its JSON arguments arrive in chunks.
@@ -125,6 +137,8 @@ export type ProviderEvent =
   | { type: "done"; finishReason: string };
 
 export type AgentEvent =
+  | { type: "user-steering"; text: string; requestId?: string }
+  | { type: "verification"; summary: import("./verification").VerificationSnapshot }
   | { type: "text-delta"; text: string }
   | { type: "thinking-delta"; text: string }
   | { type: "tool-call-started"; callId: string; name: string; input: unknown; timeoutMs?: number; startedAt?: number }

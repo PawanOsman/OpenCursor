@@ -1,3 +1,12 @@
+<!--
+Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+
+This file is part of OpenCursor — AI coding agent chat inside VS Code.
+https://github.com/PawanOsman/OpenCursor
+
+Licensed under the MIT License. See LICENSE file in the project root.
+-->
+
 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
   <!-- Cursor arrow with sparkle (monochrome version of media/icon.png) -->
   <path d="M6 3l9.5 9-4.2.6 2.4 5-2.3 1-2.3-5-3.1 2.6V3z" fill="currentColor"/>

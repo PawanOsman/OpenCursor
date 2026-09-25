@@ -2,7 +2,7 @@
 	"name": "ocursor",
 	"displayName": "OpenCursor Agent",
 	"description": "AI coding agent chat inside VS Code",
-	"version": "0.1.5",
+	"version": "0.2.0",
 	"publisher": "pkrd",
 	"license": "MIT",
 	"icon": "media/icon.png",
@@ -34,12 +34,32 @@
 	"contributes": {
 		"commands": [
 			{
+				"command": "ocursor.remoteJobs",
+				"title": "OpenCursor: Remote Jobs"
+			},
+			{
+				"command": "ocursor.managePlugins",
+				"title": "OpenCursor: Manage Plugins"
+			},
+			{
 				"command": "ocursor.openSettings",
 				"title": "Open OpenCursor Settings"
 			},
 			{
 				"command": "ocursor.addToChat",
 				"title": "OpenCursor: Add Selection to Chat"
+			},
+			{
+				"command": "ocursor.newChat",
+				"title": "OpenCursor: New Chat"
+			},
+			{
+				"command": "ocursor.reviewChanges",
+				"title": "OpenCursor: Review Changes"
+			},
+			{
+				"command": "ocursor.implementTodo",
+				"title": "OpenCursor: Implement TODO"
 			}
 		],
 		"keybindings": [
@@ -101,18 +121,66 @@
 						"type": "string",
 						"default": "You are a professional coding assistant extension named OpenCursor.",
 						"description": "System prompt or custom instruction field"
+					},
+					"ocursor.todoCodeLensEnabled": {
+						"type": "boolean",
+						"default": true,
+						"description": "Show Implement with OpenCursor above TODO comments."
+					},
+					"ocursor.executionMode": {
+						"type": "string",
+						"enum": [
+							"local",
+							"container"
+						],
+						"default": "local",
+						"description": "Run commands on the host or inside a restricted Docker container. Container mode requires Docker and a pre-pulled image."
+					},
+					"ocursor.browserExecutablePath": {
+						"type": "string",
+						"default": "",
+						"description": "Optional Chrome or Chromium executable for isolated browser verification. An installed Chrome or Edge is detected automatically."
+					},
+					"ocursor.containerImage": {
+						"type": "string",
+						"default": "node:22-bookworm-slim",
+						"description": "Existing Docker image used for command execution. Images are never pulled automatically."
+					},
+					"ocursor.containerNetwork": {
+						"type": "boolean",
+						"default": false,
+						"description": "Allow outbound networking for container commands."
+					},
+					"ocursor.containerMemoryMb": {
+						"type": "integer",
+						"minimum": 256,
+						"maximum": 262144,
+						"default": 4096,
+						"description": "Container command memory limit in MiB."
+					},
+					"ocursor.containerCpus": {
+						"type": "number",
+						"minimum": 0.25,
+						"maximum": 128,
+						"default": 2,
+						"description": "Container command CPU limit."
 					}
 				}
 			}
 		]
 	},
 	"scripts": {
+		"build:worker": "node scripts/build-worker.cjs",
+		"test:worker": "pnpm run build:worker && node scripts/worker-smoke.cjs",
+		"worker": "node dist/worker.cjs serve",
+		"eval:live": "node dist/worker.cjs evaluate",
 		"vscode:prepublish": "pnpm run package",
 		"compile": "pnpm run check-types && pnpm run lint && node esbuild.js",
 		"watch": "npm-run-all -p watch:*",
 		"watch:esbuild": "node esbuild.js --watch",
 		"watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-		"package": "pnpm run check-types && pnpm run lint && node esbuild.js --production",
+		"preview:ui": "node scripts/preview-webviews.cjs",
+		"package": "pnpm run check-types && pnpm run lint && node esbuild.js --production && node scripts/build-worker.cjs",
 		"compile-tests": "tsc -p . --outDir out",
 		"watch-tests": "tsc -p . -w --outDir out",
 		"pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
@@ -152,10 +220,23 @@
 	"dependencies": {
 		"@huggingface/hub": "^2.13.2",
 		"@huggingface/transformers": "^4.2.0",
+		"@lydell/node-pty": "1.2.0-beta.15",
+		"@modelcontextprotocol/sdk": "1.27.1",
+		"ajv": "8.17.1",
 		"lucide-react": "^1.21.0",
 		"marked": "^18.0.5",
 		"onnxruntime-node": "^1.27.0",
 		"pdf-parse": "^2.4.5",
+		"playwright-core": "1.63.0",
+		"prosemirror-commands": "^1.7.2",
+		"prosemirror-history": "^1.5.0",
+		"prosemirror-inputrules": "^1.5.1",
+		"prosemirror-keymap": "^1.2.3",
+		"prosemirror-markdown": "^1.13.8",
+		"prosemirror-model": "^1.25.12",
+		"prosemirror-schema-list": "^1.5.1",
+		"prosemirror-state": "^1.4.4",
+		"prosemirror-view": "^1.42.5",
 		"react": "^19.2.7",
 		"react-dom": "^19.2.7",
 		"sharp": "^0.35.2"

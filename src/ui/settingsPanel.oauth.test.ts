@@ -20,6 +20,7 @@ const fixture = vi.hoisted(() => ({
   reopen: vi.fn(async (_kind: string) => {}),
   manual: vi.fn(async (_kind: string, _url: string) => {}),
   cancel: vi.fn(),
+  setBalance: vi.fn(async () => {}),
   usage: {} as Record<string, unknown>,
   onUsage: undefined as ((usage: Record<string, unknown>) => void) | undefined,
   flushUsage: vi.fn(async () => {}),
@@ -40,6 +41,7 @@ vi.mock("vscode", () => ({
 }));
 vi.mock("../agent/oauth", () => ({
   login: fixture.login, openLoginInBrowser: fixture.reopen, completeManual: fixture.manual, cancelLogin: fixture.cancel,
+  setBalanceStrategy: fixture.setBalance,
   getStatus: () => fixture.status,
   getAccountLimits: fixture.limits, consumeCodexResetCredit: fixture.resetQuota,
   onOAuthStatus: (callback: typeof fixture.onStatus) => { fixture.onStatus = callback; return { dispose() {} }; },
@@ -47,9 +49,10 @@ vi.mock("../agent/oauth", () => ({
 vi.mock("../stores/settingsManager", () => ({ DEFAULT_SETTINGS: {} }));
 vi.mock("../agent/provider", () => ({ listModels: vi.fn() }));
 vi.mock("./webviewHtml", () => ({ renderWebviewHtml: () => "<html></html>" }));
-vi.mock("../stores/featureStore", () => ({ MODEL_CATALOG: [] }));
+vi.mock("../stores/featureStore", () => ({ MODEL_CATALOG: [], PROVIDER_PRESETS: { deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", needsKey: true } },
+  getProviderApiKeys: (provider: any) => provider.apiKeys ?? [{ id: provider.id, label: "Key 1", enabled: true }] }));
 vi.mock("../context/workspaceContext", () => ({ listRules: vi.fn(), listSkills: vi.fn() }));
-vi.mock("../integrations/mcpClient", () => ({ mcpManager: {} }));
+vi.mock("../integrations/mcpClient", () => ({ mcpManager: { status: () => [], sync: vi.fn(async () => {}) } }));
 vi.mock("../agent/personas", () => ({ BUILTIN_PERSONAS: [] }));
 vi.mock("../agent/semanticIndex", () => ({ onIndexStatus: () => () => {} }));
 vi.mock("../agent/docsIndex", () => ({ onDocsStatus: () => () => {} }));
@@ -67,6 +70,8 @@ vi.mock("../integrations/externalHooks", () => ({}));
 vi.mock("../stores/modelRegistry", () => ({ onAllModels: () => () => {} }));
 
 import { SettingsPanel } from "./settingsPanel";
+import { listModels } from "../agent/provider";
+import type { ProviderConfig } from "../stores/featureStore";
 
 const authorizationUrl = "https://auth.openai.com/oauth/authorize?state=fixture&code_challenge=public-challenge";
 beforeEach(() => {
@@ -76,18 +81,89 @@ beforeEach(() => {
   fixture.resetUsage.mockImplementation(async () => { fixture.usage = {}; });
   fixture.confirm.mockResolvedValue(undefined);
   fixture.status = { accounts: [], errors: {}, balanceStrategy: "first", pending: "codex", authorizationUrl };
-  SettingsPanel.createOrShow({ extensionUri: "extension" } as any, {} as any, {} as any);
+  SettingsPanel.createOrShow({ extensionUri: "extension" } as any, {} as any, { get: () => ({ providers: [] }) } as any);
 });
 afterEach(() => { SettingsPanel.currentPanel?.dispose(); });
 
+describe("settings host API key actions", () => {
+  function keyPanel(providers: ProviderConfig[] = [], secrets = new Map<string, string>()) {
+    SettingsPanel.currentPanel?.dispose();
+    let config = { providers, mcpServers: [] };
+    const setProviderKey = vi.fn(async (id: string, key: string) => { if (key) secrets.set(id, key); else secrets.delete(id); });
+    SettingsPanel.createOrShow({ extensionUri: "extension" } as any,
+      { getProviderKey: async (id: string) => secrets.get(id), setProviderKey } as any,
+      { get: () => config, set: async (patch: Partial<typeof config>) => { config = { ...config, ...patch }; return config; } } as any);
+    return { secrets, setProviderKey, providers: () => config.providers };
+  }
+
+  it("dispatches key creation atomically and sends sanitized features before its correlated success", async () => {
+    const panel = keyPanel();
+    await fixture.receive!({ type: "providerKeyAction", requestId: "add-1", action: "add", providerId: "popular:deepseek", kind: "deepseek", label: "Work", apiKey: "private-fixture-key" });
+    expect(panel.providers()).toHaveLength(1);
+    const calls = fixture.postMessage.mock.calls.map(([value]) => value);
+    const result = calls.find(value => value.type === "providerKeyActionResult");
+    expect(result).toMatchObject({ requestId: "add-1", ok: true, provider: { hasKey: true, apiKeys: [{ label: "Work", hasKey: true }] } });
+    expect(calls.findIndex(value => value.type === "features")).toBeLessThan(calls.indexOf(result));
+    expect(JSON.stringify(calls)).not.toContain("private-fixture-key");
+  });
+
+  it("reports storage failure without creating a provider or relaying the secret", async () => {
+    const panel = keyPanel();
+    panel.setProviderKey.mockRejectedValueOnce(new Error("private-fixture-key failed"));
+    await fixture.receive!({ type: "providerKeyAction", requestId: "failed", action: "add", providerId: "popular:deepseek", kind: "deepseek", apiKey: "private-fixture-key" });
+    expect(panel.providers()).toEqual([]);
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "providerKeyActionResult", requestId: "failed", ok: false }));
+    expect(JSON.stringify(fixture.postMessage.mock.calls)).not.toContain("private-fixture-key");
+  });
+
+  it("requires request correlation before mutating credentials", async () => {
+    const panel = keyPanel();
+    await fixture.receive!({ type: "providerKeyAction", action: "add", providerId: "popular:deepseek", kind: "deepseek", apiKey: "private-fixture-key" });
+    expect(panel.setProviderKey).not.toHaveBeenCalled();
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({ ok: false }));
+  });
+
+  it("tests a selected saved key, and rejects keys belonging to another provider", async () => {
+    const id = "popular:deepseek";
+    keyPanel([{ id, name: "DeepSeek", kind: "deepseek", baseUrl: "https://api.deepseek.com/v1",
+      apiKeys: [{ id: `${id}:key:one`, label: "One", enabled: false }, { id: `${id}:key:two`, label: "Two" }] }],
+      new Map([[`${id}:key:one`, "first-secret"], [`${id}:key:two`, "second-secret"]]));
+    vi.mocked(listModels).mockResolvedValue([]);
+    await fixture.receive!({ type: "fetchModels", providerId: id, keyId: `${id}:key:one`, apiBaseUrl: "https://api.deepseek.com/v1", requestId: "specific" });
+    expect(listModels).toHaveBeenLastCalledWith("https://api.deepseek.com/v1", "first-secret", undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    await fixture.receive!({ type: "fetchModels", providerId: id, apiBaseUrl: "https://api.deepseek.com/v1", requestId: "enabled" });
+    expect(listModels).toHaveBeenLastCalledWith("https://api.deepseek.com/v1", "second-secret", undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    await fixture.receive!({ type: "fetchModels", providerId: id, keyId: "foreign", apiBaseUrl: "https://api.deepseek.com/v1", requestId: "foreign" });
+    expect(listModels).toHaveBeenCalledTimes(2);
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "modelsFetched", requestId: "foreign", error: "API key not found for this provider." }));
+  });
+});
+
 describe("settings host OAuth message handling", () => {
+  it("correlates connection-test successes and failures with their requesting dialog", async () => {
+    vi.mocked(listModels).mockResolvedValueOnce([{ id: "fixture-model" }]);
+    await fixture.receive!({ type: "fetchModels", apiBaseUrl: "https://example.test/v1", apiKey: "fixture-key", providerId: "popular:deepseek", requestId: "test-current" });
+    expect(listModels).toHaveBeenCalledWith("https://example.test/v1", "fixture-key", undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(fixture.postMessage).toHaveBeenCalledWith({ type: "modelsFetched", providerId: "popular:deepseek", requestId: "test-current", models: ["fixture-model"] });
+    vi.mocked(listModels).mockRejectedValueOnce(new Error("Connection unavailable"));
+    await fixture.receive!({ type: "fetchModels", apiBaseUrl: "https://example.test/v1", apiKey: "fixture-key", providerId: "popular:deepseek", requestId: "test-next" });
+    expect(fixture.postMessage).toHaveBeenCalledWith({ type: "modelsFetched", providerId: "popular:deepseek", requestId: "test-next", models: [], error: "Connection unavailable" });
+  });
+
   it("dispatches Codex Add Account, browser retry, and cancellation through the real webview listener", async () => {
     await fixture.receive!({ type: "oauthLogin", kind: "codex" });
     await fixture.receive!({ type: "oauthOpenLogin", kind: "codex" });
     await fixture.receive!({ type: "oauthCancel", kind: "codex" });
-    expect(fixture.login).toHaveBeenCalledWith("codex");
+    expect(fixture.login).toHaveBeenCalledWith("codex", undefined);
     expect(fixture.reopen).toHaveBeenCalledWith("codex");
     expect(fixture.cancel).toHaveBeenCalledWith("codex");
+  });
+
+  it("forwards provider-specific login options and account balancing", async () => {
+    await fixture.receive!({ type: "oauthLogin", kind: "gitlab", options: { clientId: "fixture-app", baseUrl: "https://gitlab.com" } });
+    expect(fixture.login).toHaveBeenCalledWith("gitlab", { clientId: "fixture-app", baseUrl: "https://gitlab.com" });
+    await fixture.receive!({ type: "oauthSetBalance", kind: "codex", strategy: "round-robin" });
+    expect(fixture.setBalance).toHaveBeenCalledWith("round-robin", "codex");
   });
 
   it("forwards the current authorization URL when status is requested or pushed", async () => {

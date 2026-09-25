@@ -30,6 +30,23 @@ describe("Anthropic supported thinking and effort settings", () => {
     expect(body.output_config).toEqual({ effort: "high" });
   });
 
+  it.each(["low", "medium", "high", "xhigh", "max"])("keeps Opus 5.5 thinking adaptive at %s effort after stale settings", (reasoningEffort) => {
+    for (const thinking of ["disabled", "enabled", "adaptive"]) {
+      const { body, betas } = configure("claude-opus-5-5", { thinking, reasoningEffort });
+      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      expect(body.output_config).toEqual({ effort: reasoningEffort });
+      expect(body).not.toHaveProperty("temperature");
+      expect(body.max_tokens).toBe(8192);
+      expect(betas).toEqual([]);
+    }
+  });
+
+  it("does not override Opus 5.5's medium effort default when only a stale thinking mode is supplied", () => {
+    const { body } = configure("claude-opus-5-5", { thinking: "disabled" });
+    expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+    expect(body).not.toHaveProperty("output_config");
+  });
+
   it.each(["claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1"])("keeps %s adaptive when saved settings request disabled thinking", (model) => {
     const { body } = configure(model, { thinking: "disabled", reasoningEffort: "max" });
     expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });

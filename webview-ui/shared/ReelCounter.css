@@ -1,0 +1,90 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+:root {
+  --reel-dur: 1400ms;
+  --reel-cell: 30px;
+  --reel-spin-blur: 3px;
+  --reel-stagger: 90ms;
+  --reel-ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.t-reel {
+  display: inline-flex;
+  align-items: center;
+  height: var(--reel-cell);
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+}
+
+.t-reel-step {
+  position: relative;
+  display: inline-block;
+  width: 1ch;
+  height: var(--reel-cell);
+  overflow: hidden;
+}
+.t-reel-step-frame { display: grid; height: 100%; align-items: center; text-align: center; }
+.t-reel-step-frame > span { grid-area: 1 / 1; }
+.t-reel-step-in { animation: reel-step-in 260ms cubic-bezier(.22, 1, .36, 1) both; }
+.t-reel-step-out { animation: reel-step-out 260ms cubic-bezier(.22, 1, .36, 1) both; }
+@keyframes reel-step-in { from { transform: translateY(5px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes reel-step-out { from { transform: translateY(0); opacity: 1; } to { transform: translateY(-5px); opacity: 0; } }
+html[data-motion="reduced"] .t-reel-step-in { animation: none; }
+html[data-motion="reduced"] .t-reel-step-out { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .t-reel-step-in { animation: none; }
+  html:not([data-motion="full"]) .t-reel-step-out { display: none; }
+}
+
+.t-reel-col {
+  position: relative;
+  flex: 0 0 1ch;
+  width: 1ch;
+  height: var(--reel-cell);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 22%, #000 78%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 22%, #000 78%, transparent 100%);
+}
+
+.t-reel-strip {
+  display: flex;
+  flex-direction: column;
+}
+
+.t-reel-col[data-spinning="true"] .t-reel-strip {
+  will-change: transform, filter;
+}
+
+.t-reel-digit {
+  display: flex;
+  flex: 0 0 var(--reel-cell);
+  align-items: center;
+  justify-content: center;
+  height: var(--reel-cell);
+}
+
+.t-reel-filter {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+html[data-motion="reduced"] .t-reel-strip {
+  transition: none !important;
+  filter: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .t-reel-strip {
+    transition: none !important;
+    filter: none !important;
+  }
+}

@@ -50,6 +50,16 @@ for (const prefix of ["sk-", "tp-", "vbk_", "Bearer "]) {
   });
 }
 
+test("skips test files and test directories containing sample credentials", () => {
+  const sample = 'const key = "sk-' + 'aB3dE5fG7hI9jK1lM3nO5pQ7";';
+  const result = scan(Object.fromEntries([
+    "src/example.test.ts", "webview-ui/example.test.tsx",
+    "src/example.spec.ts", "webview-ui/example.spec.tsx",
+    "src/__tests__/fixture.ts", "src/tests/fixture.ts", "webview-ui/test/fixture.tsx",
+  ].map(file => [file, sample])));
+  assert.equal(result.status, 0, result.stderr);
+});
+
 for (const filename of [".env", ".env.local", "nested/service.env", "nested/.env.production"]) {
   test(`rejects tracked ${filename}`, () => {
     const result = scan({ [filename]: "API_KEY=placeholder" });

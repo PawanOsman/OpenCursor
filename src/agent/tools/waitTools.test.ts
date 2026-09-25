@@ -10,6 +10,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { waitTool } from "./agent";
 import { rgTool } from "./search";
+import { randomUUID } from "node:crypto";
 
 vi.mock("vscode", () => ({ workspace: { workspaceFolders: [] }, Uri: {} }));
 
@@ -41,7 +42,7 @@ describe("Rg", () => {
     if (/not available/.test(r.output)) return; // no ripgrep on this machine
     expect(r.outcome?.status).toBe("completed");
     expect(r.output).toContain("src/agent/tools/search.ts");
-    const none = await rgTool.execute({ args: ["-F", "definitely-not-present-token-xyz", "src/agent/tools"] });
+    const none = await rgTool.execute({ args: ["-F", `absent-fixture-${randomUUID()}`, "src/agent/tools"] });
     expect(none.outcome?.exitCode).toBe(1);
     expect(none.output).toContain("(no matches)");
   });

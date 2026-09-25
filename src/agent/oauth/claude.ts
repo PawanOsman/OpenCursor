@@ -11,11 +11,11 @@ import type { ToolSchema, WireMessage } from "../types";
 import type { ModelParams } from "../provider/types";
 import { toAnthropic } from "../provider/anthropicMessages";
 import { applyAnthropicReasoning, needsContext1mBeta } from "../provider/anthropicReasoning";
+import { applyAnthropicSpeed } from "../provider/anthropicSpeed";
 import { defaultAnthropicMaxTokens } from "../providerLimits";
 
 /**
- * Claude's OAuth transport, compared with the local 9router registry and shared
- * provider configuration. The CLI version is a compatibility identifier, not
+ * OpenCursor's Claude OAuth transport. The CLI version is a compatibility identifier, not
  * OpenCursor's version or a claim about the installed SDK/runtime.
  */
 export const CLAUDE_OAUTH_CONFIG = {
@@ -26,11 +26,12 @@ export const CLAUDE_OAUTH_CONFIG = {
   usageUrl: "https://api.anthropic.com/api/oauth/usage",
   clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
   apiVersion: "2023-06-01",
-  cliVersion: "2.1.258",
+  cliVersion: "2.1.280",
   port: 54545,
   path: "/callback",
   scope: "org:create_api_key user:profile user:inference",
   models: [
+    "claude-opus-5-5",
     "claude-fable-5-1",
     "claude-fable-5",
     "claude-opus-5",
@@ -112,9 +113,10 @@ export function buildClaudeMessagesRequest(accessToken: string, options: ClaudeM
     "claude-code-20250219",
     "interleaved-thinking-2025-05-14",
     ...applyAnthropicReasoning(body, options.model, maxTokens, options.modelParams),
+    ...applyAnthropicSpeed(body, options.model, options.modelParams?.speed),
   ];
   // Extra beta flags must correspond to fields/features we actually send;
-  // 9router's context management, server tools, fast mode and cloaking fields
+  // Upstream context management, server tools and cloaking fields
   // are not part of this request contract.
   if (options.modelParams?.maxContext === "1m" && needsContext1mBeta(options.model)) {
     betas.push("context-1m-2025-08-07");

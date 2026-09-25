@@ -9,8 +9,18 @@
 
 import * as vscode from "vscode";
 import * as path from "path";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const workspaceScope = new AsyncLocalStorage<string>();
+
+/** Each conversation/subagent retains its own root across asynchronous tools. */
+export function withWorkspaceRoot<T>(root: string | undefined, work: () => T): T {
+	return root ? workspaceScope.run(path.resolve(root), work) : work();
+}
 
 export function getWorkspaceRoot(): string {
+	const scoped = workspaceScope.getStore();
+	if (scoped) return scoped;
 	const folders = vscode.workspace.workspaceFolders;
 	if (folders && folders.length > 0) {
 		return folders[0].uri.fsPath;
@@ -25,9 +35,10 @@ export function getRecentFiles(): string[] {
 	for (const tab of vscode.window.tabGroups.all.flatMap((g) => g.tabs)) {
 		const input = tab.input as { uri?: vscode.Uri } | undefined;
 		const uri = input?.uri;
-		if (uri && uri.scheme === "file" && uri.fsPath.startsWith(root)) {
+		const relative = uri ? path.relative(root, uri.fsPath) : "..";
+		if (uri && uri.scheme === "file" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
 			const rel = path.relative(root, uri.fsPath).split(path.sep).join("/");
-			if (!out.includes(rel)) {
+			if (!out.includes(uri.fsPath)) {
 				out.push(uri.fsPath);
 			}
 		}
@@ -109,6 +120,7 @@ export function normalizeToolPaths(toolName: string, input: any, root = getWorks
 		Delete: ["path"], EditNotebook: ["target_notebook"], ReadLints: ["paths"],
 		Task: ["file_attachments"], FetchMcpResource: ["downloadPath"],
 		Shell: ["working_directory"],
+		GoToDefinition: ["path"], FindReferences: ["path"], RenamePreview: ["path"],
 	};
 	const out = { ...input };
 	for (const key of keys[toolName] ?? []) {

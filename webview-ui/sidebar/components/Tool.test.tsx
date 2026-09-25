@@ -12,8 +12,9 @@ import * as React from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ToolCard } from "./Tool";
+import { ToolCard, TaskActivityContext } from "./Tool";
 import { vscode } from "../../shared/vscode";
+import type { ToolBlock } from "../types";
 
 vi.mock("../../shared/vscode", () => ({ vscode: { postMessage: vi.fn() } }));
 
@@ -32,6 +33,105 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
+});
+
+describe("Restored tool display", () => {
+  it("distinguishes task states and does not mark an unfinished list as complete", () => {
+    act(() => root.render(<ToolCard block={{ kind: "tool", name: "TodoWrite", callId: "todos", status: "completed", input: {}, result: "[ ] Pending task\n[~] Active task\n[x] Finished task\n[-] Cancelled task" }} />));
+    expect([...container.querySelectorAll(".todo-mark")].map(mark => mark.getAttribute("aria-label"))).toEqual(["Pending", "Started, unfinished", "Completed", "Cancelled"]);
+    expect(container.querySelector(".todo-count")?.textContent).toBe("1/4 completed");
+    expect(container.querySelector(".todo-header .ok-icon")).toBeNull();
+    expect(container.querySelector(".todo-item.pending svg")?.getAttribute("fill")).toBe("none");
+  });
+
+  it("keeps existing task rows when another task is inserted or their status changes", () => {
+    const block: ToolBlock = { kind: "tool", name: "TodoWrite", callId: "todos", status: "completed", input: {}, result: "[ ] Inspect routing" };
+    act(() => root.render(<ToolCard block={block} />));
+    const row = container.querySelector(".todo-item");
+    act(() => root.render(<ToolCard block={{ ...block, result: "[ ] Another task\n[x] Inspect routing" }} />));
+    expect(container.querySelector(".todo-item.completed")).toBe(row);
+  });
+
+  it("switches unfinished task presentation when the run stops and resumes", () => {
+    const block: ToolBlock = { kind: "tool", name: "TodoWrite", callId: "todos", status: "completed", input: {}, result: "[~] Inspect routing" };
+    const render = (running: boolean) => act(() => root.render(<TaskActivityContext.Provider value={running}><ToolCard block={block} /></TaskActivityContext.Provider>));
+    render(true);
+    const row = container.querySelector(".todo-item");
+    expect(container.querySelector(".todo-mark")?.getAttribute("aria-label")).toBe("In progress");
+    render(false);
+    expect(container.querySelector(".todo-item.unfinished")).toBe(row);
+    expect(container.querySelector(".todo-mark")?.getAttribute("aria-label")).toBe("Started, unfinished");
+    render(true);
+    expect(container.querySelector(".todo-item")).toBe(row);
+    expect(container.querySelector(".todo-item.unfinished")).toBeNull();
+    expect(block.result).toBe("[~] Inspect routing");
+  });
+
+  it("gives older nameless task records an honest missing-description label", () => {
+    act(() => root.render(<ToolCard block={{ kind: "tool", name: "TodoRead", callId: "todos", status: "completed", input: {}, result: "- [completed] unnamed" }} />));
+    expect(container.querySelector(".todo-text")?.textContent).toBe("Task description unavailable");
+  });
+
+  it.each([undefined, null, 42, {}, "", "   "])("keeps a tool with invalid name %j visible", (name) => {
+    const block = { kind: "tool", name, callId: "restored-tool", status: "completed", result: "Saved output" } as unknown as ToolBlock;
+    act(() => root.render(<ToolCard block={block} />));
+    const header = container.querySelector<HTMLElement>(".tool-card-header")!;
+    expect(header.getAttribute("aria-label")).toBe("Tool");
+    expect(container.querySelector(".label")?.textContent).toBe("Tool");
+    act(() => header.click());
+    expect(container.querySelector(".tool-result")?.textContent).toBe("Saved output");
+  });
+
+  it("keeps incomplete nested tool records from breaking a restored subagent", () => {
+    const child = { kind: "tool", callId: "restored-child", status: "completed" } as ToolBlock;
+    act(() => root.render(<ToolCard block={{ kind: "tool", name: "Task", callId: "restored-agent", status: "running", input: {}, subBlocks: [child] }} />));
+    expect(container.querySelector(".step-label")?.textContent).toBe("Tool");
+  });
+
+  it("preserves valid MCP tool labels", () => {
+    act(() => root.render(<ToolCard block={{ kind: "tool", name: "mcp__workspace__search_files", callId: "mcp-1", status: "completed", input: {} }} />));
+    expect(container.querySelector(".label")?.textContent).toBe("workspace · search files");
+    expect(container.querySelector(".badge")?.textContent).toBe("workspace");
+  });
+});
+
+describe("Tool keyboard interaction", () => {
+  it.each(["Enter", " "])("opens the exact read range with %s", (key) => {
+    act(() => root.render(<ToolCard block={{ kind: "tool", name: "Read", callId: "read-1", status: "completed", input: { path: "src/main.ts" }, startLine: 7, endLine: 20 }} />));
+    const row = container.querySelector<HTMLElement>(".read-line")!;
+    act(() => row.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true })));
+    expect(vscode.postMessage).toHaveBeenCalledOnce();
+    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "openFile", path: "src/main.ts", startLine: 7, endLine: 20 });
+  });
+
+  it("does not activate a read row when its stop control receives a key", () => {
+    act(() => root.render(<ToolCard block={{ kind: "tool", name: "Read", callId: "read-1", status: "running", input: { path: "src/main.ts" } }} />));
+    const stop = container.querySelector<HTMLButtonElement>(".spinner-stop")!;
+    act(() => stop.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    expect(vscode.postMessage).not.toHaveBeenCalled();
+    act(() => stop.click());
+    expect(vscode.postMessage).toHaveBeenCalledOnce();
+    expect(vscode.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "openFile" }));
+  });
+
+  it("opens a completed subagent with the keyboard", () => {
+    const onOpen = vi.fn();
+    act(() => root.render(<ToolCard onOpenSubagent={onOpen} block={{ kind: "tool", name: "Task", callId: "task-1", status: "completed", subStatus: "finished", input: { description: "Inspect routing" } }} />));
+    act(() => container.querySelector(".subagent-card")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    expect(onOpen).toHaveBeenCalledOnce();
+    expect(onOpen).toHaveBeenCalledWith("task-1");
+  });
+
+  it("expands and collapses a plan with the keyboard", () => {
+    act(() => root.render(<ToolCard block={{ kind: "tool", name: "WritePlan", callId: "plan-1", status: "completed", input: { title: "Routing plan", content: "Inspect the route handlers." } }} />));
+    const header = container.querySelector<HTMLElement>(".plan-header")!;
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    act(() => header.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true })));
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(".plan-body")?.textContent).toContain("Inspect the route handlers.");
+    act(() => header.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+  });
 });
 
 function renderQuestions(questions: Array<Record<string, unknown>>) {
@@ -74,6 +174,20 @@ function expectAnswers(answers: Record<string, string[]>) {
 }
 
 describe("AskQuestion production form", () => {
+  it("keeps invalid calendar dates from being submitted and accepts a valid leap day", () => {
+    renderQuestions([{ prompt: "Release date", type: "date", required: true }]);
+    expect(field().type).toBe("text");
+    type("2026-02-29");
+    expect(button("Submit").disabled).toBe(true);
+    expect(field().getAttribute("aria-invalid")).toBe("true");
+    act(() => field().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(vscode.postMessage).not.toHaveBeenCalled();
+    type("2028-02-29");
+    expect(button("Submit").disabled).toBe(false);
+    click("Submit");
+    expectAnswers({ "0": ["2028-02-29"] });
+  });
+
   it.each([
     ["text", "release"], ["textArea", "first line\nsecond line"],
     ["number", "42"], ["date", "2026-09-07"],

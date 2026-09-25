@@ -9,12 +9,20 @@
 
 import * as React from "react";
 
-export function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+export const ControlLabelContext = React.createContext<string | undefined>(undefined);
+
+export function Toggle({ checked, onChange, disabled, label }: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  label?: string;
+}) {
+  const rowLabel = React.useContext(ControlLabelContext);
   return (
-    <label className="switch">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      <span className="track" />
-      <span className="thumb" />
+    <label className={`switch${disabled ? " is-disabled" : ""}`}>
+      <input type="checkbox" role="switch" aria-label={label ?? rowLabel ?? "Enable setting"} checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span className="track" aria-hidden="true" />
+      <span className="thumb" aria-hidden="true" />
     </label>
   );
 }

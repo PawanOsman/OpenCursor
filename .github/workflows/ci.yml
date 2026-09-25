@@ -1,3 +1,10 @@
+# Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+#
+# This file is part of OpenCursor — AI coding agent chat inside VS Code.
+# https://github.com/PawanOsman/OpenCursor
+#
+# Licensed under the MIT License. See LICENSE file in the project root.
+
 name: CI
 
 on:
@@ -45,6 +52,9 @@ jobs:
       - name: Build production
         run: node esbuild.js --production
 
+      - name: Headless production agent and independent grading smoke
+        run: pnpm run test:worker
+
       - name: Production feature smoke
         run: pnpm run test:runtime
         env:
@@ -65,6 +75,24 @@ jobs:
           node scripts/extension-host-test.cjs
         env:
           OPENCURSOR_TEST_EXTENSION_PATH: ${{ runner.temp }}/opencursor-vsix/extension
+
+  platform-runtime:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
+      - run: pnpm run check-types
+      - run: pnpm exec vitest run src/agent/evaluations.test.ts src/stores/fileMutations.test.ts src/stores/recovery.test.ts src/agent/execution.test.ts src/agent/provider/deadlines.test.ts src/agent/tools/pty.integration.test.ts src/integrations/worktrees.test.ts src/worker/worker.test.ts
+      - run: pnpm run test:worker
 
   security-scan:
     runs-on: ubuntu-latest

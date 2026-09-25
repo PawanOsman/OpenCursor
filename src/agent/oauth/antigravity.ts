@@ -13,7 +13,7 @@ import type { ProviderEvent, ToolCall, ToolSchema, WireContentPart, WireMessage 
 import { sseData } from "../provider/sse";
 import { UsageTracker } from "../provider/usage";
 
-// Protocol reference: 9router/open-sse/providers/{shared,registry/antigravity}.js.
+// OpenCursor's installed-app protocol for Google Antigravity.
 // Gemini CLI is a separate OAuth client, scope set and transport. Existing
 // Antigravity accounts must continue to use their original installed-app client.
 const MODEL_ALIASES: Record<string, string> = {
@@ -24,6 +24,32 @@ const MODEL_ALIASES: Record<string, string> = {
     [`gemini-3.6-flash-${level}`, `gemini-3.6-flash-tiered(${level})`],
   ])),
 };
+
+/** Catalog suffixes select reasoning; they are never part of Google's model ID. */
+export function resolveAntigravityModel(model: string, availableModels?: readonly string[]): { model: string; reasoningEffort?: string } {
+  const split = (value: string) => {
+    const match = /^(.*)\((minimal|low|medium|high|xhigh|max|auto|none|off)\)$/i.exec(value);
+    return match ? { model: match[1], reasoningEffort: match[2].toLowerCase() } : { model: value };
+  };
+  const requested = split(model);
+  const alias = split(MODEL_ALIASES[model] ?? model);
+  // A project's real ID takes precedence over an older catalog alias with the
+  // same name (for example, a dedicated low model replacing a tiered model).
+  if (availableModels?.includes(requested.model)) {
+    return { ...requested, reasoningEffort: requested.reasoningEffort ?? alias.reasoningEffort };
+  }
+  return alias;
+}
+
+/** Keep live IDs and add only aliases backed by this account's advertised IDs. */
+export function antigravityModelChoices(availableModels: readonly string[]): string[] {
+  const available = new Set(availableModels.filter(id => typeof id === "string" && id.trim()).map(id => id.trim()));
+  const choices = new Set(available);
+  for (const alias of Object.keys(MODEL_ALIASES)) {
+    if (available.has(resolveAntigravityModel(alias).model)) choices.add(alias);
+  }
+  return [...choices];
+}
 
 export const ANTIGRAVITY_CONFIG = {
   authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
@@ -90,7 +116,6 @@ export interface AntigravityRequest {
   project: string;
   model: string;
   userAgent: "antigravity";
-  requestType: "agent";
   requestId: string;
   request: {
     contents: GeminiContent[];
@@ -137,7 +162,7 @@ function geminiMessages(messages: WireMessage[], model: string) {
       const parts: GeminiPart[] = message.content ? [{ text: message.content }] : [];
       // Gemini 3 requires the original signature on the first parallel call.
       // Old saved chats lack it. Preserve those observations as history instead
-      // of reusing 9router's static signature for a different model response.
+      // of reusing a static signature for a different model response.
       const historical = requiresSignature(model) && !!message.tool_calls?.length
         && !message.tool_calls[0].thoughtSignature;
       for (const call of message.tool_calls ?? []) {
@@ -172,7 +197,7 @@ function geminiMessages(messages: WireMessage[], model: string) {
   return { contents, ...(system.length ? { systemInstruction: { parts: system } } : {}) };
 }
 
-// These schema fields are accepted by the Cloud Code proto used in 9router's
+// These schema fields are accepted by the Cloud Code protocol used in this
 // Antigravity converter. Walk schema nodes, not arbitrary objects: a property
 // named "title" or "default" is still a real tool argument.
 function toolParameters(schema: object, root: object = schema, depth = 0): object {
@@ -237,12 +262,14 @@ export function toAntigravityRequest(options: {
   sampling?: SamplingParams;
   sessionId?: string;
   requestId?: string;
+  availableModels?: readonly string[];
 }): AntigravityRequest {
   if (!options.projectId.trim()) throw new AntigravityProtocolError(400, "Antigravity project is missing. Reconnect this Google account to provision Code Assist access.");
-  const model = MODEL_ALIASES[options.model] ?? options.model;
+  const resolved = resolveAntigravityModel(options.model, options.availableModels);
+  const model = resolved.model;
   const maxOutputTokens = Math.min(Number.isFinite(options.maxTokens) && options.maxTokens! > 0 ? Math.floor(options.maxTokens!) : 8192, 64000);
   const generationConfig: Record<string, unknown> = { maxOutputTokens, temperature: options.temperature ?? 1 };
-  const effort = options.modelParams?.thinking === "disabled" ? "none" : options.modelParams?.reasoningEffort?.toLowerCase();
+  const effort = options.modelParams?.thinking === "disabled" ? "none" : options.modelParams?.reasoningEffort?.toLowerCase() ?? resolved.reasoningEffort;
   const thinkingConfig: Record<string, unknown> = { includeThoughts: true };
   if (effort && /^gemini-/i.test(model)) {
     if (requiresSignature(model)) {
@@ -281,7 +308,9 @@ export function toAntigravityRequest(options: {
     }) }];
     request.toolConfig = { functionCallingConfig: { mode: "VALIDATED" } };
   }
-  return { project: options.projectId, model, userAgent: "antigravity", requestType: "agent",
+  // The current IDE chat envelope omits requestType. In the upstream API,
+  // `agent` is explicitly removed because it selects an incorrect quota bucket.
+  return { project: options.projectId.trim(), model, userAgent: "antigravity",
     requestId: options.requestId ?? `agent/${randomUUID()}/${Date.now()}/${randomUUID()}/0`, request };
 }
 
@@ -382,6 +411,8 @@ function platformMetadata() {
 
 export async function resolveAntigravityProject(token: string, options: {
   projectId?: string;
+  /** Revalidate a stored project after an upstream not-found response. */
+  forceRefresh?: boolean;
   signal?: AbortSignal;
   fetch?: typeof fetch;
   pollDelayMs?: number;
@@ -390,7 +421,7 @@ export async function resolveAntigravityProject(token: string, options: {
   aborted(options.signal);
   // A saved project belongs to this account; resolving it must not substitute
   // another account's project or generate a fictitious Google Cloud project.
-  if (options.projectId?.trim()) return { projectId: options.projectId };
+  if (!options.forceRefresh && options.projectId?.trim()) return { projectId: options.projectId.trim() };
   const doFetch = options.fetch ?? fetch;
   const metadata = platformMetadata();
   const post = async (url: string, body: object) => {
@@ -408,9 +439,9 @@ export async function resolveAntigravityProject(token: string, options: {
   const project = (data: any): string | undefined => {
     const value = data?.cloudaicompanionProject;
     const id = typeof value === "string" ? value : value?.id;
-    return typeof id === "string" && id.trim() ? id : undefined;
+    return typeof id === "string" && id.trim() ? id.trim() : undefined;
   };
-  const loaded = await post(ANTIGRAVITY_CONFIG.loadCodeAssistUrl, { metadata, mode: 1 });
+  const loaded = await post(ANTIGRAVITY_CONFIG.loadCodeAssistUrl, { metadata });
   const tiers = Array.isArray(loaded.allowedTiers) ? loaded.allowedTiers : [];
   const tierId = tiers.find((tier: any) => tier?.isDefault)?.id ?? "legacy-tier";
   const loadedProject = project(loaded);
@@ -421,7 +452,7 @@ export async function resolveAntigravityProject(token: string, options: {
     const provisioned = project(onboard.response) ?? project(onboard);
     if (provisioned) return { projectId: provisioned, tierId };
     if (onboard.done) {
-      const resolved = project(await post(ANTIGRAVITY_CONFIG.loadCodeAssistUrl, { metadata, mode: 1 }));
+      const resolved = project(await post(ANTIGRAVITY_CONFIG.loadCodeAssistUrl, { metadata }));
       if (resolved) return { projectId: resolved, tierId };
       break;
     }

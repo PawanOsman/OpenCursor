@@ -8,6 +8,7 @@
  */
 
 import * as React from "react";
+import { Select } from "../../shared/Select";
 import { Icon } from "../../shared/icons";
 import { FeatureConfig, Persona, uid } from "../features";
 
@@ -51,13 +52,13 @@ export function PersonasPanel({
           <div className="row-title">Active Persona</div>
           <div className="row-desc">Applied automatically to new conversations.</div>
         </div>
-        <select value={features.activePersonaId} onChange={(e) => setFeatures({ activePersonaId: e.target.value })}>
+        <Select aria-label="Active persona" value={features.activePersonaId} onChange={(e) => setFeatures({ activePersonaId: e.target.value })}>
           {all.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
       <div className="section-label" style={{ marginTop: 24 }}>Built-in Personas</div>
       {builtinPersonas.map((p) => (

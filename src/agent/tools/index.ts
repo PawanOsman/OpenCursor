@@ -12,11 +12,15 @@ import type { Tool } from "./types";
 
 import { readFileTool, listDirTool, globTool, fileSearchTool, readLintsTool, strReplaceTool, writeTool, deleteFileTool, editNotebookTool } from "./files";
 import { grepTool, rgTool, semanticSearchTool, searchDocsTool } from "./search";
-import { runTerminalTool, awaitShellTool } from "./shell";
+import { runTerminalTool, awaitShellTool, writeStdinTool } from "./shell";
+import { browserNavigateTool, browserInspectTool, browserScreenshotTool, browserInteractTool, browserCloseTool } from "./browser";
 import { webSearchTool, webFetchTool } from "./web";
 import { todoWriteTool, todoReadTool, askQuestionTool, taskTool, waitTool, switchModeTool, writePlanTool } from "./agent";
+import { listAgentsTool, sendAgentMessageTool, followupAgentTool, interruptAgentTool, waitForAgentTool } from "./agent";
 import { callMcpToolTool, fetchMcpResourceTool, listMcpResourcesTool } from "./mcp";
 import { readContextTool } from "./context";
+import { goToDefinitionTool, findReferencesTool, workspaceSymbolsTool, renamePreviewTool } from "./language";
+import { runChecksTool, verificationTool, getGoalTool, updateGoalTool } from "./workflow";
 
 // Public surface re-exported so the rest of the app keeps importing from "./tools".
 export * from "./types";
@@ -34,6 +38,25 @@ export {
 // All tools. Names/descriptions/schemas come from schemas.ts via defineTool,
 // so this map is purely "tool name -> handler".
 export const TOOLS: Record<string, Tool> = {
+  BrowserNavigate: browserNavigateTool,
+  BrowserInspect: browserInspectTool,
+  BrowserScreenshot: browserScreenshotTool,
+  BrowserInteract: browserInteractTool,
+  BrowserClose: browserCloseTool,
+  WriteStdin: writeStdinTool,
+  ListAgents: listAgentsTool,
+  SendAgentMessage: sendAgentMessageTool,
+  FollowupAgent: followupAgentTool,
+  InterruptAgent: interruptAgentTool,
+  WaitForAgent: waitForAgentTool,
+  RunChecks: runChecksTool,
+  GetVerificationEvidence: verificationTool,
+  GetGoal: getGoalTool,
+  UpdateGoal: updateGoalTool,
+  GoToDefinition: goToDefinitionTool,
+  FindReferences: findReferencesTool,
+  WorkspaceSymbols: workspaceSymbolsTool,
+  RenamePreview: renamePreviewTool,
   ReadContext: readContextTool,
   Read: readFileTool,
   ListDir: listDirTool,
@@ -73,7 +96,8 @@ const PLAN_WRITE_MODES = new Set<Mode>(["plan", "agent", "debug"]);
 
 // Multitask is a coordinator: it delegates to subagents (Task), manages todos,
 // and may read/search — but it must never mutate files or the shell itself.
-const MULTITASK_BLOCKED = new Set(["StrReplace", "Write", "Delete", "EditNotebook", "Shell", "WritePlan", "CallMcpTool", "FetchMcpResource"]);
+const MULTITASK_BLOCKED = new Set(["StrReplace", "Write", "Delete", "EditNotebook", "Shell", "RunChecks", "WritePlan", "CallMcpTool", "FetchMcpResource"]);
+for (const name of ["WriteStdin", "BrowserNavigate", "BrowserInspect", "BrowserScreenshot", "BrowserInteract", "BrowserClose"]) MULTITASK_BLOCKED.add(name);
 export const MULTITASK_TOOLS = new Set(
   Object.keys(TOOLS).filter((name) => !MULTITASK_BLOCKED.has(name)),
 );

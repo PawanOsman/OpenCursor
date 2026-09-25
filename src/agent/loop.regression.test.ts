@@ -10,9 +10,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StreamChatOpts } from "./provider";
 import type { RunAgentOptions } from "./loopTypes";
-import type { AgentEvent, ProviderEvent, ResponsesReasoning, Step, ToolCall, WireMessage } from "./types";
+import type { AgentEvent, ChatReasoning, ProviderEvent, ResponsesReasoning, Step, ToolCall, WireMessage } from "./types";
 import type { Tool } from "./tools/types";
 import type { ToolSpec } from "./tools/schemas";
+import { OPTIONAL_BUILTIN_TOOLS } from "./deferredTools";
+import { ApiKeyPool } from "./provider/apiKeyPool";
 
 type ScriptedTurn = ProviderEvent[] | ((request: StreamChatOpts) => ProviderEvent[] | Promise<ProviderEvent[]>);
 
@@ -34,7 +36,7 @@ const fixture = vi.hoisted(() => {
 		requests: [] as StreamChatOpts[],
 		turns: [] as ScriptedTurn[],
 		approve: vi.fn(async (_name: string, _input: unknown, _callId?: string) => true),
-		callMcp: vi.fn(async () => "MCP completed"),
+		callMcp: vi.fn(async (): Promise<import("../integrations/mcpClient").McpToolResult> => ({ content: [{ type: "text", text: "MCP completed" }] })),
 	};
 });
 
@@ -46,6 +48,7 @@ vi.mock("./provider", () => ({
 		for (const event of typeof turn === "function" ? await turn(options) : turn) yield event;
 	},
 }));
+vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} }, workspace: { getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }) } }));
 vi.mock("./tools/files", async () => {
 	const { TOOL_SPECS: s } = await vi.importActual<typeof import("./tools/schemas")>("./tools/schemas");
 	return {
@@ -62,7 +65,7 @@ vi.mock("./tools/search", async () => {
 });
 vi.mock("./tools/shell", async () => {
 	const { TOOL_SPECS: s } = await vi.importActual<typeof import("./tools/schemas")>("./tools/schemas");
-	return { runTerminalTool: fixture.tool(s.Shell, true), awaitShellTool: fixture.tool(s.AwaitShell) };
+	return { runTerminalTool: fixture.tool(s.Shell, true), awaitShellTool: fixture.tool(s.AwaitShell), writeStdinTool: fixture.tool(s.WriteStdin, true) };
 });
 vi.mock("./tools/web", async () => {
 	const { TOOL_SPECS: s } = await vi.importActual<typeof import("./tools/schemas")>("./tools/schemas");
@@ -83,19 +86,22 @@ vi.mock("../stores/fileMutations", () => ({ mutateFile: vi.fn() }));
 vi.mock("../stores/pendingChanges", () => ({ pendingChanges: {} }));
 vi.mock("../context/workspaceUtils", () => ({
 	getWorkspaceRoot: () => "/workspace",
+	withWorkspaceRoot: (_root: string, work: () => unknown) => work(),
 	normalizeToolPaths: (_name: string, input: unknown) => input,
 }));
 vi.mock("../context/cursorContext", () => ({
 	buildUserInfoBlock: async () => "", buildOpenFilesBlock: async () => "",
 }));
-vi.mock("./approvalPolicy", () => ({
+vi.mock("./approvalPolicy", async () => ({
+	...await vi.importActual<typeof import("./approvalPolicy")>("./approvalPolicy"),
 	actionTypeForCall: (name: string) => ["Write", "Shell", "WritePlan"].includes(name) ? "edits" : undefined,
 }));
 vi.mock("./prompt", () => ({ systemPrompt: (mode: string) => `You are a coding assistant in ${mode} mode.` }));
-vi.mock("../integrations/mcpClient", () => ({
+vi.mock("../integrations/mcpClient", async () => ({
+	formatMcpToolResult: (await vi.importActual<typeof import("../integrations/mcpClient")>("../integrations/mcpClient")).formatMcpToolResult,
 	mcpManager: {
 		listTools: () => [{ qualifiedName: "mcp__test__write", server: "test", tool: { name: "write", inputSchema: {} } }],
-		callTool: fixture.callMcp,
+		callToolDetailed: fixture.callMcp,
 	},
 }));
 vi.mock("../logging", () => ({ logError: vi.fn() }));
@@ -177,6 +183,28 @@ beforeEach(() => {
 	vi.spyOn(writePlanTool, "execute").mockImplementation(async (input) => {
 		fixture.executions.push({ name: "WritePlan", input });
 		return { output: "Plan saved to .plans/test.md" };
+	});
+});
+
+describe("Compatible Chat reasoning continuations", () => {
+	const reasoning: ChatReasoning = { endpoint: "https://api.deepseek.com/v1", model: "deepseek-flash", content: "Exact provider reasoning" };
+	it("persists provider state across tools and restored history without duplicating visible thoughts", async () => {
+		const first = await run([
+			[{ type: "thinking-delta", text: "Visible thought" }, { type: "chat-reasoning", reasoning },
+				...toolTurn(call("Read", { path: "first.ts" }, "first"))],
+			answer("Inspected the file."),
+		], { model: reasoning.model, apiBaseUrl: reasoning.endpoint });
+		const assistants = first.history.filter(step => step.kind === "assistant");
+		expect(assistants[0].chatReasoning).toEqual(reasoning);
+		expect(assistants[1].chatReasoning).toBeUndefined();
+		expect(fixture.requests[1].messages).toContainEqual(expect.objectContaining({ role: "assistant", chatReasoning: reasoning }));
+		expect(first.events.filter(event => event.type === "thinking-delta").map(event => event.text).join("")).toBe("Visible thought");
+		expect(JSON.stringify(first.events)).not.toContain(reasoning.content);
+		expect(JSON.stringify(first.events)).not.toContain("chat-reasoning");
+		const restored: Step[] = JSON.parse(JSON.stringify(first.history));
+		await run([answer("Follow-up complete.")], { model: reasoning.model, apiBaseUrl: reasoning.endpoint, history: restored, prompt: "Explain" });
+		expect(fixture.requests[2].messages).toContainEqual(expect.objectContaining({ role: "assistant", chatReasoning: reasoning }));
+		for (const request of fixture.requests) expectCompleteToolGroups(request.messages);
 	});
 });
 
@@ -269,7 +297,7 @@ describe("runAgent PR 170 regressions", () => {
 	it.each(["Write", "Shell", "mcp__test__write"])("rejects %s in Plan even when approval would permit it", async (name) => {
 		const { history, events } = await run([
 			toolTurn(call(name, { path: "a.ts", contents: "unplanned", command: "touch a.ts" }, "forbidden")),
-			toolTurn(call("WritePlan", { title: "Plan", plan: "Inspect the implementation." }, "plan")),
+			toolTurn(call("WritePlan", { title: "Plan", content: "Inspect the implementation." }, "plan")),
 			answer("The plan is saved."),
 		], { mode: "plan" });
 		expect(history).toContainEqual(expect.objectContaining({ kind: "tool-result", callId: "forbidden", status: "error", output: expect.stringContaining("not allowed in plan mode") }));
@@ -334,7 +362,7 @@ describe("runAgent PR 170 regressions", () => {
 
 	it.each([undefined, 1024, 8192])("respects the configured Plan output limit (%s) on every request", async (maxTokens) => {
 		const { events } = await run([
-			toolTurn(call("WritePlan", { title: "Implementation", plan: "Inspect, implement, verify." }, "plan")),
+			toolTurn(call("WritePlan", { title: "Implementation", content: "Inspect, implement, verify." }, "plan")),
 			answer("The implementation plan is saved."),
 		], { mode: "plan", maxTokens });
 		expect(fixture.requests.map((request) => request.maxTokens)).toEqual([maxTokens, maxTokens]);
@@ -365,7 +393,7 @@ describe("runAgent PR 170 regressions", () => {
 	it("asks Plan to save its plan and accepts the final answer after WritePlan", async () => {
 		const { events } = await run([
 			answer("First inspect the code, then implement the change."),
-			toolTurn(call("WritePlan", { title: "Implementation", plan: "Inspect, implement, verify." }, "plan")),
+			toolTurn(call("WritePlan", { title: "Implementation", content: "Inspect, implement, verify." }, "plan")),
 			answer("The implementation plan is saved."),
 		], { mode: "plan" });
 		expect(JSON.stringify(fixture.requests[1].messages)).toContain("Call the WritePlan tool now");
@@ -730,6 +758,7 @@ describe("runAgent context consumption", () => {
 	});
 
 	it.each([false, true])("retains the current request and archived history after compaction (summary failure=%s)", async (summaryFails) => {
+		const apiKeyPool = new ApiKeyPool("provider", "https://example.test/v1", async () => ({ balance: "round-robin", credentials: [] }));
 		const marker = "OLD_FINDING_RETRIEVED_AFTER_COMPACTION";
 		const originalRequest = "Inspect the dependency initialization.";
 		const followup = "Recover the earlier finding and explain it.";
@@ -760,7 +789,9 @@ describe("runAgent context consumption", () => {
 			},
 			toolTurn(call("Read", { path: "verify-other.ts" }, "verify-other")),
 			answer("The earlier finding has been recovered and explained."),
-		], { prompt: followup, history, contextState, contextTokens: 16_000, maxTokens: 1024 });
+		], { prompt: followup, history, contextState, contextTokens: 12_000, maxTokens: 1024, apiKeyPool });
+		// Compaction and subsequent tool continuations share the live key pool.
+		for (const request of fixture.requests) expect(request.apiKeyPool).toBe(apiKeyPool);
 		expect(history.slice(0, originalHistory.length)).toEqual(originalHistory);
 		expect(events.filter((event) => event.type === "compaction")).toEqual([
 			{ type: "compaction", status: "running" },
@@ -798,7 +829,7 @@ describe("runAgent context consumption", () => {
 			toolTurn(call("TodoWrite", { todos: [pending] }, "pending-verification")),
 			answer("The dependency service is unavailable."),
 			answer("I need access to the service before verification can continue."),
-		], { prompt: "Verify the dependency path.", history, contextState, contextTokens: 16_000, maxTokens: 1024 });
+		], { prompt: "Verify the dependency path.", history, contextState, contextTokens: 12_000, maxTokens: 1024 });
 		expectFinished(first.events, "I need access to the service before verification can continue.", 4);
 		expect(contextState.checkpoint).toBeDefined();
 		expect(contextState.todos).toEqual([pending]);
@@ -819,7 +850,7 @@ describe("runAgent context consumption", () => {
 				return toolTurn(call("TodoWrite", { merge: true, todos: [{ id: "verify", status: "completed" }] }, "finished-verification"));
 			},
 			answer("Verification is complete."),
-		], { prompt: "The service is available. Continue verification.", ...restored, contextTokens: 16_000, maxTokens: 1024 });
+		], { prompt: "The service is available. Continue verification.", ...restored, contextTokens: 12_000, maxTokens: 1024 });
 		expectFinished(second.events, "Verification is complete.", 3);
 		expect(second.events.filter((event) => event.type === "compaction")).toEqual([]);
 		expect(fixture.requests.every((request) => request.tools !== undefined)).toBe(true);
@@ -827,6 +858,52 @@ describe("runAgent context consumption", () => {
 		expect(second.history).toContainEqual(expect.objectContaining({ kind: "tool-result", output: expect.stringContaining("DETAIL_PRESERVED_IN_SAVED_TRANSCRIPT") }));
 		for (const request of fixture.requests) expectCompleteToolGroups(request.messages);
 	});
+});
+
+describe("chat-only account transport capabilities", () => {
+  it("runs Ask without tool or MCP schemas and refuses fabricated calls", async () => {
+    const inventory = vi.spyOn(mcpManager, "listTools");
+    for (const oauthKind of ["trae", "windsurf"] as const) {
+      fixture.requests.length = 0;
+      fixture.turns.length = 0;
+      const result = await run([request => {
+        expect(request.tools).toEqual([]);
+        expect(JSON.stringify(request.messages)).toContain("No tools are available");
+        expect(JSON.stringify(request.messages)).not.toContain("Connected MCP tool schemas are available on demand");
+        return answer("Here is an explanation based on the supplied code.");
+      }], { mode: "ask", oauthKind });
+      expectFinished(result.events, "Here is an explanation based on the supplied code.", 1);
+
+      for (const guessed of ["Read", "mcp__test__write", "SwitchMode"]) {
+        fixture.requests.length = 0;
+        fixture.turns.length = 0;
+        const rejected = await run([toolTurn(call(guessed, { path: "file.ts", target_mode_id: "agent" }, "invented"))], { mode: "ask", oauthKind });
+        expect(rejected.events).toContainEqual({ type: "error", message: "This chat-only provider returned an unsupported tool call. No action was executed." });
+        expect(rejected.events).toContainEqual({ type: "run-status", status: "error" });
+        expect(rejected.events.some(event => event.type === "tool-call-started" || event.type === "mode-changed")).toBe(false);
+        expect(fixture.requests[0].tools).toEqual([]);
+      }
+    }
+    expect(inventory).not.toHaveBeenCalled();
+    expect(fixture.executions).toEqual([]);
+    expect(fixture.callMcp).not.toHaveBeenCalled();
+    expect(fixture.approve).not.toHaveBeenCalled();
+  });
+
+  it("rejects Agent and other tool modes before a chat-only account starts work", async () => {
+    for (const oauthKind of ["trae", "windsurf"] as const) {
+      for (const mode of ["agent", "plan", "debug", "multitask", "project"] as const) {
+        const { history, events } = await run([], { oauthKind, mode });
+        expect(events).toContainEqual({ type: "error", message: `${oauthKind === "trae" ? "Trae" : "Windsurf"} supports chat only. Switch to Ask mode to use this account, or select a provider with tool support.` });
+        expect(events).toContainEqual({ type: "run-status", status: "error" });
+        expect(history).toEqual([]);
+      }
+    }
+    expect(fixture.requests).toEqual([]);
+    expect(fixture.executions).toEqual([]);
+    expect(fixture.callMcp).not.toHaveBeenCalled();
+    expect(fixture.approve).not.toHaveBeenCalled();
+  });
 });
 
 describe("immutable run permissions", () => {
@@ -851,11 +928,34 @@ describe("immutable run permissions", () => {
     expect(fixture.requests[1].tools?.some(t => ["Write", "WebFetch"].includes(t.function.name))).toBe(false);
   });
   it("runs generic MCP calls through approval and beforeMcp hooks", async () => {
-    const hook = vi.fn(async () => "blocked fixture");
+    const hook = vi.fn(async (event: string) => event === "beforeMcp" ? "blocked fixture" : undefined);
     await run([toolTurn(call("CallMcpTool", { server: "test", toolName: "write", arguments: { value: 1 } }, "mcp")), answer("Blocked")], { onHook: hook });
     expect(fixture.approve).toHaveBeenCalledWith("mcp__test__write", { value: 1 }, "mcp");
     expect(hook).toHaveBeenCalledWith('beforeMcp', { tool: "mcp__test__write", tool_input: '{"value":1}' }, "mcp__test__write", expect.any(AbortSignal));
     expect(fixture.callMcp).not.toHaveBeenCalled();
+  });
+  it("validates wrapped MCP arguments against the actual tool schema before requesting approval", async () => {
+    vi.spyOn(mcpManager, "listTools").mockReturnValue([{ qualifiedName: "mcp__test__write", server: "test", tool: { name: "write", inputSchema: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false } } }]);
+    const { history } = await run([toolTurn(call("CallMcpTool", { server: "test", toolName: "write", arguments: { value: "invalid" } }, "bad-mcp")), answer("Blocked invalid call")]);
+    expect(fixture.approve).not.toHaveBeenCalled(); expect(fixture.callMcp).not.toHaveBeenCalled();
+    expect(history).toContainEqual(expect.objectContaining({ callId: "bad-mcp", status: "error", output: expect.stringContaining("invalid MCP arguments") }));
+  });
+  it("forwards bounded MCP images and structured data while using explicit error status", async () => {
+    const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jz1sAAAAASUVORK5CYII=";
+    fixture.callMcp.mockResolvedValueOnce({ content: [{ type: "text", text: "error: is quoted diagnostic text" }, { type: "image", mimeType: "image/png", data: image }], structuredContent: { checked: true } });
+    const journal = vi.fn(async () => {});
+    const { history } = await run([toolTurn(call("mcp__test__write", {}, "rich-mcp")), answer("Observed result")], { onRunEvent: journal });
+    expect(history).toContainEqual(expect.objectContaining({ callId: "rich-mcp", status: "completed", image: { mime: "image/png", base64: image }, output: expect.stringContaining('"checked":true') }));
+    expect(JSON.stringify(fixture.requests[1].messages)).toContain(image);
+    expect(journal).toHaveBeenCalledWith(expect.objectContaining({ type: "approval", data: expect.objectContaining({ callId: "rich-mcp", approved: true }) }));
+  });
+  it("honors the MCP permission hook and journals a veto before executing", async () => {
+    const journal = vi.fn(async () => {});
+    const hook = vi.fn(async (event: string) => event === "permissionRequest" ? "permission veto" : undefined);
+    const { history } = await run([toolTurn(call("mcp__test__write", {}, "veto-mcp")), answer("Blocked")], { onHook: hook, onRunEvent: journal });
+    expect(fixture.approve).not.toHaveBeenCalled(); expect(fixture.callMcp).not.toHaveBeenCalled();
+    expect(history).toContainEqual(expect.objectContaining({ callId: "veto-mcp", status: "error", output: expect.stringContaining("permission veto") }));
+    expect(journal).toHaveBeenCalledWith(expect.objectContaining({ type: "approval", data: expect.objectContaining({ approved: false, reason: "permission-hook" }) }));
   });
   it("does not dispatch a tool if Stop arrives while approval resolves", async () => {
     const abort = new AbortController();
@@ -954,7 +1054,7 @@ describe("cache-safe loop and background scheduling", () => {
     const gate = new Promise<void>(resolve => { release = resolve; });
     let childDone = false;
     const { history, events } = await run([
-      toolTurn(call("Task", { prompt: "Investigate worker.ts", run_in_background: true }, "worker")),
+      toolTurn(call("Task", { prompt: "Investigate worker.ts", description: "Investigate worker", run_in_background: true }, "worker")),
       async () => { await gate; childDone = true; return answer("The child found the missing case."); },
       ...Array.from({ length: 9 }, (_, i) => () => {
         expect(childDone).toBe(false);
@@ -975,9 +1075,10 @@ describe("cache-safe loop and background scheduling", () => {
   });
 
   it("resolves child model options and preserves parent restrictions in delegation", async () => {
+    const apiKeyPool = new ApiKeyPool("provider", "https://example.test/v1", async () => ({ balance: "round-robin", credentials: [] }));
     const resolveModelOptions = vi.fn(() => ({ contextTokens: 32_000, modelParams: { reasoningEffort: "low" } }));
     const { events } = await run([
-      toolTurn(call("Task", { prompt: "Inspect only", model: "small-model", readonly: true }, "child")),
+      toolTurn(call("Task", { prompt: "Inspect only", description: "Inspect", model: "small-model", readonly: true }, "child")),
       request => {
         expect(request.model).toBe("small-model");
         expect(request.modelParams).toEqual({ reasoningEffort: "low" });
@@ -986,7 +1087,8 @@ describe("cache-safe loop and background scheduling", () => {
         return answer("Inspected");
       },
       answer("Done"),
-    ], { prompt: "Do not run tests.", modelParams: { reasoningEffort: "xhigh" }, maxTokens: 8192, availableModels: ["test-model", "small-model"], resolveModelOptions });
+    ], { prompt: "Do not run tests.", modelParams: { reasoningEffort: "xhigh" }, maxTokens: 8192, availableModels: ["test-model", "small-model"], resolveModelOptions, apiKeyPool });
+    for (const request of fixture.requests) expect(request.apiKeyPool).toBe(apiKeyPool);
     expect(resolveModelOptions).toHaveBeenCalledWith("small-model");
     expectFinished(events, "Done", 3);
   });
@@ -1012,11 +1114,34 @@ describe("cache-safe loop and background scheduling", () => {
       answer("Browser unavailable"),
     ]);
     expect(fixture.callMcp).not.toHaveBeenCalled();
-    expect(history).toContainEqual(expect.objectContaining({ callId: "missing-alias", output: expect.stringContaining("namespace browser remains unavailable") }));
+    expect(history).toContainEqual(expect.objectContaining({ callId: "missing-alias", output: expect.stringContaining("Unknown or unavailable tool") }));
     expect(fixture.approve).not.toHaveBeenCalled();
-    expect(history).toContainEqual(expect.objectContaining({ callId: "missing", output: expect.stringContaining("unavailable in the current tool registry") }));
+    expect(history).toContainEqual(expect.objectContaining({ callId: "missing", output: expect.stringContaining("Unknown or unavailable tool") }));
     expect(history).toContainEqual(expect.objectContaining({ callId: "inventory", output: expect.stringContaining("Connected MCP namespaces: test") }));
     expectFinished(events, "Browser unavailable", 3);
+  });
+
+  it("executes IDE-suffixed built-ins with canonical names and validates their arguments", async () => {
+    const { history, events } = await run([
+      request => {
+        expect(request.tools?.some(tool => tool.function.name === "Read")).toBe(true);
+        expect(request.tools?.some(tool => tool.function.name.endsWith("_ide"))).toBe(false);
+        return [
+          { type: "tool-call-start", index: 0, id: "read-alias", name: "Read_ide_ide" },
+          ...toolTurn(call("Read_ide_ide", { path: "file.ts" }, "read-alias"), call("Read_ide", {}, "bad-alias")),
+        ];
+      },
+      answer("Read complete"),
+    ]);
+    expect(fixture.executions.filter(tool => tool.name === "Read")).toEqual([{ name: "Read", input: { path: "file.ts" } }]);
+    expect(history).toContainEqual(expect.objectContaining({ callId: "read-alias", name: "Read", status: "completed" }));
+    expect(history).toContainEqual(expect.objectContaining({ callId: "bad-alias", status: "error", output: expect.stringContaining("path") }));
+    const toolEvents = events.filter(event => event.type === "tool-call-started" || event.type === "tool-call-completed");
+    expect(toolEvents.length).toBeGreaterThan(0);
+    expect(toolEvents.every(event => "name" in event && event.name === "Read")).toBe(true);
+    const assistant = history.find(step => step.kind === "assistant" && step.calls?.length);
+    expect(assistant?.kind === "assistant" && assistant.calls?.every(call => call.name === "Read")).toBe(true);
+    expectFinished(events, "Read complete", 2);
   });
 });
 
@@ -1039,7 +1164,7 @@ describe("background task lifecycle and registry changes", () => {
     const controller = new AbortController();
     let childSignal: AbortSignal | undefined;
     const { history, events } = await run([
-      toolTurn(call("Task", { prompt: "Review", run_in_background: true }, "worker")),
+      toolTurn(call("Task", { prompt: "Review", description: "Review", run_in_background: true }, "worker")),
       async request => {
         childSignal = request.signal;
         await new Promise<void>(resolve => request.signal.addEventListener("abort", () => resolve(), { once: true }));
@@ -1058,10 +1183,10 @@ describe("background task lifecycle and registry changes", () => {
     const gate = new Promise<void>(resolve => { release = resolve; });
     const child = async () => { await gate; return answer("Child result"); };
     const { history, events } = await run([
-      toolTurn(...Array.from({ length: 5 }, (_, i) => call("Task", { prompt: `Review part ${i}`, run_in_background: true }, `child-${i}`))),
+      toolTurn(...Array.from({ length: 5 }, (_, i) => call("Task", { prompt: `Review part ${i}`, description: `Part ${i}`, run_in_background: true }, `child-${i}`))),
       child, child, child, child,
       request => {
-        expect(JSON.stringify(request.messages)).toContain("4 background tasks are already running");
+        expect(JSON.stringify(request.messages)).toContain("4 collaborators are already running");
         release(); return toolTurn(call("Read", { path: "integration.ts" }, "parent-read"));
       },
       ...Array.from({ length: 5 }, () => answer("All results integrated")),
@@ -1091,5 +1216,322 @@ describe("background task lifecycle and registry changes", () => {
     expect(history).toContainEqual(expect.objectContaining({ callId: "missing", status: "error" }));
     expect(history).toContainEqual(expect.objectContaining({ callId: "available", status: "completed" }));
     expectFinished(events, "Browser tool completed", 4);
+  });
+});
+
+describe("persistent collaborators, steering and goal evidence", () => {
+  it("resumes a saved collaborator with its identity, history and read-only ceiling", async () => {
+    const contextState: NonNullable<RunAgentOptions["contextState"]> = {};
+    const first = await run([
+      toolTurn(call("Task", { prompt: "Inspect the parser", description: "Parser review", readonly: true }, "reviewer")),
+      answer("The original finding was an unchecked index."),
+      answer("Review recorded."),
+    ], { contextState, promptCacheKey: "persistent" });
+    expect(contextState.agents).toHaveLength(1);
+    expect(contextState.agents![0]).toMatchObject({ id: "reviewer", status: "completed", readonly: true });
+    const saved = JSON.parse(JSON.stringify({ history: first.history, contextState }));
+    const second = await run([
+      toolTurn(call("Task", { prompt: "Check whether that finding remains", description: "Continue review", resume: "reviewer", readonly: false }, "resume-reviewer")),
+      request => {
+        expect(request.promptCacheKey).toBe("persistent/task/reviewer");
+        expect(JSON.stringify(request.messages)).toContain("The original finding was an unchecked index.");
+        expect(JSON.stringify(request.messages)).toContain("Check whether that finding remains");
+        expect(request.tools?.map(tool => tool.function.name)).not.toContain("Write");
+        return answer("The original finding is resolved.");
+      },
+      toolTurn(call("ListAgents", {}, "registry")),
+      answer("Follow-up recorded."),
+    ], { ...saved, prompt: "Continue the review", promptCacheKey: "persistent" });
+    expect(saved.contextState.agents).toHaveLength(1);
+    expect(saved.contextState.agents[0]).toMatchObject({ id: "reviewer", readonly: true, status: "completed", result: "The original finding is resolved." });
+    expect(second.history).toContainEqual(expect.objectContaining({ callId: "registry", output: expect.stringContaining('"id":"reviewer"') }));
+    expectFinished(second.events, "Follow-up recorded.", 7);
+  });
+
+  it("queues a message for an idle collaborator without silently starting another run", async () => {
+    const contextState: NonNullable<RunAgentOptions["contextState"]> = { agents: [{ id: "saved-agent", title: "Review", model: "test-model", readonly: true,
+      status: "running", history: [{ kind: "assistant", calls: [], text: "Previous evidence" }], mailbox: [], updatedAt: 1 }] };
+    const { history, events } = await run([
+      toolTurn(call("SendAgentMessage", { id: "saved-agent", message: "Check the changed assertion" }, "message")),
+      toolTurn(call("ListAgents", {}, "list")),
+      answer("Message queued for the interrupted collaborator."),
+    ], { contextState });
+    expect(contextState.agents![0]).toMatchObject({ status: "interrupted", mailbox: ["Check the changed assertion"] });
+    expect(history).toContainEqual(expect.objectContaining({ callId: "list", output: expect.stringContaining('"queuedMessages":1') }));
+    expect(fixture.requests.filter(request => request.promptCacheKey?.includes("/task/"))).toHaveLength(0);
+    expectFinished(events, "Message queued for the interrupted collaborator.", 3);
+  });
+
+  it("delivers running collaborator messages at its next safe boundary without restarting it", async () => {
+    let release!: () => void, observed!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const delivery = new Promise<void>(resolve => { observed = resolve; });
+    const contextState: NonNullable<RunAgentOptions["contextState"]> = {};
+    const { events } = await run([
+      toolTurn(call("Task", { prompt: "Review worker.ts", description: "Worker", run_in_background: true }, "worker")),
+      async () => { await gate; return toolTurn(call("Read", { path: "worker.ts" }, "child-read")); },
+      toolTurn(call("SendAgentMessage", { id: "worker", message: "Also inspect the cancellation branch" }, "steer-child")),
+      async () => { release(); await delivery; return toolTurn(call("WaitForAgent", { id: "worker", timeout_ms: 1000 }, "await-child")); },
+      request => {
+        try { expect(JSON.stringify(request.messages)).toContain("Parent agent message:\\nAlso inspect the cancellation branch"); }
+        finally { observed(); }
+        return answer("Cancellation branch inspected.");
+      },
+      answer("The review includes cancellation."),
+    ], { contextState });
+    expect(contextState.agents).toHaveLength(1);
+    expect(contextState.agents![0]).toMatchObject({ status: "completed", mailbox: [], result: "Cancellation branch inspected." });
+    expect(fixture.requests.filter(request => request.promptCacheKey?.includes("/task/"))).toHaveLength(2);
+    expectFinished(events, "The review includes cancellation.", 6);
+  });
+
+  it("appends user steering before the next request while preserving prior evidence", async () => {
+    const steering: string[] = [];
+    const onRunEvent = vi.fn(async () => {});
+    const { history, events } = await run([
+      () => { steering.push("Keep the public API unchanged; inspect only."); return toolTurn(call("Read", { path: "api.ts" }, "read-api")); },
+      request => {
+        expect(JSON.stringify(request.messages)).toContain("Keep the public API unchanged; inspect only.");
+        expect(request.messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "read-api", content: "file contents" }));
+        return answer("Inspected the API without changing it.");
+      },
+    ], { drainSteering: () => steering.splice(0), onRunEvent });
+    expect(history.filter(step => step.kind === "user" && step.text === "Keep the public API unchanged; inspect only.")).toHaveLength(1);
+    expect(onRunEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "steering", data: expect.objectContaining({ text: "Keep the public API unchanged; inspect only." }) }));
+    expect(fixture.executions.map(item => item.name)).toEqual(["Read"]);
+    expectFinished(events, "Inspected the API without changing it.", 2);
+  });
+
+  it("continues the same run when steering arrives during an otherwise final answer", async () => {
+    const steering: string[] = [];
+    const controller = new AbortController();
+    const onRunEvent = vi.fn(async (_event: { type: string }) => {});
+    const text = "Also explain the cancellation behavior.";
+    const { history, events } = await run([
+      request => {
+        expect(request.signal).toBe(controller.signal);
+        steering.push(text);
+        return answer("The first explanation is complete.");
+      },
+      request => {
+        expect(request.signal).toBe(controller.signal);
+        expect(request.signal.aborted).toBe(false);
+        expect(request.messages).toContainEqual(expect.objectContaining({ role: "assistant", content: "The first explanation is complete." }));
+        expect(request.messages.at(-1)?.role).toBe("user");
+        expect(JSON.stringify(request.messages.at(-1)?.content)).toContain(text);
+        return answer("Cancellation preserves the completed work.");
+      },
+    ], { runId: "steered-run", signal: controller.signal, drainSteering: async () => { await Promise.resolve(); return steering.splice(0); }, onRunEvent });
+    expect(history.filter(step => step.kind === "user" && step.text === text)).toHaveLength(1);
+    expect(onRunEvent.mock.calls.filter(([event]) => event.type === "steering")).toHaveLength(1);
+    expect(onRunEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "steering", data: { text, runId: "steered-run" } }));
+    expect(events.filter(event => event.type === "run-status")).toEqual([
+      { type: "run-status", status: "running" }, { type: "run-status", status: "finished" },
+    ]);
+    expect(history.some(step => step.kind === "user" && step.synthetic && step.text.includes("user stopped"))).toBe(false);
+    expectFinished(events, "Cancellation preserves the completed work.", 2);
+  });
+
+  it("lets an active tool finish before applying steering exactly once", async () => {
+    const steering: string[] = [];
+    const text = "Use the result to explain the API; do not edit it.";
+    vi.spyOn(TOOLS.Read, "execute").mockImplementationOnce(async (_input, signal) => {
+      expect(signal?.aborted).toBe(false);
+      steering.push(text);
+      await Promise.resolve();
+      expect(signal?.aborted).toBe(false);
+      return { output: "complete API source" };
+    });
+    const { history, events } = await run([
+      toolTurn(call("Read", { path: "api.ts" }, "active-read")),
+      request => {
+        expectCompleteToolGroups(request.messages);
+        const resultIndex = request.messages.findIndex(message => message.role === "tool" && message.tool_call_id === "active-read");
+        expect(request.messages[resultIndex]).toEqual(expect.objectContaining({ content: "complete API source" }));
+        expect(request.messages[resultIndex + 1]?.role).toBe("user");
+        expect(JSON.stringify(request.messages[resultIndex + 1]?.content)).toContain(text);
+        return answer("The API is read-only for this task.");
+      },
+    ], { drainSteering: () => steering.splice(0) });
+    expect(history.filter(step => step.kind === "user" && step.text === text)).toHaveLength(1);
+    expect(events.filter(event => event.type === "run-status" && event.status === "cancelled")).toEqual([]);
+    expectFinished(events, "The API is read-only for this task.", 2);
+  });
+
+  it("keeps late steering queued when the step ceiling prevents another request", async () => {
+    const steering: string[] = [];
+    const text = "Inspect the second file next.";
+    const { history, events } = await run([
+      () => { steering.push(text); return toolTurn(call("Read", { path: "first.ts" }, "limited-read")); },
+    ], { maxSteps: 1, drainSteering: () => steering.splice(0) });
+    expect(steering).toEqual([text]);
+    expect(history.some(step => step.kind === "user" && step.text === text)).toBe(false);
+    expect(events).toContainEqual({ type: "max-steps", steps: 1 });
+    expect(fixture.requests).toHaveLength(1);
+  });
+
+  it("does not drain steering after cancellation or start a request during steering persistence", async () => {
+    const steering = ["Keep this follow-up queued."];
+    const controller = new AbortController();
+    controller.abort();
+    await run([], { signal: controller.signal, drainSteering: () => steering.splice(0) });
+    expect(steering).toEqual(["Keep this follow-up queued."]);
+    expect(fixture.requests).toHaveLength(0);
+
+    const active = new AbortController();
+    const pending = ["Apply this direction."];
+    const { history, events } = await run([], {
+      signal: active.signal, drainSteering: () => pending.splice(0),
+      onRunEvent: async event => { if (event.type === "steering") active.abort(); },
+    });
+    expect(history.filter(step => step.kind === "user" && step.text === "Apply this direction.")).toHaveLength(1);
+    expect(fixture.requests).toHaveLength(0);
+    expect(events).toContainEqual({ type: "run-status", status: "cancelled" });
+  });
+
+  it.each(["cancellation", "budget"])("leaves durable steering pending when %s wins during mailbox flush", async reason => {
+    const pending = ["Inspect this after saving the mailbox."];
+    const controller = new AbortController();
+    let exhausted = false;
+    const onRunEvent = vi.fn(async (_event: { type: string }) => {});
+    const { history } = await run([], {
+      signal: controller.signal, budgetExhausted: () => exhausted, onRunEvent,
+      drainSteering: async () => {
+        await Promise.resolve();
+        if (reason === "cancellation") controller.abort();
+        else exhausted = true;
+        return pending.slice();
+      },
+    });
+    expect(history.some(step => step.kind === "user" && step.text === pending[0])).toBe(false);
+    expect(onRunEvent.mock.calls.filter(([event]) => event.type === "steering")).toHaveLength(0);
+    expect(fixture.requests).toHaveLength(0);
+  });
+
+  it("stops before another provider request when observed usage consumes the goal budget", async () => {
+    const onGoalUsage = vi.fn(), onGoalStatus = vi.fn();
+    const { history, events } = await run([
+      [...toolTurn(call("Read", { path: "bounded.ts" }, "bounded-read")), { type: "usage", promptTokens: 8, completionTokens: 2 }],
+    ], { goal: { objective: "Inspect bounded.ts", status: "active", tokenBudget: 100, tokensUsed: 95 }, onGoalUsage, onGoalStatus });
+    expect(fixture.requests).toHaveLength(1);
+    expect(onGoalUsage).toHaveBeenCalledWith(10);
+    expect(onGoalStatus).toHaveBeenCalledWith("budgetLimited");
+    expect(history).toContainEqual(expect.objectContaining({ callId: "bounded-read", status: "error", output: expect.stringContaining("budget exhausted") }));
+    expect(fixture.executions).toHaveLength(0);
+    expect(events).toContainEqual(expect.objectContaining({ type: "run-result", text: expect.stringContaining("105/100") }));
+  });
+
+  it("shares the observed token ceiling with a running child before it executes mutations", async () => {
+    const onGoalStatus = vi.fn();
+    const { history } = await run([
+      toolTurn(call("Task", { prompt: "Implement the change", description: "Bounded child" }, "bounded-child")),
+      [...toolTurn(call("Write", { path: "must-not-change.ts", contents: "unsafe after budget" }, "child-write")), { type: "usage", promptTokens: 8, completionTokens: 2 }],
+    ], { goal: { objective: "Bounded collaboration", status: "active", tokenBudget: 100, tokensUsed: 95 }, onGoalStatus });
+    expect(fixture.requests).toHaveLength(2);
+    expect(fixture.executions.some(item => item.name === "Write")).toBe(false);
+    expect(history).toContainEqual(expect.objectContaining({ callId: "bounded-child", output: expect.stringContaining("parent goal token budget") }));
+    expect(onGoalStatus).toHaveBeenCalledWith("budgetLimited");
+  });
+
+  it("does not complete a goal while its observed verification check is failing", async () => {
+    vi.spyOn(TOOLS.Shell, "execute").mockResolvedValueOnce({ output: "Assertion failed", outcome: { status: "failed", exitCode: 1 } });
+    const onGoalStatus = vi.fn();
+    const goal = { objective: "Fix the failing test", status: "active", tokensUsed: 0 };
+    const { history, events } = await run([
+      toolTurn(call("RunChecks", { command: "node fixture-check.cjs" }, "check")),
+      toolTurn(call("GetVerificationEvidence", {}, "evidence"), call("UpdateGoal", { status: "complete" }, "premature-completion")),
+      answer("The check still fails; the goal remains incomplete."),
+    ], { goal, onGoalStatus });
+    expect(goal.status).toBe("active"); expect(onGoalStatus).not.toHaveBeenCalled();
+    expect(history).toContainEqual(expect.objectContaining({ callId: "evidence", output: expect.stringContaining('"status":"checks-failed"') }));
+    expect(history).toContainEqual(expect.objectContaining({ callId: "premature-completion", status: "error", output: expect.stringContaining("verification checks are failing") }));
+    expectFinished(events, "The check still fails; the goal remains incomplete.", 3);
+  });
+
+  it("reports a failed TodoWrite honestly and does not synthesize successful task state", async () => {
+    vi.spyOn(TOOLS.TodoWrite, "execute").mockRejectedValueOnce(new Error("Todo storage failed"));
+    const contextState: NonNullable<RunAgentOptions["contextState"]> = {};
+    const { history, events } = await run([
+      toolTurn(call("TodoWrite", { todos: [{ id: "work", content: "Fix the bug", status: "completed" }] }, "failed-todo")),
+      answer("The task list could not be saved."),
+    ], { contextState });
+    expect(history).toContainEqual(expect.objectContaining({ callId: "failed-todo", status: "error", output: expect.stringContaining("Todo storage failed") }));
+    expect(contextState.todos ?? []).toEqual([]);
+    expectFinished(events, "The task list could not be saved.", 2);
+  });
+});
+
+describe("optional built-in schema discovery", () => {
+  function schemaReference(request: StreamChatOpts, callId: string, name: string): string {
+    const result = request.messages.find(message => message.role === "tool" && message.tool_call_id === callId);
+    const body = result?.role === "tool" ? String(result.content) : "";
+    const line = body.split("\n").find(value => value.startsWith(`${name} —`));
+    const id = line?.match(/ReadContext \{"id":"([^"]+)"\}/)?.[1];
+    expect(id, `catalog reference for ${name}`).toBeDefined();
+    return id!;
+  }
+
+  it("keeps optional schemas out of the baseline, activates one on read and restores a used schema", async () => {
+    const names = (request: StreamChatOpts) => request.tools?.map(tool => tool.function.name) ?? [];
+    const execute = vi.spyOn(TOOLS.GetGoal, "execute");
+    const first = await run([
+      request => {
+        expect(names(request).filter(name => OPTIONAL_BUILTIN_TOOLS.has(name))).toEqual([]);
+        expect(names(request)).toEqual(expect.arrayContaining(["Task", "Shell", "Read", "ReadContext"]));
+        expect(JSON.stringify(request.messages)).toContain('id\\\":\\\"tools');
+        return toolTurn(call("ReadContext", { id: "tools", pattern: "GetGoal" }, "find-goal"));
+      },
+      request => {
+        expect(names(request)).not.toContain("GetGoal");
+        return toolTurn(call("ReadContext", { id: schemaReference(request, "find-goal", "GetGoal") }, "load-goal"));
+      },
+      request => {
+        expect(names(request).filter(name => OPTIONAL_BUILTIN_TOOLS.has(name))).toEqual(["GetGoal"]);
+        expect(execute).not.toHaveBeenCalled();
+        return toolTurn(call("GetGoal", {}, "read-goal"));
+      },
+      answer("No goal is configured."),
+    ], { promptCacheKey: "deferred-builtins" });
+    expectFinished(first.events, "No goal is configured.", 4);
+    const second = await run([
+      request => {
+        expect(names(request).filter(name => OPTIONAL_BUILTIN_TOOLS.has(name))).toEqual(["GetGoal"]);
+        return answer("The goal tool is available for this follow-up.");
+      },
+    ], { history: JSON.parse(JSON.stringify(first.history)), prompt: "Continue", promptCacheKey: "deferred-builtins" });
+    expectFinished(second.events, "The goal tool is available for this follow-up.", 5);
+  });
+
+  it("loading an interactive tool schema cannot expand a narrowed mode's permissions", async () => {
+    const { events, history } = await run([
+      toolTurn(call("ReadContext", { id: "tools", pattern: "WriteStdin" }, "find-stdin")),
+      request => toolTurn(call("ReadContext", { id: schemaReference(request, "find-stdin", "WriteStdin") }, "load-stdin")),
+      toolTurn(call("SwitchMode", { target_mode_id: "plan" }, "narrow")),
+      request => {
+        expect(request.tools?.map(tool => tool.function.name)).not.toContain("WriteStdin");
+        return toolTurn(call("WriteStdin", { shell_id: "other", chars: "echo unapproved\r" }, "blocked-stdin"));
+      },
+      toolTurn(call("WritePlan", { title: "Plan", content: "Inspect before executing." }, "save-plan")),
+      answer("The plan remains read-only."),
+    ]);
+    expect(history).toContainEqual(expect.objectContaining({ callId: "blocked-stdin", status: "error", output: expect.stringContaining("not allowed in plan mode") }));
+    expect(fixture.executions.some(item => item.name === "WriteStdin")).toBe(false);
+    expect(fixture.approve.mock.calls.some(([name]) => name === "WriteStdin")).toBe(false);
+    expectFinished(events, "The plan remains read-only.", 6);
+  });
+
+  it("does not advertise or activate disabled host tools even if an earlier run used them", async () => {
+    const previous: Step[] = [{ kind: "user", text: "Previous request" },
+      { kind: "assistant", text: "", calls: [call("WriteStdin", { shell_id: "old" }, "old-stdin")] },
+      { kind: "tool-result", callId: "old-stdin", name: "WriteStdin", output: "Previous session completed", status: "completed" }];
+    const { history, events } = await run([
+      request => {
+        expect(request.tools?.map(tool => tool.function.name)).not.toContain("WriteStdin");
+        return toolTurn(call("ReadContext", { id: "tools", pattern: "WriteStdin" }, "find-disabled"));
+      },
+      answer("Interactive input is disabled for this run."),
+    ], { history: previous, unavailableTools: ["WriteStdin"] });
+    expect(history).toContainEqual(expect.objectContaining({ callId: "find-disabled", output: expect.stringContaining("No literal match") }));
+    expectFinished(events, "Interactive input is disabled for this run.", 2);
   });
 });

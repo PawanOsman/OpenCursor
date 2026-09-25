@@ -8,12 +8,15 @@
  */
 
 import * as vscode from "vscode";
+import { PROVIDER_MODELS } from "../shared/providerModels";
+import { MODEL_PROVIDER_ALIASES } from "../shared/modelAliases";
+import { supportsFastMode, MODEL_SPEED_DESCRIPTION, type ModelSpeed } from "../shared/modelSpeed";
 import type { McpServerConfig } from "../integrations/mcpClient";
 import type { Persona } from "../agent/personas";
 import type { LlamacppModel, LlamacppServerConfig } from "../agent/llamacpp";
 import { DEFAULT_APPROVAL, type ApprovalPolicy } from "../agent/approvalPolicy";
 import type { DocSource } from "../agent/docsIndex";
-import { type TeamDef, withBuiltinTeamSubagents, withBuiltinTeams, withoutBuiltinTeamSubagents, withoutBuiltinTeams } from "../agent/teams";
+import { type TeamDef, type BuiltinSubagentOverrides, builtinSubagentOverrides, withBuiltinTeamSubagents, withBuiltinTeams, withoutBuiltinTeamSubagents, withoutBuiltinTeams } from "../agent/teams";
 
 export type { TeamDef };
 
@@ -25,12 +28,13 @@ export interface SubagentDef {
 	readonly: boolean;
 	/** Optional model override for this subagent (else uses subagentModel / chat model). */
 	model?: string;
-	/** Built-in presets cannot be deleted; edits should be cloned. */
+	/** Built-in presets can be edited and reset, but cannot be deleted. */
 	builtin?: boolean;
 }
 
 /** Unified hook events covering OpenCursor, Cursor and Claude Code trigger points. */
 export type HookEvent =
+	| "preToolUse" | "postToolUse" | "permissionRequest" | "postCompact" | "subagentStart" | "interrupt"
 	| "beforeSubmit"
 	| "beforeShell"
 	| "beforeMcp"
@@ -51,10 +55,13 @@ export interface HookDef {
 	enabled: boolean;
 }
 
-export type ProviderKind = "openai" | "anthropic" | "google" | "openrouter" | "ollama" | "llamacpp" | "mimo" | "atlascloud" | "astraflow";
+import { PROVIDER_PRESETS, type ProviderKind } from "../shared/providerCatalog";
+import { OAUTH_KINDS, type OAuthProviderKind } from "../shared/oauthProviders";
+export { PROVIDER_PRESETS, POPULAR_KINDS, FREE_KINDS } from "../shared/providerCatalog";
+export type { ProviderKind } from "../shared/providerCatalog";
 
 /** Where a model can be served from: API provider kinds + OAuth account kinds. */
-export type ModelKind = ProviderKind | "claude-code" | "codex" | "antigravity";
+export type ModelKind = ProviderKind | OAuthProviderKind;
 
 /** True when a model's kind (single or array) includes the given kind. */
 export function kindMatches(kind: ModelKind | ModelKind[], k: string): boolean {
@@ -67,6 +74,8 @@ export interface ModelOption {
 	key: string;
 	/** Display label in the UI. */
 	label: string;
+	/** Optional explanation shown beside the control. */
+	description?: string;
 	/** "select" → choose from values; "toggle" → on/off. */
 	type: "select" | "toggle";
 	/** Allowed values for "select" options. */
@@ -131,17 +140,20 @@ export function parseContextLabel(v?: string): number {
 }
 
 /**
- * Popular text/coding models, verified against provider docs on 2026-09-07.
+ * Popular text/coding models, refreshed against provider docs on 2026-09-23.
  * Context choices are OpenCursor working-context budgets up to the documented
  * window; choosing a smaller budget does not change the provider's model.
  * https://developers.openai.com/api/docs/models
  * https://platform.claude.com/docs/en/models/overview
  * https://ai.google.dev/gemini-api/docs/models
+ * Additional source links and provider-specific constraints: docs/model-catalog.md
  */
-export const MODEL_CATALOG: ModelDef[] = [
+const CURATED_MODEL_CATALOG: ModelDef[] = [
 	// OpenAI: Astra cannot disable reasoning. GPT-5.6's public API supports max,
 	// while Codex-specific orchestration modes are not public API effort levels.
 	{ id: "gpt-6-astra", name: "GPT-6 Astra", kind: ["openai", "codex"], options: [effort("medium", ["low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
+	{ id: "gpt-6-sol", name: "GPT-6 Sol", kind: ["openai", "codex"], options: [effort("medium", ["none", "low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
+	{ id: "gpt-6-luna", name: "GPT-6 Luna", kind: ["openai", "codex"], options: [effort("medium", ["none", "low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
 	{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", kind: ["openai", "codex"], options: [effort("high", ["none", "low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
 	{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra", kind: ["openai", "codex"], options: [effort("medium", ["none", "low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
 	{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna", kind: ["openai", "codex"], options: [effort("low", ["none", "low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
@@ -152,8 +164,9 @@ export const MODEL_CATALOG: ModelDef[] = [
 	{ id: "gpt-5.4", name: "GPT-5.4", kind: ["openai", "codex"], options: [effort("none", ["none", "low", "medium", "high", "xhigh"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
 	{ id: "gpt-5.4-mini", name: "GPT-5.4 mini", kind: ["openai", "codex"], options: [effort("none", ["none", "low", "medium", "high", "xhigh"]), ctx(["128k", "400k"], "400k")] },
 	{ id: "gpt-5.3-codex-spark", name: "GPT-5.3 Codex Spark", kind: ["openai", "codex"], options: [effort("high", ["low", "medium", "high", "xhigh"]), ctx(["128k", "256k", "400k"], "400k")] },
-	// Anthropic: Fable always thinks. Opus 5 can disable thinking only through
+	// Anthropic: Opus 5.5 and Fable always think. Opus 5 can disable thinking only through
 	// high effort (optionsFor applies that dependent restriction).
+	{ id: "claude-opus-5-5", name: "Claude Opus 5.5", kind: ["anthropic", "claude-code"], options: [thinking("adaptive", ["adaptive"]), effort("medium", ["low", "medium", "high", "xhigh", "max"]), ctx(["300k", "1m"], "1m")] },
 	{ id: "claude-fable-5-1", name: "Claude Fable 5.1", kind: ["anthropic", "claude-code"], options: [thinking("adaptive", ["adaptive"]), effort("high", ["low", "medium", "high", "xhigh", "max"]), ctx(["300k", "1m"], "1m")] },
 	{ id: "claude-opus-5", name: "Claude Opus 5", kind: ["anthropic", "claude-code"], options: [thinking("adaptive", ["disabled", "adaptive"]), effort("high", ["low", "medium", "high", "xhigh", "max"]), ctx(["300k", "1m"], "1m")] },
 	{ id: "claude-sonnet-5", name: "Claude Sonnet 5", kind: ["anthropic", "claude-code"], options: [thinking("adaptive", ["disabled", "adaptive"]), effort("high", ["low", "medium", "high", "xhigh", "max"]), ctx(["300k", "1m"], "1m")] },
@@ -184,6 +197,23 @@ export const MODEL_CATALOG: ModelDef[] = [
 	{ id: "mimo-v2.5-pro", name: "MIMO V2.5 Pro", kind: "mimo" },
 	{ id: "mimo-v2.5", name: "MIMO V2.5", kind: "mimo" },
 
+	// Provider-specific presets: IDs and controls apply to their own endpoints,
+	// never the official OpenAI API or unrelated compatible servers.
+	{ id: "grok-4.7", name: "Grok 4.7", kind: "xai", options: [effort("high", ["low", "medium", "high", "xhigh"]), ctx(["128k", "256k", "500k"], "500k")] },
+	{ id: "deepseek-flash", name: "DeepSeek V4.1 Flash", kind: "deepseek", options: [thinking("enabled", ["disabled", "enabled"]), effort("high", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
+	{ id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", kind: "deepseek", options: [thinking("enabled", ["disabled", "enabled"]), effort("high", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
+	{ id: "kimi-k3", name: "Kimi K3", kind: "moonshot", options: [effort("max", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
+	{ id: "kimi-k2.7-code", name: "Kimi K2.7 Code", kind: "moonshot", options: [ctx(["128k", "256k"], "256k")] },
+	{ id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", kind: "moonshot", options: [ctx(["128k", "256k"], "256k")] },
+	{ id: "glm-5.3", name: "GLM-5.3", kind: "z-ai", options: [effort("max", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
+	{ id: "glm-5.3-flash", name: "GLM-5.3 Flash", kind: "z-ai", options: [effort("max", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
+	{ id: "glm-5.3-flashx", name: "GLM-5.3 FlashX", kind: "z-ai", options: [effort("max", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
+	{ id: "MiniMax-M3", name: "MiniMax M3", kind: "minimax", options: [thinking("adaptive", ["disabled", "adaptive"]), ctx(["128k", "256k", "1m"], "1m")] },
+	{ id: "MiniMax-M2.7", name: "MiniMax M2.7", kind: "minimax", options: [ctx(["128k", "200k"], "200k")] },
+	{ id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed", kind: "minimax", options: [ctx(["128k", "200k"], "200k")] },
+	{ id: "qwen3.8-max", name: "Qwen3.8 Max", kind: "qwen", options: [thinking("enabled", ["disabled", "enabled"]), effort("xhigh", ["low", "medium", "xhigh"]), ctx(["128k", "256k", "1m"], "1m")] },
+	{ id: "qwen3.8-flash", name: "Qwen3.8 Flash", kind: "qwen", options: [thinking("enabled", ["disabled", "enabled"]), effort("xhigh", ["low", "medium", "xhigh"]), ctx(["128k", "256k", "1m"], "1m")] },
+
 	// Models exposed by Google Antigravity accounts.
 	{ id: "gemini-3-flash-agent", name: "Gemini 3.5 Flash (High)", kind: "antigravity", enabled: true },
 	{ id: "gemini-3.5-flash-low", name: "Gemini 3.5 Flash (Medium)", kind: "antigravity", enabled: true },
@@ -205,6 +235,29 @@ export const MODEL_CATALOG: ModelDef[] = [
 	{ id: "gemini-3.1-flash-lite", name: "Gemini 3.1 Flash Lite", kind: "antigravity", enabled: false },
 ];
 
+/** Merge reference providers without replacing curated model controls. */
+export const MODEL_CATALOG: ModelDef[] = (() => {
+	const antigravityIds = new Set(PROVIDER_MODELS.filter(model => model.kind === "antigravity").map(model => model.id));
+	const catalog = CURATED_MODEL_CATALOG.flatMap(model => {
+		const kinds = (Array.isArray(model.kind) ? model.kind : [model.kind]).filter(kind => kind !== "antigravity" || antigravityIds.has(model.id));
+		return kinds.length ? [{ ...model, kind: kinds.length === 1 ? kinds[0] : kinds }] : [];
+	});
+	const knownKinds = new Set<string>([...Object.keys(PROVIDER_PRESETS), ...OAUTH_KINDS]);
+	for (const model of PROVIDER_MODELS) {
+		if (!knownKinds.has(model.kind) || catalog.some(existing => existing.id === model.id && kindMatches(existing.kind, model.kind))) continue;
+		catalog.push({ id: model.id, name: model.name, kind: model.kind as ModelKind, ...(model.contextLength ? { options: [{ key: "max_context", label: "Context budget", type: "select" as const, values: [String(model.contextLength)], value: String(model.contextLength) }] } : {}) });
+	}
+	return catalog;
+})();
+
+export interface ProviderApiKey {
+	id: string;
+	label: string;
+	enabled?: boolean;
+	/** Computed for the webview; the secret itself is never persisted here. */
+	hasKey?: boolean;
+}
+
 export interface ProviderConfig {
 	id: string;
 	name: string;
@@ -212,10 +265,25 @@ export interface ProviderConfig {
 	baseUrl: string;
 	/** Whether an API key has been stored in SecretStorage for this provider. */
 	hasKey?: boolean;
+	/** An absent list uses the original secret at this provider's id; [] means no keys. */
+	apiKeys?: ProviderApiKey[];
+	apiKeyBalance?: "first" | "round-robin";
 	/** Optional curated/default model id for this provider. */
 	model?: string;
 	/** Whether this provider is active. Multiple may be enabled at once. Undefined = enabled. */
 	enabled?: boolean;
+}
+
+/** Resolve safe credential metadata without reading or copying any secrets. */
+export function getProviderApiKeys(provider: ProviderConfig): ProviderApiKey[] {
+	if (!Array.isArray(provider.apiKeys)) return [{ id: provider.id, label: "Key 1", enabled: true }];
+	const seen = new Set<string>();
+	return provider.apiKeys.filter(key => key && typeof key.id === "string"
+		&& (key.id === provider.id || key.id.startsWith(`${provider.id}:key:`))
+		&& !seen.has(key.id) && !!seen.add(key.id)).map((key, index) => ({
+		id: key.id, label: typeof key.label === "string" && key.label.trim() ? key.label.trim() : `Key ${index + 1}`,
+		enabled: key.enabled !== false,
+	}));
 }
 
 export interface FeatureConfig {
@@ -227,6 +295,8 @@ export interface FeatureConfig {
 	customModels: ModelDef[];
 	mcpServers: McpServerConfig[];
 	subagents: SubagentDef[];
+	/** Field overrides for shipped subagents, stored separately from custom agents. */
+	builtinSubagentOverrides?: BuiltinSubagentOverrides;
 	/** Named groups of subagents selectable in Project mode. */
 	teams: TeamDef[];
 	/** Teams selected for the current Project-mode run. */
@@ -260,6 +330,8 @@ export interface FeatureConfig {
 	trackUsage: boolean;
 	/** Conversation text size in the chat sidebar. */
 	chatTextSize: "compact" | "default" | "large";
+	/** Animation policy shared by the chat and settings webviews. */
+	motion: "full" | "system" | "reduced";
 	/** When true, Ctrl+Enter submits chat and Enter inserts a newline. */
 	submitWithCtrlEnter: boolean;
 	/** Max chat tabs open at once (0 = unlimited). */
@@ -318,6 +390,7 @@ const DEFAULTS: FeatureConfig = {
 	autoGenerateTitles: true,
 	trackUsage: true,
 	chatTextSize: "default",
+	motion: "full",
 	submitWithCtrlEnter: false,
 	maxTabCount: 0,
 	perTabDrafts: false,
@@ -335,17 +408,6 @@ const DEFAULTS: FeatureConfig = {
 };
 
 /** Default base URLs + whether a key is required, per provider kind. */
-export const PROVIDER_PRESETS: Record<ProviderKind, { label: string; baseUrl: string; needsKey: boolean }> = {
-	openai: { label: "OpenAI-compatible", baseUrl: "https://api.openai.com/v1", needsKey: true },
-	anthropic: { label: "Anthropic", baseUrl: "https://api.anthropic.com/v1", needsKey: true },
-	google: { label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", needsKey: true },
-	openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", needsKey: true },
-	ollama: { label: "Ollama", baseUrl: "http://localhost:11434/v1", needsKey: false },
-	llamacpp: { label: "llama.cpp", baseUrl: "http://localhost:8080/v1", needsKey: false },
-	mimo: { label: "Xiaomi MIMO", baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1", needsKey: true },
-	atlascloud: { label: "Atlas Cloud", baseUrl: "https://api.atlascloud.ai/v1", needsKey: true },
-	astraflow: { label: "Astraflow", baseUrl: "https://api-us-ca.umodelverse.ai/v1", needsKey: true },
-};
 
 const KEY = "ocursor.features";
 
@@ -360,18 +422,18 @@ export class FeatureStore {
 		const stored = this.context.globalState.get<Partial<FeatureConfig>>(KEY) ?? {};
 		const cfg = { ...DEFAULTS, ...stored };
 		// Built-in team members/teams are always available, even for configs saved before they shipped.
-		cfg.subagents = withBuiltinTeamSubagents(cfg.subagents ?? []);
+		cfg.subagents = withBuiltinTeamSubagents(cfg.subagents ?? [], cfg.builtinSubagentOverrides);
 		cfg.teams = withBuiltinTeams(cfg.teams ?? []);
 		return cfg;
 	}
 
 	async set(patch: Partial<FeatureConfig>): Promise<FeatureConfig> {
 		const next = { ...this.get(), ...patch };
-		// Builtins are always injected from source on get() — do not persist their
-		// prompts/fields, or shipped updates would be frozen in globalState forever.
+		// Keep shipped defaults in source and persist only intentional differences.
 		const toStore: FeatureConfig = {
 			...next,
 			subagents: withoutBuiltinTeamSubagents(next.subagents ?? []),
+			builtinSubagentOverrides: builtinSubagentOverrides(next.subagents ?? []),
 			teams: withoutBuiltinTeams(next.teams ?? []),
 		};
 		await this.context.globalState.update(KEY, toStore);
@@ -395,9 +457,17 @@ export class FeatureStore {
 	 *  names/options per provider (google vs antigravity vs codex …). */
 	defFor(modelId: string, kind?: string): ModelDef | undefined {
 		const all = this.allModels().filter((m) => m.id === modelId);
-		if (!kind) return all[0];
-		// Strict: a def only applies to kinds it explicitly declares.
-		return all.find((m) => kindMatches(m.kind, kind));
+		const exact = kind ? all.find((m) => kindMatches(m.kind, kind)) : all[0];
+		if (exact) return exact;
+		// Resolve gateway prefixes for metadata only; requests retain the full ID.
+		if (kind && kind !== "openai" && kind !== "anthropic") return undefined;
+		const slash = modelId.indexOf("/");
+		if (slash < 1) return undefined;
+		const sourceKind = MODEL_PROVIDER_ALIASES[modelId.slice(0, slash)];
+		if (!sourceKind) return undefined;
+		const sourceId = modelId.slice(slash + 1);
+		const source = this.allModels().find(m => m.id === sourceId && kindMatches(m.kind, sourceKind));
+		return source ? { ...source, id: modelId, kind: (kind ?? source.kind) as ModelKind } : undefined;
 	}
 
 	/** Resolved options for a model: stored overrides take precedence over defaults.
@@ -432,8 +502,15 @@ export class FeatureStore {
 				return { ...o, value: v };
 			});
 		})().map((option) => ({ ...option, ...(option.values ? { values: [...option.values] } : {}) }));
+		// Speed is a capability, not an arbitrary saved request field.
+		for (let index = base.length - 1; index >= 0; index--) if (base[index].key === "speed") base.splice(index, 1);
+		const speedKind = kind ?? (Array.isArray(def?.kind) ? def.kind[0] : def?.kind);
+		if (supportsFastMode(modelId, speedKind)) {
+			const speed = saved?.find(option => option.key === "speed")?.value;
+			base.push({ key: "speed", label: "Speed", description: MODEL_SPEED_DESCRIPTION, type: "select", values: ["standard", "fast"], value: speed === "fast" ? "fast" : "standard" });
+		}
 		// Opus 5's two controls are dependent: higher effort cannot disable thinking.
-		if (/^claude-opus-5(?:$|-)/.test(modelId) && base.some((o) => o.key === "thinking" && o.value === "disabled")) {
+		if (/^claude-opus-5(?:$|-)/.test(modelId.slice(modelId.lastIndexOf("/") + 1)) && base.some((o) => o.key === "thinking" && o.value === "disabled")) {
 			const option = base.find((o) => o.key === "reasoning_effort");
 			if (option) {
 				option.values = ["low", "medium", "high"];
@@ -467,14 +544,15 @@ export function catalogName(modelId: string): string | undefined {
 }
 
 /** Translate a model's resolved options into provider request params. */
-export function optionsToParams(options: ModelOption[]): { reasoningEffort?: string; thinking?: string; maxContext?: string } {
-	const out: { reasoningEffort?: string; thinking?: string; maxContext?: string } = {};
+export function optionsToParams(options: ModelOption[]): { reasoningEffort?: string; thinking?: string; maxContext?: string; speed?: ModelSpeed } {
+	const out: { reasoningEffort?: string; thinking?: string; maxContext?: string; speed?: ModelSpeed } = {};
 	for (const o of options) {
 		if (o.key === "reasoning_effort" && o.value) out.reasoningEffort = o.value;
 		// thinking is a mode: "disabled" | "adaptive" | "enabled". Legacy "true"/"false"
 		// toggles map to enabled/disabled for back-compat with saved settings.
 		if (o.key === "thinking") out.thinking = o.value === "true" ? "enabled" : o.value === "false" ? "disabled" : o.value;
 		if (o.key === "max_context" && o.value) out.maxContext = o.value;
+		if (o.key === "speed" && (o.value === "standard" || o.value === "fast")) out.speed = o.value;
 	}
 	return out;
 }

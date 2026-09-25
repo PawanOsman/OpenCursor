@@ -8,6 +8,7 @@
  */
 
 import * as React from "react";
+import { Select } from "../../shared/Select";
 import { Icon } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
 import { FeatureConfig, HOOK_EVENTS, HookDef, HookEvent, uid } from "../features";
@@ -72,11 +73,11 @@ function ExternalHookEditor({
       <div className="fc-body">
         <label className="fc-field">
           <span>Event</span>
-          <select value={event} onChange={(e) => setEvent(e.target.value as HookEvent)}>
+          <Select value={event} onChange={(e) => setEvent(e.target.value as HookEvent)}>
             {events.map((ev) => (
               <option key={ev.id} value={ev.id}>{ev.label}</option>
             ))}
-          </select>
+          </Select>
         </label>
         {source.claude && (
           <label className="fc-field">
@@ -181,14 +182,14 @@ export function HooksPanel({ features, setFeatures }: { features: FeatureConfig;
       {features.hooks.map((h, i) => (
         <div className="feature-card" key={h.id}>
           <div className="fc-head">
-            <select value={h.event} onChange={(e) => update(i, { event: e.target.value as HookDef["event"] })}>
+            <Select aria-label="Hook event" value={h.event} onChange={(e) => update(i, { event: e.target.value as HookDef["event"] })}>
               {HOOK_EVENTS.map((ev) => (
                 <option key={ev.id} value={ev.id}>
                   {ev.label}
                 </option>
               ))}
-            </select>
-            <Toggle checked={h.enabled} onChange={(v) => update(i, { enabled: v })} />
+            </Select>
+            <Toggle label={`Enable ${HOOK_EVENTS.find(event => event.id === h.event)?.label ?? h.event} hook`} checked={h.enabled} onChange={(v) => update(i, { enabled: v })} />
             <button className="icon-btn" onClick={() => remove(i)} title="Remove">
               <Icon name="trash" size={14} />
             </button>

@@ -132,11 +132,11 @@ describe("PROOF: Mimo V2.5 TodoWrite payloads", () => {
       merge: false,
     }, ctx);
 
-    // All 3 items should be accepted
-    expect(ctx.todos.length).toBe(3);
+    // Keep meaningful tasks and ask for the missing description.
+    expect(ctx.todos.length).toBe(2);
     expect(r.output).toContain("[ ] With ID");
     expect(r.output).toContain("[~] Without ID");
-    expect(r.output).toContain("[ ] unnamed"); // no content → "unnamed"
+    expect(r.output).toContain("Skipped 1 invalid task entry");
     expect(r.output.startsWith("error:")).toBe(false);
   });
 

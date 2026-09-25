@@ -10,8 +10,12 @@
 import * as React from "react";
 import { createRoot } from "react-dom/client";
 import "./sidebar.css";
+import "../shared/code-highlighting.css";
 import { App, ErrorBoundary } from "./App";
+import "../shared/motion.css";
+import { initializeMotionPreference } from "../shared/motionPreference";
 
+initializeMotionPreference();
 const root = createRoot(document.getElementById("root")!);
 root.render(
   <ErrorBoundary>

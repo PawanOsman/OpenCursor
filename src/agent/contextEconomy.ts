@@ -40,6 +40,9 @@ export function stepTokens(s: Step): number {
   if (s.kind === "assistant") {
     // thinking is UI-only — never sent on the wire (see buildMessages).
     chars += s.text?.length || 0;
+    // Provider replay content is not display thinking and occupies context.
+    // Count it once even when the UI shows the same reasoning separately.
+    chars += s.chatReasoning?.content.length || 0;
     for (const c of s.calls || []) {
       chars += (c.arguments?.length || 0) + (c.thoughtSignature?.length || 0) + c.name.length + c.id.length + 48;
     }

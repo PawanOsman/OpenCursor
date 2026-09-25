@@ -8,10 +8,12 @@
  */
 
 import * as React from "react";
+import { Select } from "../../shared/Select";
 import { Icon } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
 import { FeatureConfig, HfGgufResult, LlamacppServerConfig, LlamacppStatus } from "../features";
 import { fmtSize } from "./localShared";
+import { HardwareSummary, useLocalHardware } from "./LocalHardware";
 
 /** Editor for a llama-server launch config (global defaults or a per-model override). */
 function ServerConfigForm({ config, onChange }: { config: LlamacppServerConfig; onChange: (next: LlamacppServerConfig) => void }) {
@@ -35,11 +37,11 @@ function ServerConfigForm({ config, onChange }: { config: LlamacppServerConfig; 
       </label>
       <label className="fc-field">
         <span>Flash attention</span>
-        <select value={c.flashAttn ?? "auto"} onChange={(e) => set({ flashAttn: e.target.value as LlamacppServerConfig["flashAttn"] })}>
+        <Select value={c.flashAttn ?? "auto"} onChange={(e) => set({ flashAttn: e.target.value as LlamacppServerConfig["flashAttn"] })}>
           <option value="auto">auto</option>
           <option value="on">on</option>
           <option value="off">off</option>
-        </select>
+        </Select>
       </label>
       <label className="fc-field">
         <span>GPU layers (-ngl)</span>
@@ -107,6 +109,8 @@ export function LlamacppPanel({
   features: FeatureConfig;
   status: LlamacppStatus;
 }) {
+  const { hardware, fits } = useLocalHardware();
+  const [operationError, setOperationError] = React.useState("");
   const [tab, setTab] = React.useState<"models" | "search" | "config">("models");
   const [query, setQuery] = React.useState("");
   const [searching, setSearching] = React.useState(false);
@@ -126,9 +130,14 @@ export function LlamacppPanel({
         setSearchErr(m.error || "");
       } else if (m.type === "llamacppRepoFiles") {
         setRepoFiles((prev) => ({ ...prev, [m.repo]: m.files || [] }));
+        if (m.error) setSearchErr(m.error);
       } else if (m.type === "llamacppDownloadProgress") {
         setDownloading((prev) => ({ ...prev, [m.id]: m.total ? Math.round((m.received / m.total) * 100) : 0 }));
+      } else if (m.type === "localModelError") {
+        setOperationError(m.error || "Model operation failed.");
       } else if (m.type === "llamacppDownloadDone") {
+        if (m.error) setOperationError(m.error);
+        else vscode.postMessage({ type: "localHardwareGet" });
         setDownloading((prev) => {
           const next = { ...prev };
           delete next[m.id];
@@ -158,7 +167,9 @@ export function LlamacppPanel({
 
   const download = (repo: string, file: string) => {
     setDownloading((prev) => ({ ...prev, [`${repo}/${file}`]: 0 }));
-    vscode.postMessage({ type: "llamacppDownload", repo, file });
+    setOperationError("");
+    const metadata = repoFiles[repo]?.find(item => item.file === file);
+    vscode.postMessage({ type: "llamacppDownload", repo, file, sha256: metadata?.sha256, sizeBytes: metadata?.sizeBytes });
   };
 
   const models = features.llamacppModels || [];
@@ -187,6 +198,8 @@ export function LlamacppPanel({
         </div>
       </div>
 
+      <HardwareSummary hardware={hardware} />
+      {operationError && <div className="fc-error" role="alert">{operationError}</div>}
       <div className="sub-tabs" style={{ marginTop: 20 }}>
         <button className={"sub-tab" + (tab === "models" ? " active" : "")} onClick={() => setTab("models")}>Models</button>
         <button className={"sub-tab" + (tab === "search" ? " active" : "")} onClick={() => setTab("search")}>Search &amp; Download</button>
@@ -211,6 +224,8 @@ export function LlamacppPanel({
         models.map((m) => {
           const isRunning = !!status.running[m.id];
           const isLoading = !!status.loading[m.id];
+          const isStopping = status.states?.[m.id] === "stopping";
+          const fit = fits[m.id];
           const err = status.errors[m.id];
           const log = status.logs[m.id] ?? [];
           return (
@@ -229,12 +244,12 @@ export function LlamacppPanel({
                     onChange={(e) => vscode.postMessage({ type: "llamacppSetAutoLoad", id: m.id, autoLoad: e.target.checked })}
                   /> auto-load
                 </label>
-                {isRunning || isLoading ? (
+                {isStopping ? <span className="badge-tag loading">stopping…</span> : isRunning || isLoading ? (
                   <button className="btn-ghost sm" onClick={() => vscode.postMessage({ type: "llamacppUnload", id: m.id })}>{isLoading ? "Cancel" : "Unload"}</button>
                 ) : (
                   <button className="btn-ghost sm" disabled={!status.installed} onClick={() => vscode.postMessage({ type: "llamacppLoad", id: m.id })}>Load</button>
                 )}
-                <button className="icon-btn" title="Remove" onClick={() => vscode.postMessage({ type: "llamacppRemove", id: m.id })}>
+                <button className="icon-btn" title="Remove" disabled={isLoading || isStopping} onClick={() => vscode.postMessage({ type: "llamacppRemove", id: m.id })}>
                   <Icon name="trash" size={14} />
                 </button>
               </div>
@@ -242,6 +257,13 @@ export function LlamacppPanel({
                 <div className="row-desc">
                   {m.file}{m.sizeBytes ? ` · ${fmtSize(m.sizeBytes)}` : ""}{m.repo ? ` · ${m.repo}` : " · imported"}
                 </div>
+                {status.endpoints?.[m.id] && <div className="row-desc">Endpoint: <code>{status.endpoints[m.id]}</code></div>}
+                {fit && <div className="row-desc" style={{ marginTop: 8 }}>
+                  <strong>Memory fit: {fit.level}</strong>{fit.estimatedMemoryBytes ? ` · estimated ${fmtSize(fit.estimatedMemoryBytes)}` : ""}
+                  <p>{fit.reason}</p>
+                  <button className="btn-ghost sm" onClick={() => vscode.postMessage({ type: "llamacppSetModelConfig", id: m.id, useCustomConfig: true,
+                    config: { ...(m.config || features.llamacppConfig), ctxSize: fit.recommendedContext, threads: fit.recommendedThreads, parallel: 1 } })}>Use suggested context and threads</button>
+                </div>}
                 <label className="fc-inline" style={{ marginTop: 8 }} title="Override the global server config for this model only">
                   <input
                     type="checkbox"
@@ -279,6 +301,7 @@ export function LlamacppPanel({
 
       {tab === "search" && (<>
       <div className="section-label" style={{ marginTop: 0 }}>Search Hugging Face (GGUF)</div>
+      <p className="panel-hint">Interrupted downloads resume when the server supports validated ranges. GGUF headers and published SHA-256 checksums are checked before adding the model.</p>
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <input
           type="search"
@@ -325,7 +348,8 @@ export function LlamacppPanel({
                         {have ? (
                           <span className="badge-tag glob">added</span>
                         ) : pct != null ? (
-                          <span className="row-desc">{pct}%</span>
+                          <span style={{ display: "flex", gap: 8, alignItems: "center" }}><span className="row-desc">{pct}%</span>
+                            <button className="btn-ghost sm" onClick={() => vscode.postMessage({ type: "llamacppCancelDownload", id })}>Cancel</button></span>
                         ) : (
                           <button className="btn-ghost sm" onClick={() => download(r.repo, f.file)}>
                             <Icon name="database" size={13} /> Download

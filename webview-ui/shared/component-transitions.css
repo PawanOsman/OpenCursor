@@ -1,0 +1,179 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+/* Tooltip, plus-to-menu,
+   text reveal, and text-state swap. Host tokens supply the surface colors. */
+:root {
+  --tt-in-dur: 150ms;
+  --tt-out-dur: 50ms;
+  --tt-scale: .98;
+  --tt-delay: 80ms;
+  --tt-in-ease: ease-out;
+  --tt-out-ease: ease-out;
+  --tt-move-dur: 160ms;
+  --tt-move-ease: cubic-bezier(.22, 1, .36, 1);
+  --tt-bg: var(--dropdown-bg);
+  --tt-fg: var(--fg);
+  --morph-open-dur: 350ms;
+  --morph-close-dur: 250ms;
+  --morph-ease: cubic-bezier(.34, 1.25, .64, 1);
+  --morph-close-ease: cubic-bezier(.22, 1, .36, 1);
+  --morph-r-closed: 40px;
+  --morph-r-open: 20px;
+  --morph-fade-dur: 200ms;
+  --morph-slide: 40px;
+  --morph-rotate: 45deg;
+  --morph-scale: .97;
+  --morph-blur: 2px;
+  --stagger-dur: 500ms;
+  --stagger-distance: 12px;
+  --stagger-stagger: 40ms;
+  --stagger-blur: 3px;
+  --stagger-ease: cubic-bezier(.22, 1, .36, 1);
+  --text-swap-dur: 150ms;
+  --text-swap-translate-y: 4px;
+  --text-swap-blur: 2px;
+  --text-swap-ease: ease-in-out;
+}
+
+.t-tt-group { position: relative; display: inline-flex; }
+.t-tt {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0;
+  overflow: hidden;
+  translate: var(--tt-x, 0px) 0;
+  scale: var(--tt-scale);
+  transform-origin: 50% 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--tt-bg);
+  color: var(--tt-fg);
+  white-space: nowrap;
+  box-shadow: 0 0 0 1px #0000000f, 0 2px 6px #0000000d, 0 4px 42px #0000000f;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--tt-out-dur) var(--tt-out-ease),
+    scale var(--tt-out-dur) var(--tt-out-ease),
+    translate var(--tt-move-dur) var(--tt-move-ease), width var(--tt-move-dur) var(--tt-move-ease);
+}
+.t-tt[data-show="true"] {
+  opacity: 1;
+  scale: 1;
+  transition: opacity var(--tt-in-dur) var(--tt-in-ease) var(--tt-delay),
+    scale var(--tt-in-dur) var(--tt-in-ease) var(--tt-delay),
+    translate var(--tt-move-dur) var(--tt-move-ease), width var(--tt-move-dur) var(--tt-move-ease);
+}
+.t-tt-text { white-space: nowrap; }
+.context-tooltip.t-tt { position: fixed; width: 176px; border-radius: 16px; animation: none; }
+.context-tooltip .t-tt-text { display: flex; flex-direction: column; gap: 2px; color: var(--fg); }
+.context-tooltip .t-tt-text > :first-child { color: var(--fg-dim); }
+
+.t-morph {
+  position: relative;
+  width: var(--morph-closed-size, 40px);
+  height: var(--morph-closed-size, 40px);
+  border-radius: var(--morph-r-closed);
+  overflow: hidden;
+  transition: width var(--morph-close-dur) var(--morph-close-ease),
+    height var(--morph-close-dur) var(--morph-close-ease), border-radius var(--morph-close-dur) var(--morph-close-ease);
+}
+.t-morph[data-open="true"] {
+  width: var(--morph-open-width, 183px);
+  height: var(--morph-open-height, 172px);
+  border-radius: var(--morph-r-open);
+  transition: width var(--morph-open-dur) var(--morph-ease),
+    height var(--morph-open-dur) var(--morph-ease), border-radius var(--morph-open-dur) var(--morph-ease);
+}
+.t-morph-plus {
+  position: absolute;
+  inset: auto 0 0 auto;
+  width: var(--morph-closed-size, 40px);
+  height: var(--morph-closed-size, 40px);
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  transition: opacity var(--morph-fade-dur) var(--morph-close-ease),
+    transform var(--morph-open-dur) var(--morph-close-ease), filter var(--morph-fade-dur) var(--morph-close-ease);
+}
+.t-morph-plus svg { transition: transform var(--morph-open-dur) var(--morph-close-ease); }
+.t-morph[data-open="true"] .t-morph-plus {
+  opacity: 0;
+  transform: translateX(calc(-1 * var(--morph-slide)));
+  filter: blur(var(--morph-blur));
+  pointer-events: none;
+}
+.t-morph[data-open="true"] .t-morph-plus svg { transform: scale(var(--morph-scale)) rotate(var(--morph-rotate)); }
+.t-morph-menu {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: translateX(var(--morph-slide)) scale(var(--morph-scale));
+  filter: blur(var(--morph-blur));
+  pointer-events: none;
+  transition: opacity var(--morph-fade-dur) var(--morph-close-ease),
+    transform var(--morph-open-dur) var(--morph-close-ease), filter var(--morph-fade-dur) var(--morph-close-ease);
+}
+.t-morph[data-open="true"] .t-morph-menu { opacity: 1; transform: translateX(0) scale(1); filter: blur(0); pointer-events: auto; }
+.attachment-menu-surface {
+  --morph-closed-size: 28px;
+  --morph-open-width: 208px;
+  --morph-open-height: 104px;
+  position: fixed;
+  z-index: 12000;
+  background: var(--dropdown-bg);
+  color: var(--fg);
+  box-shadow: var(--el-3);
+}
+.attachment-menu-surface .t-morph-plus { left: 0; right: auto; }
+.attachment-menu-surface .t-morph-menu { width: var(--morph-open-width); padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+.attachment-menu-item { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 8px; border: 0; text-align: left; white-space: nowrap; }
+
+.t-stagger-line {
+  display: block;
+  opacity: 0;
+  transform: translateY(var(--stagger-distance));
+  filter: blur(var(--stagger-blur));
+  transition: opacity var(--stagger-dur) var(--stagger-ease),
+    transform var(--stagger-dur) var(--stagger-ease), filter var(--stagger-dur) var(--stagger-ease);
+  will-change: transform, opacity, filter;
+}
+.t-stagger-line--2 { transition-delay: var(--stagger-stagger); }
+.chat-empty > .t-stagger, .setup-screen > .t-stagger { display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 100%; }
+.t-stagger.is-shown .t-stagger-line { opacity: 1; transform: translateY(0); filter: blur(0); }
+.t-stagger.is-hiding .t-stagger-line {
+  opacity: 0; transform: translateY(0); filter: blur(0);
+  transition: opacity 200ms ease, transform 0s linear, filter 0s linear;
+  transition-delay: 0s;
+}
+.t-text-swap {
+  display: inline-block; transform: translateY(0); filter: blur(0); opacity: 1;
+  transition: transform var(--text-swap-dur) var(--text-swap-ease), filter var(--text-swap-dur) var(--text-swap-ease), opacity var(--text-swap-dur) var(--text-swap-ease);
+  will-change: transform, filter, opacity;
+}
+.t-text-swap.is-exit { transform: translateY(calc(var(--text-swap-translate-y) * -1)); filter: blur(var(--text-swap-blur)); opacity: 0; }
+.t-text-swap.is-enter-start { transform: translateY(var(--text-swap-translate-y)); filter: blur(var(--text-swap-blur)); opacity: 0; transition: none; }
+html[data-motion="reduced"] :is(.t-stagger-line, .t-text-swap) { transform: none; filter: none; }
+
+.animated-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  min-height: 0;
+  opacity: 0;
+  transition: grid-template-rows 220ms var(--stagger-ease), opacity 150ms ease;
+}
+.animated-disclosure[data-open="true"] { grid-template-rows: 1fr; opacity: 1; }
+.animated-disclosure > * { min-height: 0; overflow: hidden; }

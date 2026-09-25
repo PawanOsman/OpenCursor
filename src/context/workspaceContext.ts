@@ -11,7 +11,11 @@ import * as vscode from "vscode";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { spawn } from "child_process";
+import { homedir } from "node:os";
 import { getWorkspaceRoot } from "./workspaceUtils";
+import { isWithinDirectory, parseRuleFrontmatter, resolveScopedInstructions, renderScopedInstructions } from "./scopedInstructions";
+import { installedPluginSkills } from "../integrations/pluginManager";
+export type { ScopedInstruction } from "./scopedInstructions";
 
 const IGNORE = new Set([".git", "node_modules", "dist", "out", ".next", "build", ".cache", "coverage"]);
 
@@ -59,9 +63,9 @@ export async function getFileTree(): Promise<string> {
 export function getOpenFiles(): string[] {
   const root = getWorkspaceRoot();
   const out: string[] = [];
-  for (const editor of vscode.window.visibleTextEditors) {
+  for (const editor of vscode.window.visibleTextEditors || []) {
     const fsPath = editor.document.uri.fsPath;
-    if (fsPath.startsWith(root)) {
+    if (isWithinDirectory(root, fsPath)) {
       out.push(path.relative(root, fsPath).split(path.sep).join("/"));
     }
   }
@@ -86,11 +90,13 @@ export function getActiveSelection(): string | undefined {
 function git(args: string[]): Promise<string> {
   const root = getWorkspaceRoot();
   return new Promise((res) => {
-    const c = spawn("git", args, { cwd: root });
+    // Read-only context must not execute a repository's external fsmonitor.
+    const c = spawn("git", ["-c", "core.fsmonitor=false", ...args], { cwd: root, windowsHide: true });
+    const timer = setTimeout(() => { c.kill(); res(""); }, 5000);
     let o = "";
     c.stdout.on("data", (d) => (o += d));
-    c.on("error", () => res(""));
-    c.on("close", () => res(o.trim()));
+    c.on("error", () => { clearTimeout(timer); res(""); });
+    c.on("close", () => { clearTimeout(timer); res(o.trim()); });
   });
 }
 
@@ -109,90 +115,17 @@ export async function getGitContext(): Promise<string> {
   return parts.join("\n");
 }
 
-function globMatches(globs: string, filePath: string): boolean {
-  if (!globs) {
-    return false;
-  }
-  const patterns = globs.split(",").map((g) => g.trim()).filter(Boolean);
-  for (const p of patterns) {
-    const re = new RegExp(
-      "^" +
-        p
-          .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-          .replace(/\*\*/g, "\u0000")
-          .replace(/\*/g, "[^/]*")
-          .replace(/\u0000/g, ".*")
-          .replace(/\?/g, ".") +
-        "$"
-    );
-    if (re.test(filePath) || re.test(filePath.split("/").pop() || "")) {
-      return true;
-    }
-  }
-  return false;
+/** Structured instructions used by the agent's before-tool scope gate. */
+export async function scopedInstructionsForPaths(matchFiles: string[] = []) {
+  return resolveScopedInstructions(getWorkspaceRoot(), matchFiles);
 }
 
-/**
- * Load .cursor/rules/*.md(c) and AGENTS.md.
- * Always-apply rules are returned always; glob rules only when an open file matches.
- */
+/** Scoped AGENTS.md, legacy rules, and matching Cursor rules, in precedence order. */
 export async function getCursorRules(matchFiles: string[] = []): Promise<string> {
-  const root = getWorkspaceRoot();
-  const blocks: string[] = [];
-
-  // AGENTS.md at root
-  for (const name of ["AGENTS.md", ".cursorrules"]) {
-    try {
-      const body = await fs.readFile(path.join(root, name), "utf8");
-      if (body.trim()) {
-        blocks.push(`# ${name}\n${body.trim()}`);
-      }
-    } catch {
-      // not present
-    }
-  }
-
-  // .cursor/rules/*.md(c)
-  const rulesDir = path.join(root, ".cursor", "rules");
-  try {
-    const files = await fs.readdir(rulesDir);
-    for (const f of files) {
-      if (!f.endsWith(".md") && !f.endsWith(".mdc")) {
-        continue;
-      }
-      try {
-        const raw = await fs.readFile(path.join(rulesDir, f), "utf8");
-        const parsed = parseFrontmatter(raw);
-        const globMatched = parsed.globs && matchFiles.some((mf) => globMatches(parsed.globs, mf));
-        if (parsed.alwaysApply || globMatched) {
-          blocks.push(`# rule: ${f}\n${parsed.body.trim()}`);
-        }
-      } catch {
-        // skip
-      }
-    }
-  } catch {
-    // no rules dir
-  }
-
-  return blocks.join("\n\n");
+  return renderScopedInstructions(await scopedInstructionsForPaths(matchFiles));
 }
 
-function parseFrontmatter(raw: string): { alwaysApply: boolean; globs: string; description: string; body: string } {
-  if (raw.startsWith("---")) {
-    const end = raw.indexOf("---", 3);
-    if (end !== -1) {
-      const fm = raw.slice(3, end);
-      const body = raw.slice(end + 3);
-      const alwaysApply = /alwaysApply:\s*true/i.test(fm);
-      const globsMatch = fm.match(/globs:\s*(.*)/i);
-      const descMatch = fm.match(/description:\s*(.*)/i);
-      return { alwaysApply, globs: globsMatch ? globsMatch[1].trim() : "", description: descMatch ? descMatch[1].trim() : "", body };
-    }
-  }
-  // No frontmatter → treat as always-apply.
-  return { alwaysApply: true, globs: "", description: "", body: raw };
-}
+const parseFrontmatter = parseRuleFrontmatter;
 
 export interface RuleInfo {
   file: string;
@@ -228,76 +161,61 @@ export async function listRules(): Promise<RuleInfo[]> {
   return out;
 }
 
-/** Always-applied rules formatted as Cursor's <always_applied_workspace_rule> entries. */
+/** Applicable rules with explicit path provenance and directory scope. */
 export async function listRulesForPrompt(matchFiles: string[] = []): Promise<string> {
-  const root = getWorkspaceRoot();
-  const blocks: string[] = [];
-  for (const name of ["AGENTS.md", ".cursorrules"]) {
-    try {
-      const body = await fs.readFile(path.join(root, name), "utf8");
-      if (body.trim()) {
-        blocks.push(`<always_applied_workspace_rule name="${path.join(root, name)}">${body.trim()}</always_applied_workspace_rule>`);
-      }
-    } catch {
-      // not present
-    }
-  }
-  const rulesDir = path.join(root, ".cursor", "rules");
-  try {
-    const files = await fs.readdir(rulesDir);
-    for (const f of files) {
-      if (!f.endsWith(".md") && !f.endsWith(".mdc")) {
-        continue;
-      }
-      try {
-        const raw = await fs.readFile(path.join(rulesDir, f), "utf8");
-        const parsed = parseFrontmatter(raw);
-        const globMatched = parsed.globs && matchFiles.some((mf) => globMatches(parsed.globs, mf));
-        if (parsed.alwaysApply || globMatched) {
-          blocks.push(`<always_applied_workspace_rule name="${f}">${parsed.body.trim()}</always_applied_workspace_rule>`);
-        }
-      } catch {
-        // skip
-      }
-    }
-  } catch {
-    // no rules dir
-  }
-  return blocks.join("\n");
+  return renderScopedInstructions(await scopedInstructionsForPaths(matchFiles));
 }
 
 export interface SkillInfo {
   name: string;
   description: string;
   path: string;
+  pluginId?: string;
 }
 
-/** Load SKILL.md files from .cursor/skills/STAR/SKILL.md and skill plugin dirs. */
-export async function listSkills(): Promise<SkillInfo[]> {
-  const root = getWorkspaceRoot();
+/** Workspace definitions take precedence over user skills of the same name. */
+export async function listSkills(options: { root?: string; userHome?: string; codexHome?: string } = {}): Promise<SkillInfo[]> {
+  const root = options.root ?? getWorkspaceRoot();
+  const home = options.userHome ?? homedir();
+  const codexHome = options.codexHome ?? process.env.CODEX_HOME ?? path.join(home, ".codex");
   const out: SkillInfo[] = [];
-  const bases = [path.join(root, ".cursor", "skills"), path.join(root, ".cursor", "skills-cursor")];
-  for (const base of bases) {
-    let dirs: import("fs").Dirent[];
+  const names = new Set<string>();
+  const seenPaths = new Set<string>();
+  const bases = [
+    path.join(root, ".opencursor", "skills"), path.join(root, ".agents", "skills"),
+    path.join(root, ".codex", "skills"), path.join(root, ".cursor", "skills"), path.join(root, ".cursor", "skills-cursor"),
+    path.join(home, ".opencursor", "skills"), path.join(home, ".agents", "skills"),
+    path.join(codexHome, "skills"), path.join(home, ".cursor", "skills"),
+  ];
+  const visit = async (directory: string, depth = 0): Promise<void> => {
+    let canonical: string;
+    try { canonical = await fs.realpath(directory); } catch { return; }
+    if (seenPaths.has(canonical)) return;
+    seenPaths.add(canonical);
+    const skillFile = path.join(directory, "SKILL.md");
     try {
-      dirs = await fs.readdir(base, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const d of dirs) {
-      if (!d.isDirectory()) {
-        continue;
+      const raw = await fs.readFile(skillFile, "utf8");
+      const p = parseFrontmatter(raw);
+      const name = p.name || p.body.match(/^#\s*(.+)$/m)?.[1]?.trim() || path.basename(directory);
+      const key = name.toLowerCase();
+      if (!names.has(key)) {
+        names.add(key);
+        out.push({ name, description: (p.description || p.body.replace(/\n/g, " ").trim()).slice(0, 1000), path: skillFile });
       }
-      const skillFile = path.join(base, d.name, "SKILL.md");
-      try {
-        const raw = await fs.readFile(skillFile, "utf8");
-        const p = parseFrontmatter(raw);
-        const name = p.body.match(/^#\s*(.+)$/m)?.[1]?.trim() || d.name;
-        out.push({ name, description: p.description || p.body.slice(0, 200).replace(/\n/g, " ").trim(), path: skillFile });
-      } catch {
-        // skip
-      }
+      return;
+    } catch { /* A namespace such as .system may contain individual skills. */ }
+    if (depth >= 2) return;
+    let dirs: import("fs").Dirent[];
+    try { dirs = await fs.readdir(directory, { withFileTypes: true }); } catch { return; }
+    for (const dir of dirs.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (dir.isDirectory() || dir.isSymbolicLink()) await visit(path.join(directory, dir.name), depth + 1);
     }
+  };
+  for (const base of bases) await visit(base);
+  const pluginSkills = await installedPluginSkills(path.join(home, ".opencursor", "plugins")).catch(() => []);
+  for (const skill of pluginSkills) {
+    const name = skill.name.toLowerCase();
+    if (!names.has(name)) { names.add(name); out.push(skill); }
   }
   return out;
 }

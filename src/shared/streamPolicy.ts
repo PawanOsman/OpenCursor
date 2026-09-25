@@ -47,7 +47,7 @@ const TITLE_ONLY: ToolStreamPolicy = { args: "once", intervalMs: 120, maxChars: 
 const NO_STREAM: ToolStreamPolicy = { args: "off", intervalMs: 0, maxChars: 0 };
 
 /**
- * Tool name → policy. Both the Cursor-style names and the snake_case aliases are
+ * Tool name → policy. Both PascalCase names and snake_case aliases are
  * listed because providers emit either depending on the schema in use.
  */
 const POLICIES: Record<string, ToolStreamPolicy> = {

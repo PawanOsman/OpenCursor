@@ -33,8 +33,9 @@ describe("production file transactions and undo", () => {
   });
   it("preserves executable permissions when restoring a deleted file", async () => {
     const file = path.join(root, "script"); await fs.writeFile(file, "echo hello\n", { mode: 0o755 });
+    const originalPermissions = (await fs.stat(file)).mode & 0o777;
     await deleteFileTool.execute({ path: file }); await pendingChanges.reject(file);
-    expect((await fs.stat(file)).mode & 0o777).toBe(0o755);
+    expect((await fs.stat(file)).mode & 0o777).toBe(originalPermissions);
   });
   it("serializes disjoint replacements through canonical aliases", async () => {
     const file = path.join(root, "real.txt"), alias = path.join(root, "alias.txt");

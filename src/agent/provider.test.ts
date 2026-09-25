@@ -31,7 +31,7 @@ describe("provider base URLs", () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "fixture" }] })));
     vi.stubGlobal("fetch", fetch);
     expect(await listModels(base, "fixture-key", false)).toEqual([{ id: "fixture" }]);
-    expect(fetch).toHaveBeenCalledWith(expected, { headers: { authorization: "Bearer fixture-key" } });
+    expect(fetch).toHaveBeenCalledWith(expected, { headers: { authorization: "Bearer fixture-key" }, signal: expect.any(AbortSignal) });
   });
 });
 
@@ -59,15 +59,22 @@ describe("PROVIDER_PRESETS", () => {
     }
   });
 
-  it("every provider has a valid HTTPS or localhost URL", () => {
+  it("every provider has a secure default endpoint or requires endpoint setup", () => {
     for (const [, preset] of Object.entries(PROVIDER_PRESETS)) {
-      expect(preset.baseUrl.startsWith("https://") || preset.baseUrl.startsWith("http://localhost")).toBe(true);
+      if (!preset.baseUrl) {
+        expect(preset.needsEndpoint).toBe(true);
+        expect(preset.setupHint).toBeTruthy();
+        continue;
+      }
+      const url = new URL(preset.baseUrl);
+      expect(url.protocol === "https:" || (url.protocol === "http:" && url.hostname === "localhost")).toBe(true);
+      if (/\{[^}]+\}/.test(preset.baseUrl)) expect(preset.needsEndpoint).toBe(true);
     }
   });
 
-  it("every provider URL has a versioned API path", () => {
-    for (const [key, preset] of Object.entries(PROVIDER_PRESETS)) {
-      expect(preset.baseUrl).toMatch(/\/v\d/);
+  it("providers with specialized protocols declare their transport identity", () => {
+    for (const [, preset] of Object.entries(PROVIDER_PRESETS)) {
+      if (preset.protocol === "adapter") expect(preset.adapterId).toBeTruthy();
     }
   });
 
@@ -77,11 +84,12 @@ describe("PROVIDER_PRESETS", () => {
     }
   });
 
-  it("remote providers require API keys", () => {
-    const noKeyNeeded = ["ollama", "llamacpp"];
+  it("remote providers require credentials unless explicitly anonymous", () => {
+    const noKeyNeeded = ["ollama", "llamacpp", "opencode"];
     for (const [key, preset] of Object.entries(PROVIDER_PRESETS)) {
       if (noKeyNeeded.includes(key)) {
         expect(preset.needsKey).toBe(false);
+        if (key === "opencode") expect(preset.noAuth).toBe(true);
       } else {
         expect(preset.needsKey).toBe(true);
       }
@@ -94,8 +102,17 @@ describe("PROVIDER_PRESETS", () => {
 describe("security", () => {
   it("provider presets contain no API keys or tokens", () => {
     for (const [, preset] of Object.entries(PROVIDER_PRESETS)) {
-      expect(preset.baseUrl).not.toMatch(/^(sk-|tp-|vbk_)/);
-      expect(preset.label).not.toMatch(/key|token|secret/i);
+      expect(Object.keys(preset)).not.toEqual(expect.arrayContaining(["apiKey"]));
+      for (const key of ["accessToken", "refreshToken", "clientSecret", "privateKey"]) {
+        expect(preset).not.toHaveProperty(key);
+      }
+      expect(JSON.stringify(preset)).not.toMatch(/(?:sk-|tp-|vbk_)[A-Za-z0-9_-]{20,}|-----BEGIN (?:RSA )?PRIVATE KEY-----/);
+      if (preset.baseUrl) {
+        const url = new URL(preset.baseUrl);
+        expect(url.username).toBe("");
+        expect(url.password).toBe("");
+        for (const key of url.searchParams.keys()) expect(key).not.toMatch(/key|token|secret|password/i);
+      }
     }
   });
 });

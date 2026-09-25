@@ -1,0 +1,61 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+.composer .editor { text-align: start; overflow-wrap: anywhere; }
+.composer .editor p { margin: 0 0 8px; }
+.composer .editor > :last-child { margin-bottom: 0; }
+.composer .editor h1, .composer .editor h2, .composer .editor h3,
+.composer .editor h4, .composer .editor h5, .composer .editor h6 {
+  margin: 10px 0 8px; line-height: 1.35; font-weight: 600;
+}
+.composer .editor > :first-child { margin-top: 0; }
+.composer .editor h1 { font-size: 1.65em; }
+.composer .editor h2 { font-size: 1.4em; }
+.composer .editor h3 { font-size: 1.2em; }
+.composer .editor h4, .composer .editor h5, .composer .editor h6 { font-size: 1em; }
+.composer .editor ul, .composer .editor ol { margin: 6px 0 10px; padding-inline-start: 24px; padding-inline-end: 0; }
+.composer .editor li { position: relative; }
+.composer .editor li p { margin-bottom: 3px; }
+.composer .editor li.composer-task-item { list-style: none; }
+.composer .editor li.composer-task-item::before {
+  content: ""; position: absolute; inset-inline-start: -20px; top: 3px;
+  width: 12px; height: 12px; border: 1px solid var(--fg-dim); border-radius: 3px;
+  font: 11px/12px var(--font-ui); text-align: center; color: var(--fg);
+}
+.composer .editor li.composer-task-item[data-checked="true"]::before { content: "✓"; background: var(--surface-3); }
+.composer .editor table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 8px 0; }
+.composer .editor th, .composer .editor td { min-width: 56px; border: 1px solid var(--line); padding: 5px 8px; }
+.composer .editor th { font-weight: 600; background: var(--surface-1); }
+.composer .editor blockquote { margin: 8px 0; padding-inline-start: 12px; border-inline-start: 2px solid var(--line-strong); color: var(--fg-dim); }
+.composer .editor :is(ul, ol, blockquote, li):has(> :first-child:dir(rtl)),
+.composer .editor :is(ul, ol):has(> li:first-child > p:first-child:dir(rtl)) { direction: rtl; }
+.composer .editor a { color: var(--link); text-decoration: underline; }
+.composer .editor code { font-family: var(--mono); font-size: .94em; direction: ltr; unicode-bidi: isolate; background: var(--surface-2); border-radius: 4px; padding: 1px 4px; }
+.composer .editor hr { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
+.composer .editor .composer-code-block { position: relative; margin: 6px 0 10px; min-width: 0; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface-1); direction: ltr; text-align: left; }
+.composer-code-header { display: flex; align-items: center; min-height: 30px; padding: 4px 8px 0; user-select: none; }
+.composer-code-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; width: 100%; }
+.composer-code-actions { display: flex; flex: 0 0 auto; gap: 2px; opacity: 0; transition: opacity var(--dur-1, 100ms); }
+.composer-code-block:is(:hover, :focus-within) .composer-code-actions { opacity: 1; }
+.composer-code-actions button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; color: var(--fg-dim); background: transparent; cursor: pointer; }
+.composer-code-actions button:hover { color: var(--fg); background: var(--surface-3); }
+.composer-code-actions button:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
+@media (hover: none) { .composer-code-actions { opacity: 1; } }
+.composer .editor .composer-code-block pre { margin: 0; padding: 6px 10px 10px; overflow-x: auto; white-space: pre; border: 0; border-radius: 0 0 14px 14px; outline: none; font-family: var(--mono); font-size: .94em; tab-size: 2; }
+.composer .editor .composer-code-block code { display: block; min-height: 20px; padding: 0; background: transparent; font-size: inherit; white-space: pre; }
+.composer .editor .ProseMirror-selectednode { outline: 1px solid var(--control-focus-border); outline-offset: 1px; }
+.composer .editor .ProseMirror-separator { display: inline; border: none; margin: 0; padding: 0; width: 0; height: 0; }
+.composer .editor.ProseMirror-hideselection *::selection { background: transparent; }
+.composer .editor.ProseMirror-hideselection { caret-color: transparent; }
+.composer .editor.ProseMirror-focused { outline: none; }
+.composer .editor [draggable][contenteditable="false"] { user-select: text; }
+.composer .editor .ProseMirror-trailingBreak { margin: 0; }
+@media (forced-colors: active) {
+  .composer .editor .composer-code-block { border: 1px solid CanvasText; }
+}

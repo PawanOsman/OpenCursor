@@ -131,17 +131,14 @@ describe("TodoWrite — defensive input validation", () => {
   it("handles items without content", () => {
     const ctx: ToolContext = { todos: [] };
     todoWriteHandler({ todos: [{ id: "1", status: "pending" }], merge: false }, ctx);
-    expect(ctx.todos).toHaveLength(1);
-    expect(ctx.todos[0].content).toBe("unnamed");
-    const r = todoWriteHandler({ todos: ctx.todos, merge: true }, ctx);
-    expect(r.output).toContain("[ ] unnamed");
+    expect(ctx.todos).toHaveLength(0);
   });
 
   it("handles items with null content", () => {
     const ctx: ToolContext = { todos: [] };
     todoWriteHandler({ todos: [{ id: "1", content: null, status: "pending" }], merge: false }, ctx);
     const r = todoWriteHandler({ todos: ctx.todos, merge: true }, ctx);
-    expect(r.output).toContain("[ ] unnamed");
+    expect(r.output).toBe("(no todos)");
   });
 
   it("handles items with wrong status", () => {

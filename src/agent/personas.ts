@@ -11,7 +11,7 @@ export interface Persona {
   id: string;
   name: string;
   description: string;
-  /** Identity/instructions layered onto the base Cursor-style prompt. */
+  /** Identity/instructions layered onto the base prompt. */
   prompt: string;
   builtin?: boolean;
 }

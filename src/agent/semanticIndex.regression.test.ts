@@ -8,12 +8,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, stat, utimes } from "node:fs/promises";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import * as semantic from "./semanticIndex";
 import * as scan from "./tools/fileScan";
 import { indexDocSource, searchDocs, setDocsStorageDir } from "./docsIndex";
+import { ApiKeyPool } from "./provider/apiKeyPool";
 vi.mock("../runtimeDeps", () => ({ importRuntimeDep: vi.fn() }));
 let fixture: string, root: string, storage: string;
 let requests: Array<{ endpoint: string; texts: string[] }>;
@@ -40,6 +41,57 @@ afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); await rm(fi
 async function meta() { const name = (await readdir(storage)).find((n) => n.startsWith("index-") && n.endsWith(".json"))!; return JSON.parse(await readFile(path.join(storage, name), "utf8")); }
 
 describe("production index transactions and retrieval identity", () => {
+  it("passes documentation cancellation through to the remote embedding request", async () => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((_url: string, init: RequestInit) => {
+      requestSignal = init.signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) => requestSignal!.addEventListener("abort", () => reject(requestSignal!.reason), { once: true }));
+    }));
+    const task = semantic.embedTexts(["Documentation page"], controller.signal);
+    const rejected = expect(task).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort(new DOMException("Cancelled", "AbortError"));
+    await rejected;
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
+  it("balances remote embedding keys and fails over before returning vectors", async () => {
+    const baseUrl = "https://one.example.test/v1";
+    const pool = new ApiKeyPool("embed", baseUrl, async () => ({ balance: "round-robin", credentials: [
+      { id: "expired", apiKey: "expired-key", legacy: false },
+      { id: "work", apiKey: "work-key", legacy: false },
+      { id: "backup", apiKey: "backup-key", legacy: false },
+    ] }));
+    semantic.setRemoteEmbedModel({ id: "fixture-model", baseUrl, apiKey: "unused-legacy", apiKeyPool: pool });
+    const fingerprint = semantic.getEmbedFingerprint();
+    const seen: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const key = new Headers(init.headers).get("authorization")!;
+      seen.push(key);
+      return key === "Bearer expired-key"
+        ? new Response("invalid", { status: 401 })
+        : new Response(JSON.stringify({ data: [{ index: 0, embedding: [3, 0, 0] }] }));
+    }));
+    expect(await semantic.embedQuery("first query")).toEqual([1, 0, 0]);
+    expect(await semantic.embedQuery("next query")).toEqual([1, 0, 0]);
+    expect(seen).toEqual(["Bearer expired-key", "Bearer work-key", "Bearer backup-key"]);
+    expect(semantic.getEmbedFingerprint()).toBe(fingerprint);
+  });
+
+  it("never pairs old embeddings and line coordinates with newly changed file contents", async () => {
+    const target = path.join(root, "fresh.ts");
+    await writeFile(target, "export const original = 1;");
+    await semantic.buildIndex(root);
+    expect((await semantic.search(root, "original"))[0]?.text).toContain("original");
+    const before = await stat(target);
+    // Same byte length and restored timestamps defeat metadata-only freshness checks.
+    await writeFile(target, "export const replaced = 2;");
+    await utimes(target, before.atime, before.mtime);
+    expect(await semantic.search(root, "original")).toEqual([]);
+    await semantic.upsertFile(root, "fresh.ts");
+    expect((await semantic.search(root, "replaced"))[0]?.text).toContain("replaced");
+    expect((await meta()).files["fresh.ts"]).toMatch(/:[a-f0-9]{64}$/);
+  });
   it("retries unchanged files after embedding failed", async () => {
     await writeFile(path.join(root, "a.ts"), "export const a = 1;");
     fail = () => true;

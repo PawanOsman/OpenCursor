@@ -11,7 +11,8 @@ import { spawn } from "child_process";
 import { getWorkspaceRoot } from "../context/workspaceUtils";
 import type { HookDef } from "../stores/featureStore";
 import { listExternalHooks, type ExternalHook } from "./externalHooks";
-import { killShellProcess } from "../agent/tools/shared";
+import { killShellProcess, trackShellProcess } from "../agent/tools/shared";
+import { currentExecutionProfile, configuredExecutionProfile, spawnExecutionCommand, withExecutionProfile } from "../agent/execution";
 
 /**
  * Trigger table: each unified event maps to the equivalent
@@ -21,6 +22,12 @@ import { killShellProcess } from "../agent/tools/shared";
  *   JSON verdict on stdout: {permission:"deny"} / {decision:"block"} / {continue:false})
  */
 const TRIGGERS = {
+	preToolUse: { cursor: [], claude: [], blocking: true },
+	postToolUse: { cursor: [], claude: [], blocking: false },
+	permissionRequest: { cursor: [], claude: ["PermissionRequest"], blocking: true },
+	postCompact: { cursor: [], claude: ["PostCompact"], blocking: false },
+	subagentStart: { cursor: [], claude: ["SubagentStart"], blocking: false },
+	interrupt: { cursor: [], claude: [], blocking: false },
 	beforeSubmit: { cursor: ["beforeSubmitPrompt"], claude: ["UserPromptSubmit"], blocking: true },
 	beforeShell: { cursor: ["beforeShellExecution"], claude: ["PreToolUse"], claudeTool: "Bash", blocking: true },
 	beforeMcp: { cursor: ["beforeMCPExecution"], claude: ["PreToolUse"], blocking: true },
@@ -76,13 +83,25 @@ const HOOK_TIMEOUT_MS = 30_000;
 function runHook(command: string, root: string | undefined, env: NodeJS.ProcessEnv, stdinPayload: object, signal?: AbortSignal): Promise<HookResult> {
 	return new Promise((resolve) => {
 		if (signal?.aborted) { resolve({ code: null, stdout: "", failure: "hook cancelled" }); return; }
-		const shell = process.platform === "win32" ? "powershell.exe" : "bash";
-		const args = process.platform === "win32" ? ["-Command", command] : ["-c", command];
+		const windows = process.platform === "win32";
+		const shell = windows ? "powershell.exe" : "bash";
+		// PowerShell -Command maps native failure to 1, which loses the hook
+		// protocol's exit-2 denial. Preserve it only when the final command failed;
+		// a later successful PowerShell command keeps its ordinary success result.
+		const script = `$global:LASTEXITCODE = 0\n${command}\n$ocursorHookSucceeded = $?\nif ($ocursorHookSucceeded) { exit 0 }\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\nexit 1`;
+		const args = windows ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script] : ["--noprofile", "--norc", "-c", command];
 		try {
-			const c = spawn(shell, args, { cwd: root, env, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
+			// File-based hooks must obey the same execution boundary as tools.
+			// beforeSubmit runs before a run scope exists, so honor host settings too.
+			const profile = currentExecutionProfile().kind === "container" ? currentExecutionProfile() : configuredExecutionProfile();
+			const workspace = root ?? getWorkspaceRoot() ?? process.cwd();
+			const c = withExecutionProfile(profile, workspace, () => spawnExecutionCommand(command, workspace,
+				() => spawn(shell, args, { cwd: root, env, windowsHide: true, detached: !windows, stdio: ["pipe", "pipe", "pipe"] })));
+			trackShellProcess(c);
 			let stdout = "";
 			let stderr = "";
 			let settled = false;
+			let stopping = false;
 			const finish = (result: HookResult) => {
 				if (settled) return;
 				settled = true;
@@ -91,8 +110,10 @@ function runHook(command: string, root: string | undefined, env: NodeJS.ProcessE
 				resolve(result);
 			};
 			const stop = (failure: string) => {
-				killShellProcess(c);
-				finish({ code: null, stdout, stderr, failure });
+				if (stopping || settled) return;
+				stopping = true;
+				void killShellProcess(c).then(closed => finish({ code: null, stdout, stderr,
+					failure: closed ? failure : `${failure}; process shutdown remains unconfirmed` }));
 			};
 			const onAbort = () => stop("hook cancelled");
 			const timer = setTimeout(() => stop("hook timed out after 30 seconds"), HOOK_TIMEOUT_MS);
@@ -107,8 +128,7 @@ function runHook(command: string, root: string | undefined, env: NodeJS.ProcessE
 			c.stdin?.on("error", () => {});
 			c.stdin?.write(JSON.stringify(stdinPayload));
 			c.stdin?.end();
-			if (process.platform !== "win32") c.once("exit", () => killShellProcess(c));
-			c.on("close", (code) => finish({ code, stdout, stderr }));
+			c.on("close", (code) => { if (!stopping) finish({ code, stdout, stderr }); });
 			c.on("error", (error) => finish({ code: null, stdout, stderr, failure: `hook failed: ${error.message}` }));
 		} catch (error) {
 			resolve({ code: null, stdout: "", failure: `hook failed: ${error instanceof Error ? error.message : String(error)}` });

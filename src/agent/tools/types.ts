@@ -29,6 +29,10 @@ export interface TodoItem {
 
 /** Per-run context so concurrent agent runs don't clobber each other's hooks. */
 export interface ToolContext {
+  agentControl?: (request: import("../collaborationState").AgentControlRequest, signal?: AbortSignal) => Promise<string>;
+  verification?: import("../verification").VerificationLedger;
+  getGoal?: () => unknown;
+  updateGoal?: (status: "active" | "paused" | "blocked" | "complete") => string;
   /** Todo state owned by this run, never shared across conversations. */
   todos: TodoItem[];
   changeOwner?: import("../../stores/pendingChanges").ChangeOwner;
@@ -70,10 +74,11 @@ export interface SubagentOptions {
   description?: string;
   /** File paths (images/videos) to attach to the subagent's context. */
   fileAttachments?: string[];
-  /** Legacy input retained so unsupported resume requests receive a clear error. */
+  /** Resume the saved history of a collaborator belonging to this conversation. */
   resume?: string;
   /** Legacy input; the current runner does not support resuming/interruption. */
   interrupt?: boolean;
+  fork?: boolean;
 }
 
 /** Injected by the agent loop (avoids a circular import with loop.ts). */

@@ -11,6 +11,9 @@ import * as React from "react";
 import { createRoot } from "react-dom/client";
 import "./settings.css";
 import { App } from "./App";
+import "../shared/motion.css";
+import { initializeMotionPreference } from "../shared/motionPreference";
 
+initializeMotionPreference();
 const root = createRoot(document.getElementById("root")!);
 root.render(<App />);

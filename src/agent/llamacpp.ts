@@ -24,6 +24,8 @@ import * as net from "net";
 import { spawn, execFile } from "child_process";
 import * as vscode from "vscode";
 import { importRuntimeDep } from "../runtimeDeps";
+import { assertGguf, downloadModelFile } from "./modelDownload";
+import { stopLocalProcess, type LocalModelState } from "./localRuntime";
 
 /**
  * llama-server launch configuration. Used both as the global default and as a
@@ -112,11 +114,14 @@ export interface HfGgufResult {
   sizeBytes?: number;
   downloads?: number;
   likes?: number;
+  sha256?: string;
 }
 
 export interface LlamacppStatus {
   installed: boolean;
-  /** model id -> running */
+  states?: Record<string, LocalModelState>;
+  endpoints?: Record<string, string>;
+  /** model id -> ready */
   running: Record<string, boolean>;
   /** model id -> loading (spawned, weights not ready yet) */
   loading: Record<string, boolean>;
@@ -135,11 +140,11 @@ let serverCmd: { bin: string; pre: string[] } = { bin: UNIFIED_BIN, pre: ["serve
 const MAX_LOG_LINES = 500;
 
 /** Ask the OS for a free ephemeral port (bind :0, read the assigned port). */
-function getFreePort(host = "127.0.0.1"): Promise<number> {
+function getFreePort(host = "127.0.0.1", requestedPort = 0): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.once("error", reject);
-    srv.listen(0, host, () => {
+    srv.listen(requestedPort, host, () => {
       const port = (srv.address() as net.AddressInfo).port;
       srv.close(() => resolve(port));
     });
@@ -161,10 +166,16 @@ export const onLlamacppStatus = _onStatus.event;
 interface Running {
   proc: ReturnType<typeof spawn>;
   port: number;
+  host: string;
+  ready: boolean;
+  stopping: boolean;
+  closed: Promise<void>;
 }
 const running = new Map<string, Running>();
 const loadPromises = new Map<string, Promise<void>>();
 const loading = new Map<string, boolean>();
+const loadControllers = new Map<string, AbortController>();
+const unloadPromises = new Map<string, Promise<void>>();
 const errors = new Map<string, string>();
 const logs = new Map<string, string[]>();
 let installedCache: boolean | undefined;
@@ -172,7 +183,7 @@ let installedCache: boolean | undefined;
 /** Append server output to a model's tail log (capped) and notify listeners. */
 function appendLog(id: string, chunk: string): void {
   const cur = logs.get(id) ?? [];
-  const lines = chunk.split(/\r?\n/).filter((l) => l.length > 0);
+  const lines = chunk.split(/\r?\n/).filter((l) => l.length > 0).map(line => line.slice(0, 2000));
   if (!lines.length) return;
   const next = [...cur, ...lines];
   logs.set(id, next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next);
@@ -187,14 +198,18 @@ async function ensureDir(): Promise<string> {
 
 function snapshot(): LlamacppStatus {
   const r: Record<string, boolean> = {};
-  for (const id of running.keys()) r[id] = true;
+  for (const [id, server] of running) if (server.ready && !server.stopping) r[id] = true;
   const l: Record<string, boolean> = {};
   for (const [k, v] of loading) if (v) l[k] = true;
   const e: Record<string, string> = {};
   for (const [k, v] of errors) e[k] = v;
   const g: Record<string, string[]> = {};
   for (const [k, v] of logs) g[k] = v;
-  return { installed: installedCache ?? false, running: r, loading: l, errors: e, logs: g };
+  const states: Record<string, LocalModelState> = Object.fromEntries([...errors.keys()].map(id => [id, "error"]));
+  for (const [id, server] of running) states[id] = server.stopping ? "stopping" : server.ready ? "ready" : "loading";
+  for (const id of loading.keys()) if (!running.has(id)) states[id] = "loading";
+  const endpoints = Object.fromEntries([...running].filter(([, server]) => server.ready && !server.stopping).map(([id, server]) => [id, `http://${urlHost(server.host)}:${server.port}/v1`]));
+  return { installed: installedCache ?? false, running: r, loading: l, errors: e, logs: g, states, endpoints };
 }
 
 function emit() {
@@ -205,13 +220,13 @@ function emit() {
 export function checkInstalled(): Promise<boolean> {
   // Prefer the unified `llama serve`; fall back to legacy `llama-server`.
   return new Promise((resolve) => {
-    execFile(UNIFIED_BIN, ["serve", "--help"], (err) => {
+    execFile(UNIFIED_BIN, ["serve", "--help"], { timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024 }, (err) => {
       if (!err) {
         serverCmd = { bin: UNIFIED_BIN, pre: ["serve"] };
         installedCache = true;
         return resolve(true);
       }
-      execFile(LEGACY_BIN, ["--version"], (err2) => {
+      execFile(LEGACY_BIN, ["--version"], { timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024 }, (err2) => {
         if (!err2) serverCmd = { bin: LEGACY_BIN, pre: [] };
         installedCache = !err2;
         resolve(!err2);
@@ -239,11 +254,13 @@ export async function installLlamacpp(): Promise<void> {
 // ---- HF GGUF search ----
 export async function searchGguf(query: string, limit = 20): Promise<HfGgufResult[]> {
   const hub = await importRuntimeDep("@huggingface/hub");
+  const signal = AbortSignal.timeout(30_000);
   const out: HfGgufResult[] = [];
   for await (const m of hub.listModels({
     search: { query, tags: ["gguf"] },
     sort: "downloads",
     limit,
+    fetch: (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => fetch(input, { ...init, signal }),
   })) {
     out.push({ repo: (m as any).name, downloads: (m as any).downloads, likes: (m as any).likes, file: "" });
   }
@@ -253,10 +270,13 @@ export async function searchGguf(query: string, limit = 20): Promise<HfGgufResul
 /** List the .gguf files inside a repo so the user can pick a quantization. */
 export async function listRepoGgufFiles(repo: string): Promise<HfGgufResult[]> {
   const hub = await importRuntimeDep("@huggingface/hub");
+  const signal = AbortSignal.timeout(30_000);
   const files: HfGgufResult[] = [];
-  for await (const f of hub.listFiles({ repo, recursive: true })) {
+  for await (const f of hub.listFiles({ repo, recursive: true, fetch: (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => fetch(input, { ...init, signal }) })) {
     if (f.type === "file" && /\.gguf$/i.test(f.path)) {
-      files.push({ repo, file: f.path, sizeBytes: f.size });
+      const hash = (f as any).lfs?.oid?.replace(/^sha256:/, "");
+      files.push({ repo, file: f.path, sizeBytes: f.size, ...(/^[a-f\d]{64}$/i.test(hash || "") ? { sha256: hash } : {}) });
+      if (files.length >= 5000) throw new Error("This repository contains more than 5,000 GGUF files. Choose a smaller model repository.");
     }
   }
   return files;
@@ -269,42 +289,15 @@ function modelId(repo: string | undefined, file: string): string {
 
 /** Download a GGUF file from the Hub into the models dir. Returns the new model. */
 export async function downloadGguf(
-  repo: string,
-  file: string,
-  onProgress?: (received: number, total: number) => void,
-  signal?: AbortSignal,
+  repo: string, file: string, onProgress?: (received: number, total: number) => void, signal?: AbortSignal,
+  integrity?: { sha256?: string; sizeBytes?: number },
 ): Promise<LlamacppModel> {
+  if (!/^[^/]+\/[^/]+$/.test(repo) || !/\.gguf$/i.test(file) || file.split(/[\\/]/).some(segment => segment === ".." || segment === ".")) throw new Error("Invalid GGUF repository or filename.");
   const dir = await ensureDir();
   const url = `https://huggingface.co/${repo.split("/").map(encodeURIComponent).join("/")}/resolve/main/${file.split("/").map(encodeURIComponent).join("/")}`;
   const identity = createHash("sha256").update(`${repo}/${file}`).digest("hex");
   const dest = path.join(dir, identity, path.basename(file));
-  await fs.mkdir(path.dirname(dest), { recursive: true });
-  const temporary = `${dest}.${randomUUID()}.part`;
-  const res = await fetch(url, { signal });
-  if (!res.ok || !res.body) throw new Error(`download ${res.status}`);
-  const total = res.headers.get("content-encoding") ? 0 : Number(res.headers.get("content-length") || 0);
-  let received = 0;
-  const reader = res.body.getReader();
-  async function* chunks() {
-    for (;;) {
-      signal?.throwIfAborted();
-      const { done, value } = await reader.read();
-      if (done) break;
-      received += value.length;
-      onProgress?.(received, total);
-      yield value;
-    }
-  }
-  try {
-    await fs.writeFile(temporary, chunks(), { flag: "wx", signal });
-    signal?.throwIfAborted();
-    if (!received || (total > 0 && received !== total)) throw new Error(`incomplete GGUF download: received ${received} of ${total} bytes`);
-    await fs.rename(temporary, dest);
-  } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
-    await fs.rm(temporary, { force: true });
-  }
+  await downloadModelFile(url, dest, { signal, onProgress, sha256: integrity?.sha256, expectedBytes: integrity?.sizeBytes });
   const stat = await fs.stat(dest);
   return makeModel({ repo, file, filePath: dest, sizeBytes: stat.size, name: path.basename(file, ".gguf") });
 }
@@ -312,6 +305,7 @@ export async function downloadGguf(
 /** Import an existing local .gguf file (copied into the models dir). */
 export async function importGguf(srcPath: string): Promise<LlamacppModel> {
   const dir = await ensureDir();
+  await assertGguf(srcPath);
   const base = path.basename(srcPath);
   const identity = createHash("sha256").update(await fs.realpath(srcPath)).digest("hex");
   const dest = path.join(dir, identity, base);
@@ -387,9 +381,40 @@ function effectivePort(m: LlamacppModel, cfg: LlamacppServerConfig): number {
 
 /** Base URL of a model's local OpenAI-compatible server (no trailing slash). */
 export function serverUrlFor(m: LlamacppModel, globalCfg?: LlamacppServerConfig): string {
+  const server = running.get(m.id);
+  if (server) return `http://${urlHost(server.host)}:${server.port}/v1`;
   const cfg = effectiveConfig(m, globalCfg);
   const host = cfg.host && cfg.host !== "0.0.0.0" ? cfg.host : "127.0.0.1";
-  return `http://${host}:${effectivePort(m, cfg)}/v1`;
+  return `http://${urlHost(host)}:${effectivePort(m, cfg)}/v1`;
+}
+
+function urlHost(host: string): string { return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host; }
+
+/** Parse quoted arguments without running a shell or expanding variables. */
+export function parseExtraArgs(source: string): string[] {
+  const args: string[] = []; let token = "", quote = "", active = false;
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i];
+    if (quote) { if (c === quote) quote = ""; else token += c; active = true; }
+    else if (c === '"' || c === "'") { quote = c; active = true; }
+    else if (/\s/.test(c)) { if (active) args.push(token); token = ""; active = false; }
+    else { token += c; active = true; }
+  }
+  if (quote) throw new Error("Extra arguments contain an unclosed quote.");
+  if (active) args.push(token);
+  if (args.some(arg => /^(?:--(?:host|port|model)|-m)(?:=|$)/.test(arg))) throw new Error("Set model, host and port through their dedicated controls, not extra arguments.");
+  return args;
+}
+export function validateServerConfig(cfg: LlamacppServerConfig): void {
+  const ranges: Record<string, [number, number]> = { port: [0, 65535], ctxSize: [0, 1048576], threads: [1, 1024], parallel: [1, 256], batchSize: [1, 1048576], ubatchSize: [1, 1048576], specDraftNMax: [1, 4096] };
+  for (const [key, [min, max]] of Object.entries(ranges)) {
+    const value = cfg[key as keyof LlamacppServerConfig];
+    if (value != null && (!Number.isInteger(value) || Number(value) < min || Number(value) > max)) throw new Error(`${key} must be an integer between ${min} and ${max}.`);
+  }
+  if (cfg.host && !/^[a-z\d.:_-]+$/i.test(cfg.host)) throw new Error("Invalid server bind host.");
+  for (const value of [cfg.nGpuLayers, cfg.draftNGpuLayers]) if (value && !/^(?:auto|all|\d+)$/.test(value)) throw new Error("GPU layers must be auto, all, or a nonnegative integer.");
+  if (cfg.batchSize && cfg.ubatchSize && cfg.ubatchSize > cfg.batchSize) throw new Error("Physical batch size cannot exceed logical batch size.");
+  if (cfg.extraArgs) parseExtraArgs(cfg.extraArgs);
 }
 
 /** Build the llama-server argv from a model + effective config. */
@@ -413,7 +438,7 @@ function buildArgs(m: LlamacppModel, cfg: LlamacppServerConfig, port: number): s
   }
   if (cfg.noMmap) args.push("--no-mmap");
   if (cfg.mlock) args.push("--mlock");
-  if (cfg.extraArgs?.trim()) args.push(...cfg.extraArgs.trim().split(/\s+/));
+  if (cfg.extraArgs?.trim()) args.push(...parseExtraArgs(cfg.extraArgs));
   return args;
 }
 
@@ -421,151 +446,130 @@ function buildArgs(m: LlamacppModel, cfg: LlamacppServerConfig, port: number): s
 export function loadModel(m: LlamacppModel, globalCfg?: LlamacppServerConfig | number): Promise<void> {
   const pending = loadPromises.get(m.id);
   if (pending) return pending;
-  const promise = startModel(m, globalCfg).finally(() => loadPromises.delete(m.id));
+  const controller = new AbortController();
+  loadControllers.set(m.id, controller);
+  const promise = (async () => {
+    await unloadPromises.get(m.id);
+    controller.signal.throwIfAborted();
+    await startModel(m, globalCfg, controller.signal);
+  })().finally(() => {
+    if (loadControllers.get(m.id) === controller) loadControllers.delete(m.id);
+    if (loadPromises.get(m.id) === promise) loadPromises.delete(m.id);
+  });
   loadPromises.set(m.id, promise);
   return promise;
 }
 
-async function startModel(m: LlamacppModel, globalCfg?: LlamacppServerConfig | number): Promise<void> {
-  if (running.has(m.id)) return;
-  errors.delete(m.id);
-  logs.set(m.id, []); // fresh log per load
-  loading.set(m.id, true);
-  emit(); // surface loading state immediately
-  // Back-compat: callers used to pass a global context length number.
-  const gcfg: LlamacppServerConfig | undefined =
-    typeof globalCfg === "number" ? { ctxSize: globalCfg } : globalCfg;
-  const cfg = effectiveConfig(m, gcfg);
-  const host = cfg.host && cfg.host !== "0.0.0.0" ? cfg.host : "127.0.0.1";
-
-  // Always launch on a fresh OS-assigned random port. If the server still
-  // fails to bind (TOCTOU race with another process), retry with a new one.
-  const MAX_BIND_TRIES = 3;
-  let lastErr: Error | null = null;
-  for (let attempt = 1; attempt <= MAX_BIND_TRIES; attempt++) {
-    let port: number;
-    try {
-      port = await getFreePort(cfg.host || "127.0.0.1");
-    } catch (e: any) {
-      lastErr = new Error(`could not find a free port: ${e?.message || e}`);
-      break;
+async function startModel(m: LlamacppModel, globalCfg: LlamacppServerConfig | number | undefined, signal: AbortSignal): Promise<void> {
+  if (running.get(m.id)?.ready) return;
+  if (running.get(m.id)?.stopping) throw new Error("The previous server has not confirmed shutdown. Unload it before loading another instance.");
+  errors.delete(m.id); logs.set(m.id, []); loading.set(m.id, true); emit();
+  try {
+    const cfg = effectiveConfig(m, typeof globalCfg === "number" ? { ctxSize: globalCfg } : globalCfg);
+    validateServerConfig(cfg);
+    await fs.access(m.filePath);
+    signal.throwIfAborted();
+    const host = cfg.host === "0.0.0.0" ? "127.0.0.1" : cfg.host === "::" ? "::1" : cfg.host || "127.0.0.1";
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      signal.throwIfAborted();
+      const port = await getFreePort(cfg.host || "127.0.0.1", cfg.port || 0).catch(error => { throw new Error(`Cannot bind ${cfg.host || "127.0.0.1"}:${cfg.port || "auto"}: ${String(error)}. Choose another port or stop the conflicting server.`); });
+      signal.throwIfAborted();
+      try { await spawnServer(m, cfg, host, port, signal); return; }
+      catch (error) {
+        const bindFailure = /couldn't bind|address already in use|EADDRINUSE|HTTP server error/i.test(String(error)) || (logs.get(m.id) || []).some(line => /couldn't bind|address already in use/i.test(line));
+        if (signal.aborted || !bindFailure || cfg.port || attempt === 3) throw error;
+        appendLog(m.id, `[retry] port ${port} unavailable; choosing another port`);
+      }
     }
-    try {
-      await spawnServer(m, cfg, host, port);
-      return; // loaded
-    } catch (e: any) {
-      lastErr = e instanceof Error ? e : new Error(String(e));
-      // Bind failure → retry on a new random port; anything else is fatal.
-      const bindFail = /couldn't bind|address already in use|EADDRINUSE|HTTP server error/i.test(lastErr.message) ||
-        (logs.get(m.id) || []).some((l) => /couldn't bind|address already in use/i.test(l));
-      if (!bindFail) break;
-      appendLog(m.id, `[retry] port ${port} unavailable, trying a new random port (${attempt}/${MAX_BIND_TRIES})`);
-    }
+  } catch (error) {
+    loading.delete(m.id);
+    if (!signal.aborted) errors.set(m.id, error instanceof Error ? error.message : String(error));
+    emit(); throw error;
   }
-  loading.delete(m.id);
-  const msg = lastErr?.message || "failed to start server";
-  errors.set(m.id, msg);
-  emit();
-  throw new Error(msg);
 }
 
-/** Spawn one llama-server on `port` and resolve when /health reports ready. */
-function spawnServer(m: LlamacppModel, cfg: LlamacppServerConfig, host: string, port: number): Promise<void> {
+async function spawnServer(m: LlamacppModel, cfg: LlamacppServerConfig, host: string, port: number, signal: AbortSignal): Promise<void> {
   const argv = [...serverCmd.pre, ...buildArgs(m, cfg, port)];
   appendLog(m.id, `$ ${serverCmd.bin} ${argv.join(" ")}`);
-  const proc = spawn(serverCmd.bin, argv, { stdio: ["ignore", "pipe", "pipe"] });
-  running.set(m.id, { proc, port });
-  proc.stdout?.on("data", (b) => appendLog(m.id, b.toString()));
-  proc.stderr?.on("data", (b) => appendLog(m.id, b.toString()));
+  const proc = spawn(serverCmd.bin, argv, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const server: Running = { proc, port, host, ready: false, stopping: false, closed: new Promise(resolve => proc.once("close", () => resolve())) };
+  running.set(m.id, server);
+  proc.stdout?.on("data", b => appendLog(m.id, b.toString()));
+  proc.stderr?.on("data", b => appendLog(m.id, b.toString()));
+  let failure: Error | undefined;
+  const failed = (message: string) => {
+    failure = new Error(message);
+    if (!server.stopping && !signal.aborted && running.get(m.id) === server) {
+      errors.set(m.id, message); loading.delete(m.id); running.delete(m.id); emit();
+    }
+  };
+  proc.once("error", error => failed(error.message));
+  proc.once("exit", code => failed(`Server exited (${code}). Inspect its log for memory, model, or port errors.`));
   emit();
-
-  let resolved = false;
-  return new Promise<void>((resolve, reject) => {
-    let pollTimer: ReturnType<typeof setTimeout> | undefined;
-    const healthAbort = new AbortController();
-    const fail = (msg: string) => {
-      // Lifetime cleanup also applies after the startup promise has resolved.
-      const owned = running.get(m.id)?.proc === proc;
-      if (owned) {
-        running.delete(m.id);
-        loading.delete(m.id);
-        errors.set(m.id, msg);
-        appendLog(m.id, `[error] ${msg}`);
-        emit();
-      }
-      clearTimeout(pollTimer);
-      healthAbort.abort();
-      if (resolved) return;
-      resolved = true;
-      reject(new Error(msg));
-    };
-    proc.on("error", (e) => fail(e.message));
-    proc.on("exit", (code) => fail(`server exited (${code}) — see log`));
-
-    // Poll /health until the model is fully loaded. llama-server returns 503
-    // ("loading model") until weights finish, then 200 ("ok"). This is the only
-    // reliable readiness signal — the "listening" log fires far too early.
-    const healthUrl = `http://${host}:${port}/health`;
-    const deadline = Date.now() + 10 * 60_000; // generous: big models can take minutes
-    const poll = async () => {
-      if (resolved) return;
-      if (!running.has(m.id)) return; // exited
+  const deadline = Date.now() + 10 * 60_000;
+  try {
+    while (Date.now() < deadline) {
+      signal.throwIfAborted(); if (failure) throw failure;
       try {
-        const r = await fetch(healthUrl, { signal: AbortSignal.any([healthAbort.signal, AbortSignal.timeout(5000)]) });
-        if (resolved || running.get(m.id)?.proc !== proc) return;
-        if (r.ok) {
-          resolved = true;
-          loading.delete(m.id);
-          appendLog(m.id, `[ready] model loaded on port ${port}`);
-          emit();
-          resolve();
-          return;
+        const response = await fetch(`http://${urlHost(host)}:${port}/health`, { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) });
+        signal.throwIfAborted(); if (failure) throw failure;
+        if (response.ok) {
+          const health: any = await response.json().catch(() => ({}));
+          if (health?.status !== "ok") throw new Error("Health check returned an unexpected payload; verify the runtime and port.");
+          server.ready = true; loading.delete(m.id); appendLog(m.id, `[ready] model loaded on port ${port}`); emit(); return;
         }
-      } catch {
-        // server not accepting connections yet — keep waiting
+        await response.body?.cancel();
+        if (response.status !== 503) throw new Error(`Health check returned HTTP ${response.status}; verify this is a llama.cpp endpoint.`);
+      } catch (error) {
+        if (signal.aborted || failure || /Health check returned/.test(String(error))) throw error;
       }
-      if (resolved) return;
-      if (Date.now() > deadline) {
-        fail("timed out waiting for model to load");
-        proc.kill();
-        return;
-      }
-      pollTimer = setTimeout(poll, 500);
-    };
-    poll();
-  });
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 500);
+        const abort = () => { clearTimeout(timer); reject(signal.reason); };
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) abort();
+      });
+    }
+    throw new Error("Timed out waiting for model readiness. Reduce context/GPU layers or inspect the server log.");
+  } catch (error) {
+    server.stopping = true;
+    try { await stopLocalProcess(proc); }
+    catch (stopError) {
+      // Preserve ownership after failed teardown so another load cannot orphan
+      // or replace the server and the user can retry Unload.
+      if (!running.has(m.id)) running.set(m.id, server);
+      const message = `${String(error)} Shutdown remains unconfirmed: ${String(stopError)}`;
+      errors.set(m.id, message); loading.delete(m.id); appendLog(m.id, message); emit();
+      throw new Error(message);
+    }
+    if (running.get(m.id) === server) running.delete(m.id);
+    loading.delete(m.id); emit(); throw error;
+  }
 }
 
-/**
- * Ensure a model's server is running before a chat request. No-op if already
- * loaded; otherwise loads it (resolves once the HTTP listener is ready).
- */
-export async function ensureLoaded(m: LlamacppModel, globalCfg?: LlamacppServerConfig): Promise<void> {
-  await loadModel(m, globalCfg);
-}
+export async function ensureLoaded(m: LlamacppModel, globalCfg?: LlamacppServerConfig): Promise<void> { await loadModel(m, globalCfg); }
 
-export async function unloadModel(id: string): Promise<void> {
-  const r = running.get(id);
-  if (!r) return;
-  running.delete(id);
-  loading.delete(id);
-  r.proc.kill();
-  appendLog(id, "[stopped] server unloaded");
-  emit();
+export function unloadModel(id: string): Promise<void> {
+  const existing = unloadPromises.get(id); if (existing) return existing;
+  const priorLoad = loadPromises.get(id);
+  loadControllers.get(id)?.abort(new Error("Model load cancelled."));
+  const promise = (async () => {
+    const server = running.get(id);
+    if (server) {
+      server.stopping = true; server.ready = false; emit();
+      await stopLocalProcess(server.proc);
+      if (running.get(id) === server) running.delete(id);
+    }
+    // Cancellation can arrive before the port or process is allocated.
+    await priorLoad?.catch(() => {});
+    loading.delete(id); appendLog(id, "[stopped] server unloaded"); emit();
+  })().catch(error => { errors.set(id, String(error)); emit(); throw error; }).finally(() => { unloadPromises.delete(id); });
+  unloadPromises.set(id, promise); return promise;
 }
-
-export function getStatus(): LlamacppStatus {
-  return snapshot();
-}
-
-export function isRunning(id: string): boolean {
-  return running.has(id);
-}
-
-/** Kill all running servers (extension shutdown). */
-export function disposeLlamacpp(): void {
-  for (const { proc } of running.values()) proc.kill();
-  running.clear();
+export function getStatus(): LlamacppStatus { return snapshot(); }
+export function isRunning(id: string): boolean { const server = running.get(id); return Boolean(server?.ready && !server.stopping); }
+export async function disposeLlamacpp(): Promise<void> {
+  await Promise.allSettled([...new Set([...running.keys(), ...loadPromises.keys()])].map(unloadModel));
 }
 
 /** Pick a local .gguf file via the OS dialog. */

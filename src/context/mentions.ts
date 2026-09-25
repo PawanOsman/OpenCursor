@@ -7,7 +7,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-// @-mention search + resolution (Cursor-style typeahead types).
+// @-mention search and resolution.
 // Search: returns MentionItem[] per kind for the composer popup.
 // Resolve: turns picked mentions into <attached_context> blocks for the prompt.
 

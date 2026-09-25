@@ -21,8 +21,9 @@ const ANTHROPIC_ADAPTIVE = /claude-(opus-4-[678]|opus-5|sonnet-4-6|sonnet-5|fabl
 const ANTHROPIC_NO_MANUAL = /claude-(opus-4-[78]|opus-5|sonnet-5|fable-5|mythos-5)/i;
 /** Opus 5 rejects `thinking:{type:disabled}` when effort is xhigh/max (400). */
 const ANTHROPIC_DISABLE_NEEDS_LOW_EFFORT = /claude-opus-5/i;
-/** Fable 5 / Mythos 5: thinking is always on — `disabled` returns 400 at any effort. */
-const ANTHROPIC_NO_DISABLE = /claude-(fable-5|mythos)/i;
+/** Opus 5.5 / Fable 5 / Mythos: thinking is always on; disabled returns 400.
+ * https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5 */
+const ANTHROPIC_NO_DISABLE = /claude-(opus-5-5|fable-5|mythos)/i;
 /**
  * Kept for callers of the existing provider API. The legacy context beta was
  * retired on April 30, 2026; current 1M models use that window without a beta.
@@ -60,7 +61,8 @@ export function applyAnthropicReasoning(
   let mode = params?.thinking; // "disabled" | "adaptive" | "enabled" | undefined
   let effort = normalizeEffort(model, params?.reasoningEffort);
 
-  // Fable/Mythos reject thinking:{disabled} entirely — coerce to adaptive.
+  // Opus 5.5/Fable/Mythos reject thinking:{disabled} — coerce to adaptive
+  // before applying the older Opus 5 restriction so saved effort is preserved.
   if (mode === "disabled" && ANTHROPIC_NO_DISABLE.test(model)) {
     mode = "adaptive";
   }

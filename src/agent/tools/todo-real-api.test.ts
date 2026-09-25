@@ -43,7 +43,7 @@ const MODEL = ENV.VERBOO_MODEL || "deepseek-v4-flash-0731";
 
 const API_KEY = DIRECT_KEY;
 const BASE_URL = DIRECT_URL;
-const hasConfig = API_KEY && BASE_URL;
+const hasConfig = process.env.OPENCURSOR_LIVE_TESTS === "1" && API_KEY && BASE_URL;
 
 // ---- API client ----
 async function sendTodoWritePrompt(prompt: string): Promise<{ modelOutput: string; todoWriteInput: any; error?: string }> {
@@ -133,11 +133,7 @@ describeIfApi("REAL API: TodoWrite with deepseek-v4-flash", () => {
       "Analise as issues do repositório anthropics/claude-code e proponha melhorias para a extensão OpenCursor. Crie uma lista de tarefas.",
     );
 
-    if (result.error) {
-      // API might be down — skip gracefully
-      console.log("API error (skipping):", result.error);
-      return;
-    }
+    if (result.error) throw new Error(`Live API evaluation inconclusive: ${result.error}`);
 
     expect(result.error).toBeUndefined();
     expect(result.todoWriteInput).not.toBeNull();
@@ -166,10 +162,7 @@ describeIfApi("REAL API: TodoWrite with deepseek-v4-flash", () => {
       "Analyze the top 10 issues from anthropics/claude-code repository. Create a todo list and start working through them.",
     );
 
-    if (result.error) {
-      console.log("API error (skipping):", result.error);
-      return;
-    }
+    if (result.error) throw new Error(`Live API evaluation inconclusive: ${result.error}`);
 
     expect(result.error).toBeUndefined();
     expect(result.todoWriteInput).not.toBeNull();

@@ -11,7 +11,7 @@
 const fs = require('node:fs');
 const yaml = require('js-yaml');
 const lock = yaml.load(fs.readFileSync('pnpm-lock.yaml', 'utf8'));
-const names = ['@huggingface/transformers', '@huggingface/hub', 'onnxruntime-node', 'sharp', 'pdf-parse'];
+const names = ['@huggingface/transformers', '@huggingface/hub', 'onnxruntime-node', 'sharp', 'pdf-parse', '@lydell/node-pty', 'playwright-core'];
 const roots = Object.fromEntries(names.map(name => [name, `${name}@${lock.importers['.'].dependencies[name].version}`]));
 const drop = { '@huggingface/transformers': ['onnxruntime-web'], 'onnxruntime-node': ['adm-zip', 'global-agent'] };
 const packages = {};

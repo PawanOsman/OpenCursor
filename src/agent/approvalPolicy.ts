@@ -51,10 +51,10 @@ export const DEFAULT_APPROVAL: ApprovalPolicy = {
 
 /** Map a tool name to its approval action type (undefined = ungated). */
 export function actionTypeFor(toolName: string): ApprovalActionType | undefined {
-	if (toolName === "Shell") return "shell";
+	if (toolName === "Shell" || toolName === "RunChecks" || toolName === "WriteStdin") return "shell";
 	if (toolName === "Delete") return "delete";
 	if (toolName === "StrReplace" || toolName === "Write" || toolName === "EditNotebook" || toolName === "WritePlan") return "edits";
-	if (toolName === "WebSearch" || toolName === "WebFetch") return "web";
+	if (toolName === "WebSearch" || toolName === "WebFetch" || toolName.startsWith("Browser")) return "web";
 	if (toolName === "CallMcpTool" || toolName === "FetchMcpResource" || toolName.startsWith("mcp__")) return "mcp";
 	return undefined;
 }
@@ -71,6 +71,10 @@ const PATH_INPUTS: Record<string, string[]> = {
 	Delete: ["path"],
 	EditNotebook: ["target_notebook"],
 	Shell: ["working_directory"],
+	RunChecks: ["working_directory"],
+	GoToDefinition: ["path"],
+	FindReferences: ["path"],
+	RenamePreview: ["path"],
 	FetchMcpResource: ["downloadPath"],
 	ReadLints: ["paths"],
 };
@@ -112,6 +116,7 @@ function pathsForCall(toolName: string, input: any, root?: string): string[] {
 
 /** Every applicable action and location policy must allow a call. */
 export function actionTypesForCall(toolName: string, input: any, root?: string): ApprovalActionType[] {
+	if (toolName === "WriteStdin" && !input?.chars) return [];
 	const action = actionTypeFor(toolName);
 	const types: ApprovalActionType[] = action ? [action] : [];
 	if (toolName === "FetchMcpResource" && input?.downloadPath) types.push("edits");
@@ -128,7 +133,7 @@ export function actionTypeForCall(toolName: string, input: any, root?: string): 
 /** The string a rule's patterns match against, per action type. */
 export function subjectFor(type: ApprovalActionType, toolName: string, input: any): string {
 	switch (type) {
-		case "shell": return String(input?.command ?? "");
+		case "shell": return String(toolName === "WriteStdin" ? input?.chars ?? "" : input?.command ?? "");
 		case "edits":
 		case "delete": return toolName === "WritePlan" ? planRelativePath(input?.title) : String(input?.path ?? input?.target_notebook ?? input?.downloadPath ?? "");
 		case "outside": return pathsForCall(toolName, input).join(", ");
@@ -343,7 +348,7 @@ export function evaluateApproval(policy: ApprovalPolicy, toolName: string, input
 		// Ask/review/deny stay conservative when expansion prevents evaluation.
 		// Allow stays silent after the explicit deny checks above; unrelated deny
 		// rules must not turn ordinary variable references into approval prompts.
-		if (type === "shell" && r.mode !== "allow" && shellSubstitutions(String(input?.command ?? "")).dynamic) {
+		if (type === "shell" && r.mode !== "allow" && shellSubstitutions(subjectFor(type, toolName, input)).dynamic) {
 			if (r.mode === "deny") return "deny";
 			decision = "ask";
 		}

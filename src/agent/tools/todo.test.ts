@@ -18,6 +18,39 @@ import { describe, it, expect } from "vitest";
 // ==================== TESTS ====================
 
 describe("TodoWrite handler", () => {
+  it.each(["description", "task", "label", "title"])("recovers a description from %s even when content is blank", (field) => {
+    const ctx: ToolContext = { todos: [] };
+    todoWriteHandler({ todos: [{ content: "  ", [field]: " Inspect\n routing " }] }, ctx);
+    expect(ctx.todos[0].content).toBe("Inspect routing");
+  });
+
+  it.each([true, false, undefined])("keeps names for status-only updates with merge=%s", (merge) => {
+    const ctx: ToolContext = { todos: [{ id: "a", content: "Inspect routing", status: "pending" }] };
+    const result = todoWriteHandler({ todos: [{ id: "a", content: "", status: "completed" }], merge }, ctx);
+    expect(ctx.todos).toEqual([{ id: "a", content: "Inspect routing", status: "completed" }]);
+    expect(result.output).toBe("[x] Inspect routing");
+  });
+
+  it("rejects unknown status-only updates without changing existing work", () => {
+    const ctx: ToolContext = { todos: [{ id: "auto_0", content: "Inspect routing", status: "pending" }] };
+    const result = todoWriteHandler({ todos: [{ id: "missing", status: "completed" }, { status: "completed" }, " ", { content: {} }] }, ctx);
+    expect(ctx.todos).toEqual([{ id: "auto_0", content: "Inspect routing", status: "pending" }]);
+    expect(result.output).toContain("Skipped 4 invalid task entries");
+    expect(result.output).not.toContain("unnamed");
+  });
+
+  it("preserves descriptions across repeated updates to the same id", () => {
+    const ctx: ToolContext = { todos: [] };
+    todoWriteHandler({ todos: [{ id: "a", content: "Inspect routing" }, { id: "a", status: "completed" }], merge: true }, ctx);
+    expect(ctx.todos).toEqual([{ id: "a", content: "Inspect routing", status: "completed" }]);
+  });
+
+  it("does not inherit completed state when replacing the list with new tasks", () => {
+    const ctx: ToolContext = { todos: [{ id: "auto_0", content: "Previous task", status: "completed" }] };
+    todoWriteHandler({ todos: [{ content: "New task" }], merge: false }, ctx);
+    expect(ctx.todos).toEqual([{ id: "auto_0", content: "New task", status: "pending" }]);
+  });
+
   it("creates todos with merge=false", () => {
     const ctx: ToolContext = { todos: [] };
     const result = todoWriteHandler(

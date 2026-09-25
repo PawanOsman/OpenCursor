@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProviderEvent, ResponsesReasoning, WireMessage } from "../types";
 import { CODEX_CONFIG, CodexProtocolError, codexHeaders, createCodexRequest, parseCodexStream } from "./codex";
 
-const credentials = { accessToken: "fixture-token", accountId: "fixture-workspace" };
+const credentials = { id: "local-codex-account", accessToken: "fixture-token", accountId: "fixture-workspace" };
 const user: WireMessage[] = [{ role: "user", content: "Fix the failing test" }];
 const completed = { type: "response.completed", response: { status: "completed" } };
 const frame = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
@@ -36,13 +36,50 @@ function stream(events: unknown[], close = true) {
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("Codex request contract from the local 9router reference", () => {
+describe("OpenCursor Codex request contract", () => {
   it.each([
-    ["codex", "gpt-6-astra", true], ["openai", "gpt-6-astra", false], ["codex", "gpt-5.6-sol", false],
-  ] as const)("replays encrypted %s/%s reasoning only for its original transport and model", (provider, model, included) => {
+    ["fast", "priority"], ["standard", "default"], [undefined, undefined],
+  ] as const)("maps explicit speed %s to service tier %s independently of reasoning", (speed, tier) => {
+    const body = JSON.parse(String(createCodexRequest({
+      model: "gpt-6-astra", messages: user, modelParams: { speed, reasoningEffort: "high" },
+    }, credentials).init.body));
+    expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
+    if (tier) expect(body.service_tier).toBe(tier);
+    else expect(body).not.toHaveProperty("service_tier");
+  });
+
+  it.each([
+    ["unknown-model", "fast"], ["unknown-model", "standard"],
+    ["gpt-5.3-codex-spark", "fast"], ["gpt-5.5-pro", "fast"],
+  ] as const)("omits unsupported model %s speed %s", (model, speed) => {
+    const body = JSON.parse(String(createCodexRequest({
+      model, messages: user, modelParams: { speed },
+    }, credentials).init.body));
+    expect(body.model).toBe(model);
+    expect(body).not.toHaveProperty("service_tier");
+  });
+
+  it("applies speed to the upstream model of a provider-scoped review alias", () => {
+    const body = JSON.parse(String(createCodexRequest({
+      model: "gpt-5.6-sol-review", messages: user, modelParams: { speed: "fast" },
+    }, credentials).init.body));
+    expect(body).toMatchObject({ model: "gpt-5.6-sol", service_tier: "priority" });
+  });
+
+  it("resolves a provider-scoped review alias without changing ordinary model IDs", () => {
+    const review = JSON.parse(String(createCodexRequest({ model: "gpt-5.6-sol-review", messages: user }, credentials).init.body));
+    expect(review.model).toBe("gpt-5.6-sol");
+    const automatic = JSON.parse(String(createCodexRequest({ model: "codex-auto-review", messages: user }, credentials).init.body));
+    expect(automatic.model).toBe("codex-auto-review");
+  });
+  it.each([
+    ["codex", "gpt-6-astra", credentials.id, true], ["openai", "gpt-6-astra", credentials.id, false],
+    ["codex", "gpt-5.6-sol", credentials.id, false], ["codex", "gpt-6-astra", "other-local-account", false],
+    ["codex", "gpt-6-astra", undefined, false],
+  ] as const)("replays encrypted %s/%s reasoning only for its original account %s", (provider, model, credential, included) => {
     const item: ResponsesReasoning["items"][number] = { type: "reasoning", id: "rs_replay", summary: [], encrypted_content: "opaque-codex-fixture" };
     const messages: WireMessage[] = [
-      { role: "assistant", content: null, responsesReasoning: { provider, model, items: [item] }, tool_calls: [{ id: "call_read", type: "function", function: { name: "Read", arguments: "{}" } }] },
+      { role: "assistant", content: "Reading the file", responsesReasoning: { provider, model, credential, items: [item] }, tool_calls: [{ id: "call_read", type: "function", function: { name: "Read", arguments: "{}" } }] },
       { role: "tool", tool_call_id: "call_read", content: "contents" },
     ];
     const original = structuredClone(messages);
@@ -50,6 +87,7 @@ describe("Codex request contract from the local 9router reference", () => {
     const body = JSON.parse(String(request.init.body));
     expect(body.input.filter((input: any) => input.type === "reasoning")).toEqual(included ? [item] : []);
     expect(body.input.slice(included ? 1 : 0)).toEqual([
+      { role: "assistant", content: [{ type: "output_text", text: "Reading the file" }] },
       { type: "function_call", call_id: "call_read", name: "Read", arguments: "{}" },
       { type: "function_call_output", call_id: "call_read", output: "contents" },
     ]);
@@ -60,9 +98,11 @@ describe("Codex request contract from the local 9router reference", () => {
     expect(CODEX_CONFIG).toMatchObject({
       authUrl: "https://auth.openai.com/oauth/authorize", tokenUrl: "https://auth.openai.com/oauth/token",
       clientId: "app_EMoamEEZ73f0CkXaXp7hrann", port: 1455, path: "/auth/callback",
-      scope: "openid profile email offline_access", originator: "codex_cli_rs", cliVersion: "0.136.0",
+      scope: "openid profile email offline_access", originator: "codex_cli_rs", cliVersion: "0.154.0",
     });
     expect(CODEX_CONFIG.fallbackModels).toContain("gpt-6-astra");
+    expect(CODEX_CONFIG.fallbackModels).toContain("gpt-6-sol");
+    expect(CODEX_CONFIG.fallbackModels).toContain("gpt-6-luna");
     expect(CODEX_CONFIG.fallbackModels).toContain("gpt-5.3-codex-spark");
     expect(CODEX_CONFIG.fallbackModels.some((model) => /-(image|review)$/.test(model))).toBe(false);
   });
@@ -81,7 +121,7 @@ describe("Codex request contract from the local 9router reference", () => {
     expect(fetchMock).toHaveBeenCalledWith("https://chatgpt.com/backend-api/codex/responses", expect.objectContaining({ method: "POST", signal: abort.signal }));
     expect(request.init.headers).toMatchObject({
       authorization: "Bearer fixture-token", "ChatGPT-Account-ID": "fixture-workspace",
-      originator: "codex_cli_rs", "user-agent": "codex_cli_rs/0.136.0", accept: "text/event-stream",
+      originator: "codex_cli_rs", "user-agent": "codex_cli_rs/0.154.0", accept: "text/event-stream",
     });
     const body = JSON.parse(String(request.init.body));
     expect(body).toMatchObject({
@@ -96,7 +136,7 @@ describe("Codex request contract from the local 9router reference", () => {
   it("keeps routing stable across account refreshes and isolates independent conversations", () => {
     const request = (key?: string, account = credentials) => createCodexRequest({ model: "gpt-5.6-sol", messages: user, promptCacheKey: key }, account);
     const initial = request("conversation");
-    const refreshed = request("conversation", { accessToken: "rotated-fixture", accountId: "other-workspace" });
+    const refreshed = request("conversation", { ...credentials, accessToken: "rotated-fixture", accountId: "other-workspace" });
     const initialHeaders = initial.init.headers as Record<string, string>;
     expect(refreshed.init.body).toBe(initial.init.body);
     expect(refreshed.init.headers).toMatchObject({ session_id: initialHeaders.session_id, authorization: "Bearer rotated-fixture", "ChatGPT-Account-ID": "other-workspace" });
@@ -163,10 +203,10 @@ describe("Codex Responses stream contract", () => {
       { type: "response.output_item.done", output_index: 0, item: commentary },
       { type: "response.completed", response: { status: "completed", output: [commentary, final] } },
     ]);
-    const events = await collect(parseCodexStream(fixture.body.getReader(), undefined, { provider: "codex", model: "gpt-5.3-codex" }));
+    const events = await collect(parseCodexStream(fixture.body.getReader(), undefined, { provider: "codex", model: "gpt-5.3-codex", credential: credentials.id }));
     const metadata = events.filter((event) => event.type === "responses-reasoning");
     expect(metadata).toEqual([{ type: "responses-reasoning", reasoning: {
-      provider: "codex", model: "gpt-5.3-codex", items: [],
+      provider: "codex", model: "gpt-5.3-codex", credential: credentials.id, items: [],
       messages: [{ text: "Checking. ", phase: "commentary" }, { text: "Done.", phase: "final_answer" }],
     } }]);
     const build = (text: string, provider: "codex" | "openai" = "codex") => JSON.parse(String(createCodexRequest({
@@ -182,7 +222,7 @@ describe("Codex Responses stream contract", () => {
 
   it.each([null, "commentary", "final_answer"] as const)("retains consistent phase %s even when assistant text has been shortened", async (phase) => {
     const fixture = stream([{ type: "response.completed", response: { status: "completed", output: [{ type: "message", id: "msg_one", phase, content: [{ type: "output_text", text: "Original answer" }] }] } }]);
-    const events = await collect(parseCodexStream(fixture.body.getReader(), undefined, { provider: "codex", model: "gpt-5.3-codex" }));
+    const events = await collect(parseCodexStream(fixture.body.getReader(), undefined, { provider: "codex", model: "gpt-5.3-codex", credential: credentials.id }));
     const metadata = events.find((event) => event.type === "responses-reasoning")!;
     expect(metadata.reasoning).toMatchObject({ phase, items: [], messages: [{ text: "Original answer", phase }] });
     const request = createCodexRequest({ model: "gpt-5.3-codex", messages: [{ role: "assistant", content: "Shortened", responsesReasoning: metadata.reasoning }] }, credentials);
@@ -200,9 +240,9 @@ describe("Codex Responses stream contract", () => {
         { type: "function_call", id: "fc_read", call_id: "call_read", name: "Read", arguments: "{}" },
       ] } },
     ]);
-    const events = await collect(parseCodexStream(fixture.body.getReader(), undefined, { provider: "codex", model: "gpt-6-astra" }));
+    const events = await collect(parseCodexStream(fixture.body.getReader(), undefined, { provider: "codex", model: "gpt-6-astra", credential: credentials.id }));
     const metadata = events.filter((event) => event.type === "responses-reasoning");
-    expect(metadata).toEqual([{ type: "responses-reasoning", reasoning: { provider: "codex", model: "gpt-6-astra", items: [first, second] } }]);
+    expect(metadata).toEqual([{ type: "responses-reasoning", reasoning: { provider: "codex", model: "gpt-6-astra", credential: credentials.id, items: [first, second] } }]);
     expect(events.indexOf(metadata[0])).toBeLessThan(events.findIndex((event) => event.type === "tool-call"));
   });
 
@@ -291,6 +331,16 @@ describe("Codex Responses stream contract", () => {
 
   it.each([
     [{ type: "error", error: { message: "server overloaded" } }, "server overloaded", 502],
+    [{ type: "error", code: "invalid_request_error", message: "invalid request" }, "invalid request", 400],
+    [{ type: "error", error: { type: "invalid_request_error", code: "unsupported_value", message: "invalid option" } }, "invalid option", 400],
+    [{ type: "error", error: { type: "invalid_request_error", code: "rate_limit_exceeded", message: "quota limit" } }, "quota limit", 429],
+    [{ type: "error", error: { status: "403", message: "account access" } }, "account access", 403],
+    [{ type: "error", status_code: 401, message: "expired token" }, "expired token", 401],
+    [{ type: "response.failed", response: { error: { code: "invalid_prompt", message: "bad prompt" } } }, "bad prompt", 400],
+    [{ type: "response.failed", response: { error: { code: "misalignment_policy_violation", message: "blocked" } } }, "blocked", 400],
+    [{ type: "response.failed", response: { error: { code: "server_is_overloaded", message: "overloaded" } } }, "overloaded", 503],
+    [{ type: "response.done", response: { status: "failed", error: { code: "context_length_exceeded", message: "context limit" } } }, "context limit", 400],
+    [{ type: "response.completed", response: { error: { code: "rate_limit_exceeded", message: "rate limit" } } }, "rate limit", 429],
     [{ type: "response.failed", response: { error: { message: "model unavailable" } } }, "model unavailable", 500],
     [{ type: "response.incomplete", response: { incomplete_details: { reason: "max_output_tokens" } } }, "max_output_tokens", 400],
     [{ type: "response.done", response: { status: "failed", error: { message: "failed alias" } } }, "failed alias", 500],

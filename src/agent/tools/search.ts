@@ -10,15 +10,18 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { spawn } from "child_process";
+import * as vscode from "vscode";
 import { safePath, getWorkspaceRoot } from "../../context/workspaceUtils";
+import { isWithinDirectory } from "../../context/scopedInstructions";
 import { defineTool } from "./types";
-import { STOP, rgCommand } from "./shared";
+import { rgCommand } from "./shared";
 import { scanFilesCached, compileGlob, normalizeGlobPattern } from "./fileScan";
 import { BINARY_EXTS, isNoisePath, NOISE_GLOBS } from "./ignore";
 import { search as semanticIndexSearch, buildIndex, isIndexing, isIndexingEnabled } from "../semanticIndex";
 import { searchDocs, listDocSources } from "../docsIndex";
 import { GrepPage, type GrepMode } from "./grepResults";
 import type { ToolOutcome } from "../toolOutcome";
+import { fuseRetrieval, lexicalCodeSearch } from "./hybridRetrieval";
 
 // Minimal ripgrep --type -> file-extension map for the node fallback.
 const TYPE_EXTS: Record<string, string[]> = {
@@ -88,20 +91,31 @@ export const grepTool = defineTool("Grep", false, async (input, abortSignal) => 
         let lastMatch = 0;
         let matchingLines = 0;
         let markedFile = false;
+        let stopping: { message?: string; status?: ToolOutcome["status"] } | undefined;
+        let closeFallback: ReturnType<typeof setTimeout> | undefined;
         const finish = (message?: string, status?: ToolOutcome["status"]) => {
           if (settled) return;
           settled = true;
           if (status) outcome = { status };
           clearTimeout(timer);
+          clearTimeout(closeFallback);
           abortSignal?.removeEventListener("abort", onAbort);
           resolve(page.format(message));
         };
-        const stop = (message?: string, status?: ToolOutcome["status"]) => { try { child?.kill("SIGKILL"); } catch { /* already exited */ } finish(message, status); };
+        const stop = (message?: string, status?: ToolOutcome["status"]) => {
+          if (settled || stopping) return;
+          stopping = { message, status };
+          if (!child) { finish(message, status); return; }
+          // Windows retains the process cwd until close; await it before reporting
+          // the search settled so the next tool can safely rename/remove files.
+          closeFallback = setTimeout(() => finish(message, status), 1500);
+          try { child.kill("SIGKILL"); } catch { finish(message, status); }
+        };
         const onAbort = () => stop("grep aborted", "aborted");
         const timer = setTimeout(() => stop("grep timed out", "timed_out"), 15_000);
         const decode = (v: { text?: string; bytes?: string } | undefined) => v?.text ?? (v?.bytes ? Buffer.from(v.bytes, "base64").toString("utf8") : "");
         const accept = (record: string) => {
-          if (!record || settled) return;
+          if (!record || settled || stopping) return;
           const event = JSON.parse(record);
           const data = event.data;
           if (event.type === "begin") {
@@ -129,17 +143,17 @@ export const grepTool = defineTool("Grep", false, async (input, abortSignal) => 
         try { child = spawn(rgBin, args, { cwd: root, windowsHide: true }); }
         catch (e) { finish(`grep failed: ${e instanceof Error ? e.message : String(e)}`, "failed"); return; }
         child.on("error", (e) => finish(`error: ripgrep failed: ${e.message}`, "failed"));
-        if (abortSignal?.aborted) { onAbort(); return; }
-        abortSignal?.addEventListener("abort", onAbort, { once: true });
+        if (abortSignal?.aborted) onAbort();
+        else abortSignal?.addEventListener("abort", onAbort, { once: true });
         child.stdout?.setEncoding("utf8");
         child.stdout?.on("data", (chunk: string) => {
-          if (settled) return;
+          if (settled || stopping) return;
           pending += chunk;
           // A record contains at most one <=8 MiB file, but allow JSON escaping.
           if (pending.length > 64 * 1024 * 1024) { stop("grep JSON record exceeded its memory limit", "failed"); return; }
           let newline: number;
           try {
-            while (!settled && (newline = pending.indexOf("\n")) >= 0) {
+            while (!settled && !stopping && (newline = pending.indexOf("\n")) >= 0) {
               const record = pending.slice(0, newline); pending = pending.slice(newline + 1); accept(record);
             }
           } catch { stop("error: malformed ripgrep output", "failed"); }
@@ -147,6 +161,7 @@ export const grepTool = defineTool("Grep", false, async (input, abortSignal) => 
         child.stderr?.on("data", (chunk) => { stderr = (stderr + String(chunk)).slice(0, 2000); });
         child.on("close", (code) => {
           if (settled) return;
+          if (stopping) { finish(stopping.message, stopping.status); return; }
           try { if (pending.trim()) accept(pending); } catch { finish("error: malformed ripgrep output", "failed"); return; }
           finish(code === null || code > 1 ? `error: ripgrep failed: ${stderr.trim().split("\n")[0] || `exit ${code}`}` : undefined, code === null || code > 1 ? "failed" : undefined);
         });
@@ -301,24 +316,10 @@ export const rgTool = defineTool("Rg", false, async (input, abortSignal) => {
 });
 
 // ---- SemanticSearch ----
-// Real local semantic search: embed the query and cosine-rank against the
-// on-disk embedding index (see semanticIndex.ts). Falls back to keyword
-// OR-grep when the index/embedder is unavailable (no model yet, etc.).
-function keywordFallback(input: any, abortSignal?: AbortSignal, callId?: string, ctx?: any) {
-  const words = String(input.query || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9_\s]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 3 && !STOP.has(w))
-    .slice(0, 6);
-  if (!words.length) return Promise.resolve({ output: "(no searchable terms)" });
-  const dirs: string[] = Array.isArray(input.target_directories) ? input.target_directories : [];
-  const scope = dirs.length === 1 ? String(dirs[0]) : undefined;
-  return grepTool.execute({ pattern: words.join("|"), "-i": true, path: scope }, abortSignal, callId, ctx);
-}
+// Fuse exact identifiers/current text with semantic candidates on every query.
 
 const AUTO_BUILD_MIN_INTERVAL_MS = 5 * 60_000;
-let lastAutoBuild = 0;
+const lastAutoBuild = new Map<string, number>();
 
 export const semanticSearchTool = defineTool("SemanticSearch", false, async (input, abortSignal, callId, ctx) => {
   try {
@@ -331,40 +332,42 @@ export const semanticSearchTool = defineTool("SemanticSearch", false, async (inp
   // Never await a full rebuild here — that hung explore tools for minutes.
   // Throttled: the watcher already keeps the index current, so a full workspace
   // scan on every single SemanticSearch call is pure overhead.
-  if (isIndexingEnabled() && !isIndexing() && Date.now() - lastAutoBuild > AUTO_BUILD_MIN_INTERVAL_MS) {
-    lastAutoBuild = Date.now();
+  if (isIndexingEnabled() && !isIndexing() && Date.now() - (lastAutoBuild.get(root) ?? 0) > AUTO_BUILD_MIN_INTERVAL_MS) {
+    lastAutoBuild.set(root, Date.now());
+    if (lastAutoBuild.size > 32) lastAutoBuild.delete(lastAutoBuild.keys().next().value!);
     void buildIndex(root).catch(() => {});
   }
 
   // Scope by target_directories (prefix match on workspace-relative paths).
   const dirs: string[] = Array.isArray(input.target_directories) ? input.target_directories : [];
-  const prefixes = dirs
-    .map((d) => {
-      try {
-        return path.relative(root, safePath(String(d))).split(path.sep).join("/");
-      } catch {
-        return "";
-      }
-    })
-    .filter((p) => p && !p.startsWith(".."));
+  const prefixes = dirs.map((directory) => {
+    const target = safePath(String(directory));
+    if (!isWithinDirectory(root, target)) throw new Error("Search scopes must be inside the current workspace.");
+    return path.relative(root, target).split(path.sep).join("/");
+  });
   const filter = prefixes.length
-    ? (rel: string) => prefixes.some((p) => rel === p || rel.startsWith(p + "/"))
+    ? (rel: string) => prefixes.some((p) => !p || rel === p || rel.startsWith(p + "/"))
     : undefined;
 
-  let hits: Awaited<ReturnType<typeof semanticIndexSearch>> = [];
-  try {
-    hits = await semanticIndexSearch(root, query, 8, filter);
-  } catch {
-    hits = [];
-  }
-  if (!hits.length) return keywordFallback(input, abortSignal, callId, ctx);
+  const editors = (vscode.workspace.textDocuments ?? [])
+    .filter((document) => document.isDirty && document.uri.scheme === "file" && isWithinDirectory(root, document.uri.fsPath))
+    .map((document) => ({ path: path.relative(root, document.uri.fsPath).split(path.sep).join("/"), text: document.getText(), version: document.version }));
+  const editorPaths = new Set(editors.map((editor) => editor.path));
+  const [semantic, lexical] = await Promise.all([
+    semanticIndexSearch(root, query, 16, (relative) => !editorPaths.has(relative) && (!filter || filter(relative))).catch(() => []),
+    lexicalCodeSearch(root, query, { filter, signal: abortSignal, editors }),
+  ]);
+  if (abortSignal?.aborted) return { output: "(search aborted)", outcome: { status: "aborted" } };
+  const hits = fuseRetrieval(semantic, lexical.hits);
+  const note = lexical.incomplete ? `\n\nKeyword scan was bounded (${lexical.scannedFiles} files examined); narrow target_directories or use Grep for exhaustive exact matching.` : "";
+  if (!hits.length) return { output: `(no matching indexed or keyword excerpts)${note}` };
 
   // Cap each chunk so a few large hits don't blow the context budget.
   const snip = (t: string) => (t.length > 1200 ? t.slice(0, 1200) + "\n... (trimmed - Read the file for full context)" : t);
   const out = hits
-    .map((h) => `${h.path}:${h.start}-${h.end} (${h.score.toFixed(2)})\n${snip(h.text)}`)
+    .map((h) => `${h.path}:${h.start}-${h.end} [${h.signals!.join("+")}${h.source === "editor" ? "; unsaved editor buffer" : ""}]\n${snip(h.text)}`)
     .join("\n\n---\n\n");
-  return { output: out };
+  return { output: out + note };
   } catch (e) {
     return { output: `error: SemanticSearch failed: ${e instanceof Error ? e.message : String(e)}` };
   }

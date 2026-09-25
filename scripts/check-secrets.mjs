@@ -22,6 +22,8 @@ for (const file of new Set(files)) {
     failed = true;
   }
   if (!/^(?:src|webview-ui)\/.*\.tsx?$/.test(file)) continue;
+  // Test fixtures may deliberately contain credential-shaped sample values.
+  if (/(?:^|\/)(?:__tests__|tests?)\//.test(file) || /\.(?:test|spec)\.tsx?$/.test(file)) continue;
   const lines = readFileSync(file, "utf8").split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     if (!credential.test(lines[i])) continue;

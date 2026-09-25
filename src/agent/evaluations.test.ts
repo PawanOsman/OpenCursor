@@ -246,7 +246,7 @@ describe("repository outcomes through the production agent", () => {
     expect(result.events).toContainEqual({ type: "run-status", status: "cancelled" }); expect(pendingChanges.count()).toBe(0);
   });
   it("guards MCP resource downloads with every applicable policy and the hook before writing", async () => {
-    const read = vi.spyOn(mcpManager, "readResource").mockResolvedValue("resource content\n");
+    const read = vi.spyOn(mcpManager, "readResourceContents").mockResolvedValue({ contents: [{ uri: "fixture://document", text: "resource content\n" }] });
     const original = Buffer.from([0, 255, 128, 72]);
     const file = path.join(root, "download.bin"); await fs.writeFile(file, original);
     for (const type of ["mcp", "edits", "outside"] as const) {
@@ -259,7 +259,7 @@ describe("repository outcomes through the production agent", () => {
       expect(read).not.toHaveBeenCalled(); expect(await fs.readFile(file)).toEqual(original);
       if (type === "outside") await expect(fs.stat(destination)).rejects.toMatchObject({ code: "ENOENT" });
     }
-    const hook = vi.fn(async () => "resource is blocked by the hook");
+    const hook = vi.fn(async (event: string) => event === "beforeMcp" ? "resource is blocked by the hook" : undefined);
     await evaluate("MCP download hook veto", [tools(call("FetchMcpResource", { server: "fixture", uri: "fixture://document", downloadPath: file })), answer("Hook blocked the download.")], { onHook: hook });
     expect(hook).toHaveBeenCalledWith("beforeMcp", expect.objectContaining({ server: "fixture" }), "FetchMcpResource", expect.any(AbortSignal));
     expect(read).not.toHaveBeenCalled();

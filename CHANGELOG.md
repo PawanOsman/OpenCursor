@@ -1,8 +1,75 @@
+<!--
+Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+
+This file is part of OpenCursor — AI coding agent chat inside VS Code.
+https://github.com/PawanOsman/OpenCursor
+
+Licensed under the MIT License. See LICENSE file in the project root.
+-->
+
 # Change Log
 
 All notable changes to the "ocursor" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
+
+## [0.2.0] - 2026-09-24
+
+### Added
+
+- Rich Markdown editing in the composer, with headings, lists, outlined code blocks, a searchable language picker, automatic language detection, and syntax highlighting in both editable drafts and sent messages.
+- Image attachment previews and content-aware RTL/LTR rendering for user and assistant messages.
+- Collapsible working sections that retain the final response, elapsed time in hours/minutes/seconds, animated activity indicators, and a subtle transition for changing timer digits.
+- Sticky user messages with a fading lower edge, message actions, and a combined changed-files and queued-message tray with Keep All and Undo All controls.
+- Provider selection dialogs with icons, separate account/API/custom provider groups, and no-auth connections such as OpenCode Free.
+- Multiple API keys and OAuth accounts per provider, grouped credential management, provider-level load balancing, and failover for eligible failures before response content begins.
+- Expanded OAuth provider support and model catalogs, including GPT-6 Astra/Sol/Luna, Claude Opus 5.5, Gemini, Grok, DeepSeek, Kimi, GLM, MiniMax, and Qwen families, with provider-specific reasoning, thinking, and context options.
+- Provider-prefixed models on custom gateways inherit supported reasoning, thinking, and context controls while preserving the full model ID used for routing.
+- Standard and Fast processing choices for supported GPT and Claude models in the model picker, saved per model and provider independently of reasoning settings. Standard remains the default; Fast requires account support, can use extra credits or higher API rates, and depends on custom gateways forwarding the setting.
+- Finite documentation discovery and indexing plans with optional AI-assisted page selection, topic priorities, scope and exclusion controls, progress logs, and request/download/time limits. Indexed pages cannot recursively expand the plan.
+- Conversation fork/archive, full-history search, persistent queue editing and steering, goals, target-based code review, TODO actions, and isolated conversation worktrees.
+- Interactive terminals with stdin, resize, session ownership, and awaited cleanup, plus optional Docker command execution with workspace, network, and resource boundaries.
+- Language definition/reference/symbol navigation and rename previews, scoped workspace instructions, and user/workspace skill discovery.
+- Persistent collaborator histories and mailboxes, follow-up/resume/list/wait/interrupt tools, and shared goal budget checks.
+- Revision-linked verification evidence, durable run journals, restart-safe edit backups, and conflict-aware undo.
+- Browser inspection, interaction, screenshots, and console/network evidence using installed Chrome or Edge.
+- MCP HTTP/SSE connections, explicit OAuth sign-in, elicitation, resource templates, and typed text/image/binary results.
+- Versioned local plugin installation, updates, enable/disable controls, and removal, with namespaced skills and MCP dependencies.
+- Authenticated worker jobs pinned to repository revisions, patch export, remote-job controls, and an external-grader evaluation runner.
+- Local CPU/RAM/disk/NVIDIA reporting and advisory model-fit guidance.
+
+### Changed
+
+- Unified chat and settings controls, fields, selectors, buttons, switches, icons, borders, and focus states across light, dark, and high-contrast themes. Improved wide-screen settings layouts and narrow chat/subagent layouts.
+- Replaced new-chat persona cards with a compact dropdown and selected-persona description. The empty chat adapts to shorter panels without a page scrollbar.
+- Added component entrances, panel expansion, tooltips, thinking text, and loading animations with reduced-motion support.
+- Provider lists show configured API connections; model settings show enabled, connected providers. Newly added catalog defaults remain available alongside saved choices while explicit disables and valid smaller context budgets are preserved.
+- Updated OAuth request formats, model discovery, and provider-specific transport handling. OAuth protocols are maintained as internal TypeScript modules.
+- Built-in subagents can be edited and reset to their defaults, but cannot be deleted.
+- Expanded thinking panels follow new output while the reader remains at the bottom, pause when scrolled upward, and resume when reopened or returned to the bottom.
+- Task lists distinguish pending, running, completed, and paused unfinished work. Unfinished tasks stop animating when the run ends.
+- Reduced repeated conversation persistence, indexing work, and webview processing to improve memory use and responsiveness during active and idle sessions.
+- Improved lexical/vector retrieval freshness and optional tool-schema loading to reduce context overhead.
+- Improved Ollama health/capability reporting, loaded-model memory information, load/unload controls, and cancellable pulls.
+- Improved llama.cpp readiness checks, port handling, startup cancellation, shutdown, configuration validation, and resumable GGUF downloads.
+- Rewrote the README and recreated interface artwork and feature diagrams, with project credits collected in the README.
+
+### Fixed
+
+- Unrelated settings edits no longer overwrite model options changed in another view. Local Ollama and llama.cpp models retain their provider identity when resolving options, preventing unsupported Fast controls.
+- Empty queues send new messages directly without briefly displaying them as queued. Steering keeps a queued message visible with a loading state until it appears in the conversation.
+- Manual Stop and deliberate interruption no longer create unwanted continuation requests in the queue.
+- Composer keyboard submission now handles Enter, Ctrl/Cmd+Enter, configured send behavior, and IME composition correctly.
+- Restored drafts render Markdown immediately. Empty code blocks hide the placeholder, support navigation before and after the block, and can be selected and deleted.
+- Code blocks retain syntax highlighting in sent messages, using the selected language or automatic detection.
+- Corrected clipped field outlines, model-picker layout shifts, excessive focus outlines, sticky-message gaps, and spacing between changed files and attention notices.
+- Verification summaries no longer appear on ordinary responses without relevant work or evidence. Task-list updates handle missing names and preserve useful item text.
+- Fixed extension startup/debug launch handling and reduced UI stalls during long conversations and indexing.
+- Documentation fetching handles HTML and Markdown sources, deduplicates eligible URLs, and preserves the previous index when fetching or extraction fails.
+- Improved Antigravity model availability handling and provider-scoped model routing; models no longer fall through to unrelated providers.
+- Corrected public OpenAI Responses routing and supported request options, plus provider-specific reasoning replay for multi-turn tool conversations. Replayed reasoning is included in context budgets.
+- Tool calls validate their names and arguments before execution. Repeated trailing `_ide` suffixes resolve only to complete registered built-in tool names and are removed before display. Normalized names remain consistent in streaming activity, timeout handling, and replayed history; unknown-tool errors list available names for recovery.
+- Improved provider stream deadlines, Windows process teardown, hook exit-code handling, and reporting of interrupted actions and failed evaluations.
 
 ## [0.1.5] - 2026-09-12
 

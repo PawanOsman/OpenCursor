@@ -30,7 +30,7 @@ const fixture = vi.hoisted(() => {
   return { executions, output, tool };
 });
 
-vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} } }));
+vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} }, workspace: { getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }) } }));
 vi.mock("../stores/featureStore", () => ({ MODEL_CATALOG: [] }));
 vi.mock("./tools/files", async () => {
   const { TOOL_SPECS: s } = await vi.importActual<typeof import("./tools/schemas")>("./tools/schemas");
@@ -48,7 +48,7 @@ vi.mock("./tools/search", async () => {
 });
 vi.mock("./tools/shell", async () => {
   const { TOOL_SPECS: s } = await vi.importActual<typeof import("./tools/schemas")>("./tools/schemas");
-  return { runTerminalTool: fixture.tool(s.Shell, true), awaitShellTool: fixture.tool(s.AwaitShell) };
+  return { runTerminalTool: fixture.tool(s.Shell, true), awaitShellTool: fixture.tool(s.AwaitShell), writeStdinTool: fixture.tool(s.WriteStdin, true) };
 });
 vi.mock("./tools/web", async () => {
   const { TOOL_SPECS: s } = await vi.importActual<typeof import("./tools/schemas")>("./tools/schemas");
@@ -69,12 +69,13 @@ vi.mock("../stores/fileMutations", () => ({ mutateFile: vi.fn() }));
 vi.mock("../stores/pendingChanges", () => ({ pendingChanges: {} }));
 vi.mock("../context/workspaceUtils", () => ({
   getWorkspaceRoot: () => "/workspace",
+  withWorkspaceRoot: (_root: string, work: () => unknown) => work(),
   normalizeToolPaths: (_name: string, input: unknown) => input,
 }));
 vi.mock("../context/cursorContext", () => ({
   buildUserInfoBlock: async () => "Keep the existing APIs.", buildOpenFilesBlock: async () => "src/app.ts",
 }));
-vi.mock("./approvalPolicy", () => ({ actionTypeForCall: () => undefined }));
+vi.mock("./approvalPolicy", async () => ({ ...await vi.importActual<typeof import("./approvalPolicy")>("./approvalPolicy"), actionTypeForCall: () => undefined }));
 vi.mock("./prompt", () => ({ systemPrompt: () => "You are a coding assistant." }));
 vi.mock("../integrations/mcpClient", () => ({ mcpManager: { listTools: () => [] } }));
 vi.mock("../logging", () => ({ logError: vi.fn() }));
@@ -227,15 +228,12 @@ describe("stopped conversation HTTP replay", () => {
     const history: Step[] = [];
     const state: ContextState = {};
     const args = JSON.stringify({ path: "never-written.ts", contents: "not executed" });
-    responses.push(() => {
-      // The server response is complete, but Stop arrives before tool execution.
-      const body = frame({ choices: [{ delta: { tool_calls: [{ index: 0, id: "cancelled-write", function: { name: "Write", arguments: args } }] }, finish_reason: "tool_calls" }] }) + "data: [DONE]\n\n";
-      return new Response(new ReadableStream<Uint8Array>({
-        start(controller) { controller.enqueue(new TextEncoder().encode(body)); },
-        cancel() { abort.abort(); },
-      }));
-    });
-    await run(history, state, { signal: abort.signal });
+    responses.push(() => sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: "cancelled-write", function: { name: "Write", arguments: args } }] }, finish_reason: "tool_calls" }] }));
+    // Stop at the complete, parsed call boundary, not stream-reader cleanup:
+    // cancellation while parsing an unvalidated response correctly discards it.
+    await run(history, state, { signal: abort.signal, emit: event => {
+      if (event.type === "tool-call-started" && event.callId === "cancelled-write" && (event.input as any)?.path) abort.abort();
+    } });
     expect(fixture.executions).toEqual([]);
     expect(history).toContainEqual(expect.objectContaining({ kind: "tool-result", callId: "cancelled-write", status: "error", output: expect.stringContaining("cancelled") }));
     const saved: { history: Step[]; state: ContextState } = JSON.parse(JSON.stringify({ history, state }));

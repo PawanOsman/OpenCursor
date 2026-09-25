@@ -9,12 +9,22 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { ArrowUp, AtSign, ChevronRight, Square } from "lucide-react";
-import { Icon, IconName } from "../../shared/icons";
+import { Icon, IconName, iconMarkup } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
-import type { Attachment, FileIconInfo, MentionCategory, MentionItem, Mode, ModelDef, ModelOption, OutMessage, TeamInfo } from "../types";
+import { usePresence } from "../../shared/usePresence";
+import { AnimatedTooltip } from "../../shared/AnimatedTooltip";
+import { ImagePreview } from "../../shared/ImagePreview";
+import { TextSwap } from "../../shared/TextTransitions";
+import { AttachmentMenu } from "./AttachmentMenu";
+import { ApprovalPicker } from "./ApprovalPicker";
+import "./composer-motion.css";
+import "./composer-editor.css";
+import { ComposerEditor, type ComposerCodeBlock } from "./ComposerEditor";
+import { CodeLanguagePicker } from "./CodeLanguagePicker";
+import { getCodeLanguage } from "../../shared/codeLanguages";
+import type { ApprovalPolicy, Attachment, FileIconInfo, MentionCategory, MentionItem, Mode, ModelDef, ModelOption, OutMessage, PersonaInfo, TeamInfo } from "../types";
 
-/** Cursor-style top-level @ menu categories (same items/order as Cursor). */
+/** Top-level @ menu categories. */
 const MENTION_CATEGORIES: { id: MentionCategory; label: string; icon: IconName; leaf?: boolean }[] = [
   { id: "files", label: "Files & Folders", icon: "file" },
   { id: "docs", label: "Docs", icon: "book" },
@@ -39,21 +49,16 @@ function post(msg: OutMessage) {
   vscode.postMessage(msg);
 }
 
+function activateFromKeyboard(event: React.KeyboardEvent<HTMLElement>, activate: () => void) {
+  if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  activate();
+}
+
 // ---- Mention pill icons (raw SVG: pills are plain DOM nodes, not React) ----
-const SVG_ATTRS = `xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"`;
-export const KIND_SVG: Record<string, string> = {
-  file: `<svg ${SVG_ATTRS}><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>`,
-  folder: `<svg ${SVG_ATTRS}><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>`,
-  code: `<svg ${SVG_ATTRS}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`,
-  doc: `<svg ${SVG_ATTRS}><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>`,
-  git: `<svg ${SVG_ATTRS}><circle cx="12" cy="12" r="3"/><line x1="3" x2="9" y1="12" y2="12"/><line x1="15" x2="21" y1="12" y2="12"/></svg>`,
-  composer: `<svg ${SVG_ATTRS}><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>`,
-  terminal: `<svg ${SVG_ATTRS}><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>`,
-  rule: `<svg ${SVG_ATTRS}><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/><path d="m17.5 15.5 2-2"/></svg>`,
-  branch_diff: `<svg ${SVG_ATTRS}><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>`,
-  link: `<svg ${SVG_ATTRS}><circle cx="12" cy="12" r="10"/><line x1="2" x2="22" y1="12" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`,
-};
-const X_SVG = `<svg ${SVG_ATTRS}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
+export const KIND_SVG: Record<string, string> = Object.fromEntries(Object.entries(KIND_ICON).map(([kind, icon]) => [kind, iconMarkup(icon)]));
+const X_SVG = iconMarkup("close");
 
 // Cache of IDE file-icon lookups shared by all pills (host resolves them from
 // the active icon theme; same protocol as Tool.tsx).
@@ -215,9 +220,8 @@ function fileToAttachment(file: File): Promise<Attachment | null> {
   });
 }
 
-// Cursor's order: Agent, Plan, Multitask, Ask.
 const MODES: { id: Mode; label: string; icon: IconName }[] = [
-  { id: "agent", label: "Agent", icon: "infinity" },
+  { id: "agent", label: "Agent", icon: "agent" },
   { id: "plan", label: "Plan", icon: "list" },
   { id: "multitask", label: "Multitask", icon: "task" },
   { id: "project", label: "Project", icon: "users" },
@@ -234,15 +238,24 @@ function parseContextSize(v: string | undefined): number {
   return Math.round(n * (unit === "m" ? 1_000_000 : unit === "k" ? 1_000 : 1));
 }
 
-/** Cursor-style context usage ring shown at the right of the composer bar. */
+/** Context usage indicator at the trailing edge of the composer. */
 function ContextRing({ used, total }: { used: number; total: number }) {
-  const pct = Math.min(1, used / total);
+  const [open, setOpen] = React.useState(false);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const tooltipRef = React.useRef<HTMLDivElement>(null);
+  const tooltipId = React.useId();
+  const { style } = useAnchoredMenu(open, triggerRef, tooltipRef, [], "center");
+  const pct = Math.max(0, Math.min(1, used / total));
+  const percent = Math.round(pct * 100);
+  const tokens = (value: number) => value >= 1_000_000 ? `${+(value / 1_000_000).toFixed(1)}m` : `${+(value / 1000).toFixed(1)}k`;
   const r = 5.5;
   const c = 2 * Math.PI * r;
-  const label = `${(used / 1000).toFixed(used >= 100_000 ? 0 : 1)}k / ${total >= 1_000_000 ? `${total / 1_000_000}M` : `${Math.round(total / 1000)}k`} context used`;
+  const label = `Context window: ${percent}% used (${100 - percent}% left), ${tokens(used)} / ${tokens(total)} tokens used`;
   return (
-    <span className="ctx-ring" title={label}>
-      <svg width="16" height="16" viewBox="0 0 16 16">
+    <button ref={triggerRef} type="button" className="ctx-ring" aria-label={label} aria-describedby={open ? tooltipId : undefined}
+      onMouseEnter={() => setOpen(true)} onMouseLeave={() => { if (document.activeElement !== triggerRef.current) setOpen(false); }} onFocus={() => setOpen(true)} onBlur={() => setOpen(false)}
+      onClick={() => setOpen(true)} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false); } }}>
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
         <circle cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
         <circle
           cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeWidth="2"
@@ -250,7 +263,12 @@ function ContextRing({ used, total }: { used: number; total: number }) {
           transform="rotate(-90 8 8)"
         />
       </svg>
-    </span>
+      <AnimatedTooltip open={open} elementRef={tooltipRef} id={tooltipId} style={style}>
+        <span>Context window:</span>
+        <span>{percent}% used ({100 - percent}% left)</span>
+        <span>{tokens(used)} / {tokens(total)} tokens used</span>
+      </AnimatedTooltip>
+    </button>
   );
 }
 
@@ -268,8 +286,10 @@ function useOutsideClose(open: boolean, close: () => void) {
  * opens above when there's room, flips below otherwise; clamps horizontally.
  * Returns inline styles (left/top or left/bottom) + max height for the menu.
  */
-function useAnchoredMenu(open: boolean, triggerRef: React.RefObject<HTMLElement | null>, menuRef: React.RefObject<HTMLElement | null>, deps: unknown[] = []) {
-  const [style, setStyle] = React.useState<React.CSSProperties>({});
+function useAnchoredMenu(open: boolean, triggerRef: React.RefObject<HTMLElement | null>, menuRef: React.RefObject<HTMLElement | null>, deps: unknown[] = [], align: "start" | "center" = "start") {
+  // Portals mount after #root. Give them an in-viewport position immediately,
+  // before layout measurement or focus can scroll an embedded webview.
+  const [style, setStyle] = React.useState<React.CSSProperties>({ left: 8, top: 8 });
   const [maxH, setMaxH] = React.useState(340);
   React.useLayoutEffect(() => {
     if (!open) return;
@@ -279,7 +299,7 @@ function useAnchoredMenu(open: boolean, triggerRef: React.RefObject<HTMLElement 
       if (!t || !m) return;
       const margin = 8;
       const w = m.offsetWidth;
-      let left = t.left;
+      let left = align === "center" ? t.left + (t.width - w) / 2 : t.left;
       if (left + w > window.innerWidth - margin) left = window.innerWidth - margin - w;
       if (left < margin) left = margin;
       const spaceAbove = t.top - margin * 2;
@@ -301,39 +321,118 @@ function useAnchoredMenu(open: boolean, triggerRef: React.RefObject<HTMLElement 
       window.removeEventListener("scroll", place, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, ...deps]);
-  return { style, maxH };
+  }, [open, align, ...deps]);
+  const side = style.bottom !== undefined && style.bottom !== "auto" ? "top" : "bottom";
+  return { style, maxH, side };
+}
+
+function usePickerNavigation(open: boolean, setOpen: React.Dispatch<React.SetStateAction<boolean>>,
+  triggerRef: React.RefObject<HTMLElement | null>, menuRef: React.RefObject<HTMLDivElement | null>,
+  selectedIndex: number, count: number, maxHeight: number) {
+  const [focused, setFocused] = React.useState(0);
+  const search = React.useRef({ text: "", at: 0 });
+  const close = (restoreFocus = false) => {
+    setOpen(false);
+    search.current = { text: "", at: 0 };
+    if (restoreFocus) triggerRef.current?.focus({ preventScroll: true });
+  };
+  const show = (index = selectedIndex) => {
+    setFocused(Math.max(0, Math.min(index, count - 1)));
+    setOpen(true);
+  };
+  React.useLayoutEffect(() => {
+    if (!open) return;
+    const menu = menuRef.current;
+    const items = menu?.querySelectorAll<HTMLElement>('[role^="menuitem"]');
+    const index = Math.max(0, Math.min(focused, (items?.length ?? 0) - 1));
+    const item = items?.[index];
+    if (index !== focused) setFocused(index);
+    if (!menu || !item) { triggerRef.current?.focus({ preventScroll: true }); return; }
+    item.focus({ preventScroll: true });
+    if (item.offsetTop < menu.scrollTop) menu.scrollTop = item.offsetTop;
+    else if (item.offsetTop + item.offsetHeight > menu.scrollTop + menu.clientHeight)
+      menu.scrollTop = item.offsetTop + item.offsetHeight - menu.clientHeight;
+  }, [open, focused, count, maxHeight, menuRef, triggerRef]);
+  const triggerKey = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (["Enter", " ", "ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault(); event.stopPropagation();
+      if (open && (event.key === "Enter" || event.key === " ")) close();
+      else show(event.key === "Home" ? 0 : event.key === "End" ? count - 1 : selectedIndex);
+    } else if (event.key === "Escape" && open) {
+      event.preventDefault(); event.stopPropagation(); close(true);
+    } else if (event.key === "Tab" && open) close();
+  };
+  const menuKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!open) return;
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(true); return; }
+    if (event.key === "Tab") { close(true); return; }
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault(); event.stopPropagation();
+      if (!count) return;
+      setFocused(event.key === "Home" ? 0 : event.key === "End" ? count - 1 : (focused + (event.key === "ArrowDown" ? 1 : -1) + count) % count);
+    } else if (event.key.length === 1 && event.key !== " " && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      const now = Date.now();
+      const text = (now - search.current.at < 700 ? search.current.text : "") + event.key.toLocaleLowerCase();
+      search.current = { text, at: now };
+      const query = [...text].every(character => character === text[0]) ? text[0] : text;
+      const items = [...(menuRef.current?.querySelectorAll<HTMLElement>('[role^="menuitem"]') ?? [])];
+      const start = query.length === 1 ? focused + 1 : focused;
+      const match = items.map((_, index) => (index + start) % items.length)
+        .find(index => items[index].textContent?.trim().toLocaleLowerCase().startsWith(query));
+      if (match !== undefined) { event.preventDefault(); event.stopPropagation(); setFocused(match); }
+    }
+  };
+  return { focused, setFocused, close, show, triggerKey, menuKey };
 }
 
 function ModePicker({ mode, onMode }: { mode: Mode; onMode: (m: Mode) => void }) {
   const [open, setOpen] = React.useState(false);
+  const { present, exiting } = usePresence(open);
   useOutsideClose(open, () => setOpen(false));
-  const triggerRef = React.useRef<HTMLSpanElement>(null);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
   const menuRef = React.useRef<HTMLDivElement>(null);
-  const { style } = useAnchoredMenu(open, triggerRef, menuRef);
+  const menuId = React.useId();
+  const { style, maxH, side } = useAnchoredMenu(open, triggerRef, menuRef);
+  const nav = usePickerNavigation(open, setOpen, triggerRef, menuRef, MODES.findIndex(item => item.id === mode), MODES.length, maxH);
   const meta = MODES.find((m) => m.id === mode) || MODES[0];
+  const pick = (next: Mode) => { if (!open) return; onMode(next); nav.close(true); };
   return (
-    <span
+    <button
+      type="button"
       ref={triggerRef}
       className="pill mode-pill"
+      aria-label="Choose mode"
+      aria-expanded={open}
+      aria-haspopup="menu"
+      aria-controls={open ? menuId : undefined}
+      onKeyDown={nav.triggerKey}
       onClick={(e) => {
         e.stopPropagation();
-        setOpen((o) => !o);
+        if (open) nav.close(); else nav.show();
       }}
     >
       <Icon name={meta.icon} />
       <span>{meta.label}</span>
       <Icon name="chevD" className="cd" />
-      {open && createPortal(
-        <div ref={menuRef} className="mode-dropdown" style={style}>
-          {MODES.map((o) => (
+      {present && createPortal(
+        <div ref={menuRef} id={menuId} role="menu" aria-label="Chat mode" className="mode-dropdown"
+          data-state={exiting ? "closing" : "open"} data-side={side} inert={exiting || undefined} aria-hidden={exiting || undefined}
+          style={{ ...style, maxHeight: maxH, overflowY: "auto", pointerEvents: exiting ? "none" : undefined }} onKeyDown={nav.menuKey} onClick={event => event.stopPropagation()}>
+          {MODES.map((o, index) => (
             <div
               key={o.id}
               className={"mode-item" + (o.id === mode ? " active" : "")}
+              role="menuitemradio"
+              aria-checked={o.id === mode}
+              tabIndex={index === nav.focused ? 0 : -1}
+              onFocus={() => nav.setFocused(index)}
+              onKeyDown={(e) => {
+                activateFromKeyboard(e, () => pick(o.id));
+              }}
               onClick={(e) => {
                 e.stopPropagation();
-                onMode(o.id);
-                setOpen(false);
+                pick(o.id);
               }}
             >
               <span className="mi-icon">
@@ -350,42 +449,59 @@ function ModePicker({ mode, onMode }: { mode: Mode; onMode: (m: Mode) => void })
         </div>,
         document.body
       )}
-    </span>
+    </button>
   );
 }
 
 /** Project-mode team selector: pick one or more teams of subagents for the task. */
 function TeamPicker({ teams, selected, onChange }: { teams: TeamInfo[]; selected: string[]; onChange: (ids: string[]) => void }) {
   const [open, setOpen] = React.useState(false);
+  const { present, exiting } = usePresence(open);
   useOutsideClose(open, () => setOpen(false));
-  const triggerRef = React.useRef<HTMLSpanElement>(null);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
   const menuRef = React.useRef<HTMLDivElement>(null);
-  const { style, maxH } = useAnchoredMenu(open, triggerRef, menuRef, [teams.length]);
+  const menuId = React.useId();
+  const { style, maxH, side } = useAnchoredMenu(open, triggerRef, menuRef, [teams.length]);
+  const nav = usePickerNavigation(open, setOpen, triggerRef, menuRef, teams.findIndex(team => selected.includes(team.id)), teams.length, maxH);
   const picked = teams.filter((t) => selected.includes(t.id));
   const label = picked.length === 0 ? "No team" : picked.length === 1 ? picked[0].name : `${picked.length} teams`;
   const toggle = (id: string) => {
+    if (!open) return;
     onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
   };
   return (
-    <span
+    <button
+      type="button"
       ref={triggerRef}
       className="pill mode-pill"
+      aria-label="Choose teams"
+      aria-haspopup="menu"
+      aria-expanded={open}
+      aria-controls={open ? menuId : undefined}
+      onKeyDown={nav.triggerKey}
       title={picked.length ? picked.map((t) => `${t.name}: ${t.members.join(", ")}`).join("\n") : "Select the team(s) that will work on this task"}
       onClick={(e) => {
         e.stopPropagation();
-        setOpen((o) => !o);
+        if (open) nav.close(); else nav.show();
       }}
     >
       <Icon name="users" />
       <span>{label}</span>
       <Icon name="chevD" className="cd" />
-      {open && createPortal(
-        <div ref={menuRef} className="mode-dropdown team-dropdown" style={{ ...style, maxHeight: maxH, overflowY: "auto" }}>
-          {teams.length === 0 && <div className="mode-item">No teams configured</div>}
-          {teams.map((t) => (
+      {present && createPortal(
+        <div ref={menuRef} id={menuId} role="menu" aria-label="Teams" className="mode-dropdown team-dropdown"
+          data-state={exiting ? "closing" : "open"} data-side={side} inert={exiting || undefined} aria-hidden={exiting || undefined}
+          style={{ ...style, maxHeight: maxH, overflowY: "auto", pointerEvents: exiting ? "none" : undefined }} onKeyDown={nav.menuKey} onClick={event => event.stopPropagation()}>
+          {teams.length === 0 && <div className="mode-item" role="presentation">No teams configured</div>}
+          {teams.map((t, index) => (
             <div
               key={t.id}
               className={"mode-item" + (selected.includes(t.id) ? " active" : "")}
+              role="menuitemcheckbox"
+              aria-checked={selected.includes(t.id)}
+              tabIndex={index === nav.focused ? 0 : -1}
+              onFocus={() => nav.setFocused(index)}
+              onKeyDown={event => activateFromKeyboard(event, () => toggle(t.id))}
               onClick={(e) => {
                 e.stopPropagation();
                 toggle(t.id);
@@ -408,7 +524,7 @@ function TeamPicker({ teams, selected, onChange }: { teams: TeamInfo[]; selected
         </div>,
         document.body
       )}
-    </span>
+    </button>
   );
 }
 
@@ -420,6 +536,8 @@ function optionSummary(opts: ModelOption[]): string {
       // Adaptive-only models: "adaptive" IS thinking, so label it "Thinking".
       const adaptiveOnly = !(o.values || []).includes("enabled");
       if (o.value && o.value !== "disabled") parts.push(o.value === "adaptive" && !adaptiveOnly ? "Adaptive" : "Thinking");
+    } else if (o.key === "speed") {
+      if (o.value === "fast") parts.push("Fast");
     } else if (o.type === "toggle") {
       if (o.value === "true") parts.push(o.label);
     } else if (o.value) {
@@ -446,12 +564,12 @@ function ThinkingControl({ value, values, onChange }: { value: string; values: s
   const adaptive = value === "adaptive";
   return (
     <div className="mo-thinking">
-      <div className="mo-toggle" onClick={() => onChange(on ? "disabled" : onValue)}>
+      <div className="mo-toggle" role="switch" tabIndex={0} aria-checked={on} aria-label="Thinking" onKeyDown={(event) => activateFromKeyboard(event, () => onChange(on ? "disabled" : onValue))} onClick={() => onChange(on ? "disabled" : onValue)}>
         <span className="mo-label">Thinking</span>
         <span className={"mo-switch" + (on ? " on" : "")}><span className="mo-knob" /></span>
       </div>
       {on && canChooseAdaptive && (
-        <div className="mo-toggle sub" onClick={() => onChange(adaptive ? "enabled" : "adaptive")}>
+        <div className="mo-toggle sub" role="switch" tabIndex={0} aria-checked={adaptive} aria-label="Adaptive thinking" onKeyDown={(event) => activateFromKeyboard(event, () => onChange(adaptive ? "enabled" : "adaptive"))} onClick={() => onChange(adaptive ? "enabled" : "adaptive")}>
           <span className="mo-label">Adaptive</span>
           <span className={"mo-switch" + (adaptive ? " on" : "")}><span className="mo-knob" /></span>
         </div>
@@ -468,10 +586,13 @@ const VALUE_LABELS: Record<string, string> = {
   high: "High",
   xhigh: "Extra High",
   max: "Max",
+  standard: "Standard",
+  fast: "Fast",
 };
 
 /** Editable option groups for one model (left column of the picker). */
 function ModelOptions({ model, onChange }: { model: ModelDef; onChange: (opts: ModelOption[]) => void }) {
+  const descriptionId = React.useId();
   const setOpt = (i: number, value: string) => onChange(model.options.map((o, idx) => (idx === i ? { ...o, value } : o)));
   if (model.options.length === 0) {
     return <div className="mo-empty">No options for this model.</div>;
@@ -485,6 +606,11 @@ function ModelOptions({ model, onChange }: { model: ModelDef; onChange: (opts: M
           <div
             key={i}
             className="mo-toggle"
+            role="switch"
+            tabIndex={0}
+            aria-label={o.label}
+            aria-checked={o.value === "true"}
+            onKeyDown={(event) => activateFromKeyboard(event, () => setOpt(i, o.value === "true" ? "false" : "true"))}
             onClick={() => setOpt(i, o.value === "true" ? "false" : "true")}
           >
             <span className="mo-label">{o.label}</span>
@@ -495,8 +621,9 @@ function ModelOptions({ model, onChange }: { model: ModelDef; onChange: (opts: M
         ) : (
           <div key={i} className="mo-group">
             <div className="mo-group-label">{o.label}</div>
+            {o.description && <p id={`${descriptionId}-${i}`} className="mo-description">{o.description}</p>}
             {(o.values || []).map((v) => (
-              <div key={v} className={"mo-item" + (v === o.value ? " active" : "")} onClick={() => setOpt(i, v)}>
+              <div key={v} className={"mo-item" + (v === o.value ? " active" : "")} role="button" tabIndex={0} aria-label={`${o.label}: ${VALUE_LABELS[v] ?? v}`} aria-describedby={o.description ? `${descriptionId}-${i}` : undefined} aria-pressed={v === o.value} onKeyDown={(event) => activateFromKeyboard(event, () => setOpt(i, v))} onClick={() => setOpt(i, v)}>
                 <span>{VALUE_LABELS[v] ?? v}</span>
                 {v === o.value && <Icon name="check" className="mo-check" />}
               </div>
@@ -533,6 +660,11 @@ function ModelRow({
   return (
     <div
       className={"model-item" + (m.id === selected ? " active" : "") + (m.id === editingId ? " editing" : "")}
+      role="button"
+      tabIndex={0}
+      aria-label={`Select ${m.name}`}
+      aria-pressed={m.id === selected}
+      onKeyDown={(event) => activateFromKeyboard(event, () => onSelect(m.id))}
       onClick={() => onSelect(m.id)}
     >
       <span className="model-item-name">{m.name}</span>
@@ -585,13 +717,17 @@ function ModelPicker({
   onResetOptions: (modelId: string) => void;
 }) {
   const [open, setOpen] = React.useState(false);
+  const { present, exiting } = usePresence(open);
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [query, setQuery] = React.useState("");
   useOutsideClose(open, () => {
     setOpen(false);
+  });
+  React.useEffect(() => {
+    if (present) return;
     setEditingId(null);
     setQuery("");
-  });
+  }, [present]);
 
   // modelList is already the server-filtered set (enabled + default). Fall back to
   // raw ids only if the extension hasn't sent a modelList yet.
@@ -622,34 +758,57 @@ function ModelPicker({
   const editing = editingId ? list.find((m) => m.id === editingId) || null : null;
   const selectedModel = list.find((m) => m.id === selected);
   const selLabel = selected === "auto" ? "Auto" : selectedModel?.name || selected || "no model";
-  const summary = selectedModel ? optionSummary(selectedModel.options) : "";
+  const summary = selectedModel ? optionSummary(selectedModel.options.filter(option => ["reasoning_effort", "effort", "thinking", "speed"].includes(option.key))) : "";
 
   const triggerRef = React.useRef<HTMLSpanElement>(null);
   const pickerRef = React.useRef<HTMLDivElement>(null);
+  const searchRef = React.useRef<HTMLInputElement>(null);
   // Anchor the fixed picker to the trigger; flips below when no room above.
-  const { style: pickerStyle, maxH } = useAnchoredMenu(open, triggerRef, pickerRef, [list.length, !!editing]);
+  const { style: pickerStyle, maxH, side } = useAnchoredMenu(open, triggerRef, pickerRef, [list.length, !!editing]);
+  React.useLayoutEffect(() => {
+    // React autoFocus runs before the portal's first position is applied.
+    // Focus explicitly without moving the document or the surrounding frame.
+    if (open && !editing) searchRef.current?.focus({ preventScroll: true });
+  }, [open, !!editing]);
 
   const pick = (id: string) => {
+    if (!open) return;
     onSelect(id);
     setOpen(false);
-    setEditingId(null);
-    setQuery("");
+    triggerRef.current?.focus({ preventScroll: true });
   };
 
   return (
     <span
       ref={triggerRef}
       className="model-select"
+      role="button"
+      tabIndex={0}
+      aria-label="Choose model"
+      aria-expanded={open}
+      title={[selLabel, summary].filter(Boolean).join(" · ")}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((o) => !o); }
+        if (e.key === "Escape") setOpen(false);
+      }}
       onClick={(e) => {
         e.stopPropagation();
         setOpen((o) => !o);
       }}
     >
-      <span className="label">{selLabel}</span>
+      <TextSwap className="label" text={selLabel} />
       {summary && <span className="model-summary">{summary}</span>}
       <Icon name="chevD" className="cd" />
-      {open && createPortal(
-        <div ref={pickerRef} className="model-picker" style={{ ...pickerStyle, "--mp-max-h": `${maxH}px` } as React.CSSProperties} onClick={(e) => e.stopPropagation()}>
+      {present && createPortal(
+        <div ref={pickerRef} className="model-picker" data-state={exiting ? "closing" : "open"} data-side={side} inert={exiting || undefined} aria-hidden={exiting || undefined}
+          style={{ ...pickerStyle, "--mp-max-h": `${maxH}px`, pointerEvents: exiting ? "none" : undefined } as React.CSSProperties}
+          onClickCapture={event => { if (!open) { event.preventDefault(); event.stopPropagation(); } }}
+          onKeyDownCapture={event => { if (!open) { event.preventDefault(); event.stopPropagation(); } }}
+          onClick={(e) => e.stopPropagation()} onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          event.preventDefault(); event.stopPropagation(); setOpen(false); triggerRef.current?.focus({ preventScroll: true });
+        }}>
           {editing ? (
             <div className="model-picker-view">
               <div className="mp-head">
@@ -668,7 +827,7 @@ function ModelPicker({
               <div className="mp-search">
                 <Icon name="search" className="mp-search-icon" />
                 <input
-                  autoFocus
+                  ref={searchRef}
                   value={query}
                   placeholder="Search models"
                   onChange={(e) => setQuery(e.target.value)}
@@ -703,6 +862,9 @@ function ModelPicker({
                 ))}
                 <div
                   className="model-item add-models"
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(event) => activateFromKeyboard(event, () => { post({ type: "openSettings", section: "models" }); setOpen(false); })}
                   onClick={() => {
                     post({ type: "openSettings", section: "models" });
                     setOpen(false);
@@ -751,6 +913,8 @@ export function Composer({
   teams,
   activeTeamIds,
   onTeams,
+  approvalPolicy,
+  persona,
 }: {
   mode: Mode;
   onMode: (m: Mode) => void;
@@ -758,6 +922,8 @@ export function Composer({
   teams?: TeamInfo[];
   activeTeamIds?: string[];
   onTeams?: (ids: string[]) => void;
+  approvalPolicy?: ApprovalPolicy;
+  persona?: PersonaInfo;
   models: string[];
   modelList: ModelDef[];
   selectedModel: string;
@@ -779,7 +945,7 @@ export function Composer({
   submitWithCtrlEnter?: boolean;
   /** Restored (unsent) message: replaces the editor content when set. */
   draft?: { text: string; attachments?: Attachment[]; mentions?: MentionItem[] } | null;
-  /** Per-tab draft restored when switching chats. */
+  /** Saved draft restored on startup, host updates, and chat switches. */
   tabDraft?: ComposerDraft | null;
   /** Fired whenever the composer content changes (tab switch / typing). */
   onTabDraft?: (d: ComposerDraft) => void;
@@ -790,13 +956,27 @@ export function Composer({
   onRunNextQueued?: () => void;
 }) {
   const [attachments, setAttachments] = React.useState<Attachment[]>(initialAttachments ?? []);
+  const [previewImageId, setPreviewImageId] = React.useState<string | null>(null);
+  const previewImages = React.useMemo(() => attachments.filter(attachment => attachment.kind === "image"), [attachments]);
+  React.useEffect(() => { setPreviewImageId(null); }, [focusKey]);
   const [dragOver, setDragOver] = React.useState(false);
-  const [empty, setEmpty] = React.useState(true); // drives the placeholder
+  const [empty, setEmpty] = React.useState(true); // whether there is text to send
+  const [showPlaceholder, setShowPlaceholder] = React.useState(true);
   const edRef = React.useRef<HTMLDivElement>(null);
   const fileRef = React.useRef<HTMLInputElement>(null);
+  const richEditor = React.useRef<ComposerEditor | null>(null);
+  const [codeBlocks, setCodeBlocks] = React.useState<ComposerCodeBlock[]>([]);
+  const codeLabels = React.useMemo(() => new Map(codeBlocks.map(block => [block.id,
+    block.code.trim() ? getCodeLanguage(block.code, block.language).label : "",
+  ])), [codeBlocks]);
+  const submitWithCtrlEnterRef = React.useRef(submitWithCtrlEnter);
+  const submitRef = React.useRef<() => void>(() => {});
+  submitWithCtrlEnterRef.current = submitWithCtrlEnter;
 
   // @-mention popup state
   const [mentionOpen, setMentionOpen] = React.useState(false);
+  const mentionOpenRef = React.useRef(false);
+  mentionOpenRef.current = mentionOpen;
   const [mentionItems, setMentionItems] = React.useState<MentionItem[]>([]);
   const [mentionIndex, setMentionIndex] = React.useState(0);
   // null = top-level category menu; set = drilled into one category.
@@ -815,100 +995,23 @@ export function Composer({
   // Set after detectMention is defined (insert fns are declared before it).
   const detectMentionRef = React.useRef<(() => void) | null>(null);
 
-  // ---- Undo/redo -----------------------------------------------------------
-  // Native contenteditable undo is unreliable inside VS Code webviews (the
-  // host intercepts/eats parts of the stack), so we keep our own history of
-  // {innerHTML, caret} snapshots and fully own Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z.
-  const histRef = React.useRef<{ stack: { html: string; caret: number }[]; idx: number; lastPush: number }>({
-    stack: [{ html: "", caret: 0 }],
-    idx: 0,
-    lastPush: 0,
-  });
+  const undoEdit = () => richEditor.current?.undo();
+  const redoEdit = () => richEditor.current?.redo();
 
-  /** Caret position as a plain-text offset from the editor start (-1 = none). */
-  const caretOffset = (): number => {
-    const ed = edRef.current;
-    const sel = window.getSelection();
-    if (!ed || !sel || !sel.rangeCount || !ed.contains(sel.anchorNode)) return -1;
-    const r = sel.getRangeAt(0).cloneRange();
-    const probe = document.createRange();
-    probe.selectNodeContents(ed);
-    probe.setEnd(r.endContainer, r.endOffset);
-    return probe.toString().length;
-  };
-
-  const setCaretAt = (offset: number) => {
-    const ed = edRef.current;
-    const sel = window.getSelection();
-    if (!ed || !sel) return;
-    const range = document.createRange();
-    let placed = false;
-    if (offset >= 0) {
-      let remaining = offset;
-      const walker = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
-      let node: Node | null;
-      while ((node = walker.nextNode())) {
-        const len = node.textContent?.length ?? 0;
-        if (remaining <= len) {
-          const pill = node.parentElement?.closest(".mention");
-          if (pill) range.setStartAfter(pill);
-          else range.setStart(node, remaining);
-          range.collapse(true);
-          placed = true;
-          break;
-        }
-        remaining -= len;
-      }
-    }
-    if (!placed) {
-      range.selectNodeContents(ed);
-      range.collapse(false);
-    }
-    sel.removeAllRanges();
-    sel.addRange(range);
-    ed.focus();
-  };
-
-  /** Record the current editor state. Rapid keystrokes coalesce into one entry. */
-  const pushHistory = (discrete = false) => {
-    const ed = edRef.current;
-    if (!ed) return;
-    const h = histRef.current;
-    const snap = { html: ed.innerHTML, caret: caretOffset() };
-    const top = h.stack[h.idx];
-    if (top && top.html === snap.html) {
-      top.caret = snap.caret;
-      return;
-    }
-    const now = Date.now();
-    h.stack.splice(h.idx + 1); // drop redo branch
-    if (!discrete && now - h.lastPush < 400 && h.idx > 0) {
-      h.stack[h.idx] = snap; // coalesce fast typing
-    } else {
-      h.stack.push(snap);
-      if (h.stack.length > 200) h.stack.shift();
-      h.idx = h.stack.length - 1;
-    }
-    h.lastPush = discrete ? 0 : now; // discrete ops end the coalescing run
-  };
-
-  const applySnapshot = (snap: { html: string; caret: number }) => {
-    const ed = edRef.current;
-    if (!ed) return;
-    ed.innerHTML = snap.html;
-    setCaretAt(snap.caret);
-    refreshEmpty();
-  };
-
-  const undoEdit = () => {
-    const h = histRef.current;
-    if (h.idx > 0) applySnapshot(h.stack[--h.idx]);
-  };
-
-  const redoEdit = () => {
-    const h = histRef.current;
-    if (h.idx < h.stack.length - 1) applySnapshot(h.stack[++h.idx]);
-  };
+  React.useLayoutEffect(() => {
+    const element = edRef.current;
+    if (!element) return;
+    const editor = new ComposerEditor(element, {
+      createMention: makeMentionEl,
+      onChange: () => { refreshEmpty(); detectMentionRef.current?.(); emitDraft(); },
+      onCodeBlocks: setCodeBlocks,
+      submitWithCtrlEnter: () => !!submitWithCtrlEnterRef.current,
+      onSubmit: () => submitRef.current(),
+      shouldHandleKeys: () => !mentionOpenRef.current,
+    });
+    richEditor.current = editor;
+    return () => { editor.destroy(); richEditor.current = null; };
+  }, []);
 
   const setCat = (c: MentionCategory | null) => {
     mentionCatRef.current = c;
@@ -922,16 +1025,15 @@ export function Composer({
 
   const refreshEmpty = React.useCallback(() => {
     const ed = edRef.current;
-    setEmpty(!ed || (ed.textContent || "").trim() === "" && ed.querySelectorAll(".mention").length === 0);
+    setEmpty(richEditor.current ? richEditor.current.isEmpty() : !ed || (ed.textContent || "").trim() === "" && ed.querySelectorAll(".mention").length === 0);
+    setShowPlaceholder(richEditor.current ? richEditor.current.isEmptyParagraph() : !ed?.hasChildNodes());
   }, []);
 
   const onTabDraftRef = React.useRef(onTabDraft);
   React.useEffect(() => { onTabDraftRef.current = onTabDraft; }, [onTabDraft]);
   const attachmentsRef = React.useRef(attachments);
   React.useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
-  const tabDraftRef = React.useRef(tabDraft);
-  tabDraftRef.current = tabDraft; // sync before focusKey effect restores
-  const prevFocusKeyRef = React.useRef(focusKey);
+  const restoredDraftRef = React.useRef<{ focusKey?: string; draft?: ComposerDraft | null } | null>(null);
   // Serialize is defined below; snapshot via ref so tab-switch effect can call it.
   const serializeRef = React.useRef<() => string>(() => "");
 
@@ -940,61 +1042,42 @@ export function Composer({
     onTabDraftRef.current?.({ text: serializeRef.current(), attachments: attachmentsRef.current });
   }, [editing]);
 
-  // Auto-focus + restore per-tab draft on tab switch / new chat.
+  // Startup can deliver a saved draft after this composer already mounted for
+  // the same chat. Restore that snapshot too; local draft echoes keep history.
   React.useEffect(() => {
     if (editing) return;
-    const prev = prevFocusKeyRef.current;
-    if (prev !== focusKey) {
-      // Leaving a tab: parent already has latest via emitDraft on input; just swap in.
-      prevFocusKeyRef.current = focusKey;
-      const d = tabDraftRef.current;
-      const ed = edRef.current;
-      if (ed) {
-        if (d?.text) seedEditor(ed, d.text);
-        else ed.innerHTML = "";
-        histRef.current = { stack: [{ html: ed.innerHTML, caret: -1 }], idx: 0, lastPush: 0 };
-        setAttachments(d?.attachments ?? []);
-        refreshEmpty();
-      } else {
-        setAttachments(d?.attachments ?? []);
+    const previous = restoredDraftRef.current;
+    const switched = previous != null && previous.focusKey !== focusKey;
+    restoredDraftRef.current = { focusKey, draft: tabDraft };
+    if (tabDraft || previous && (switched || previous.draft !== tabDraft)) {
+      const text = tabDraft?.text ?? "";
+      // Comparing the serialized document avoids resetting selection/history
+      // when the parent returns the draft we just emitted while typing.
+      if (switched || richEditor.current?.getText() !== text) richEditor.current?.setText(text);
+      const nextAttachments = tabDraft?.attachments ?? [];
+      const current = attachmentsRef.current;
+      if (current !== nextAttachments && (current.length !== nextAttachments.length || current.some((item, index) => {
+        const next = nextAttachments[index];
+        return item.id !== next.id || item.name !== next.name || item.mime !== next.mime || item.kind !== next.kind || item.data !== next.data;
+      }))) {
+        // The draft emission effect below must see restored attachments in
+        // this same pass, before the state update triggers another render.
+        attachmentsRef.current = nextAttachments;
+        setAttachments(nextAttachments);
       }
+      refreshEmpty();
     }
-    if (!isRunning) edRef.current?.focus();
+    if (!isRunning && (!previous || switched)) edRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusKey]);
+  }, [focusKey, tabDraft, editing]);
 
   /**
    * Fill the editor with message text, turning each <attached type=".."
    * title=".." content=".." /> tag back into a pill. The tag itself IS the
    * stored/sent representation, so edits always restore full mention objects.
    */
-  const seedEditor = (ed: HTMLDivElement, text: string) => {
-    ed.innerHTML = "";
-    const appendText = (s: string) => {
-      const lines = s.split("\n");
-      lines.forEach((line, i) => {
-        if (i > 0) ed.appendChild(document.createElement("br"));
-        if (line) ed.appendChild(document.createTextNode(line));
-      });
-    };
-    const unesc = (s: string) => s.replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&amp;/g, "&");
-    const re = /<attached\s+([^>]*?)\/?>/g;
-    let last = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text))) {
-      appendText(text.slice(last, m.index));
-      const attrs: Record<string, string> = {};
-      for (const a of m[1].matchAll(/([\w-]+)\s*=\s*"([^"]*)"/g)) attrs[a[1]] = unesc(a[2]);
-      ed.appendChild(makeMentionEl({
-        kind: (attrs.type || "file") as MentionItem["kind"],
-        name: attrs.title || attrs.content || "",
-        path: attrs.content || "",
-      }));
-      ed.appendChild(document.createTextNode("\u00a0"));
-      last = re.lastIndex;
-      if (text[last] === " ") last++; // the space we added after the pill
-    }
-    appendText(text.slice(last));
+  const seedEditor = (_ed: HTMLDivElement, text: string) => {
+    richEditor.current?.setText(text);
   };
 
   // Seed the editor once with existing text when opened in edit mode.
@@ -1002,7 +1085,6 @@ export function Composer({
     const ed = edRef.current;
     if (!ed || initialText == null) return;
     seedEditor(ed, initialText);
-    pushHistory(true);
     refreshEmpty();
     // Place caret at end + focus.
     ed.focus();
@@ -1021,7 +1103,7 @@ export function Composer({
     const ed = edRef.current;
     if (!ed) return;
     seedEditor(ed, draft.text);
-    pushHistory(true);
+    attachmentsRef.current = draft.attachments ?? [];
     setAttachments(draft.attachments ?? []);
     refreshEmpty();
     ed.focus();
@@ -1062,8 +1144,8 @@ export function Composer({
     }
   }, []);
 
-  // Build an inline, non-editable mention pill element:
-  // [kind/file icon | ×-on-hover] @name
+  // Build an inline, non-editable mention pill with a keyboard-reachable
+  // removal button after its label. Delegated events survive undo restoration.
   const makeMentionEl = (m: MentionItem): HTMLElement => {
     const span = document.createElement("span");
     span.className = "mention";
@@ -1080,17 +1162,26 @@ export function Composer({
     if (m.kind === "file" || m.kind === "code") applyFileIconTo(icon, m.path);
     span.appendChild(icon);
 
-    const x = document.createElement("span");
-    x.className = "mention-x";
-    x.innerHTML = X_SVG;
-    x.title = "Remove";
-    span.appendChild(x);
-
     const label = document.createElement("span");
     label.className = "mention-label";
     label.textContent = m.name;
     span.appendChild(label);
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "mention-x";
+    x.innerHTML = X_SVG;
+    x.title = `Remove ${m.name}`;
+    x.setAttribute("aria-label", `Remove mention ${m.name}`);
+    x.tabIndex = 0;
+    span.appendChild(x);
     return span;
+  };
+
+  const removeMention = (pill: HTMLElement) => {
+    richEditor.current?.removeMention(pill);
+    refreshEmpty();
+    setMentionOpen(false);
+    emitDraft();
   };
 
   // Move the caret to the end of the editor if the selection isn't inside it.
@@ -1108,68 +1199,16 @@ export function Composer({
     }
   };
 
-  const escapeHtml = (s: string) =>
-    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-
-  // Manual Range-based insertion at the caret; afterwards the caret always
-  // sits right AFTER the last inserted node.
-  const insertFragManually = (frag: DocumentFragment) => {
-    const ed = edRef.current;
-    const sel = window.getSelection();
-    if (!ed || !sel || !sel.rangeCount) return;
-    let range = sel.getRangeAt(0);
-    // Selection escaped the editor (popup click etc.): fall back to the end.
-    if (!ed.contains(range.startContainer)) {
-      range = document.createRange();
-      range.selectNodeContents(ed);
-      range.collapse(false);
-    }
-    range.deleteContents();
-    const last = frag.lastChild;
-    range.insertNode(frag);
-    if (last) {
-      const after = document.createRange();
-      after.setStartAfter(last);
-      after.collapse(true);
-      sel.removeAllRanges();
-      sel.addRange(after);
-    }
-    ed.focus();
-  };
-
-  // All programmatic insertions land in our own undo history as one discrete
-  // step, so Ctrl+Z/Ctrl+Y behave exactly like a normal textarea.
-  const insertNodesAtCaret = (nodes: Node[]) => {
-    const ed = edRef.current;
-    if (!ed) return;
+  const insertTextAtCaret = (text: string, markdown = true) => {
     ensureCaretInEditor();
-    const frag = document.createDocumentFragment();
-    for (const n of nodes) frag.appendChild(n);
-    insertFragManually(frag);
-    pushHistory(true);
+    richEditor.current?.insertText(text, markdown);
     refreshEmpty();
-    detectMentionRef.current?.();
   };
 
-  // Plain text insertion (paste, @ button): undo-friendly, keeps newlines.
-  const insertTextAtCaret = (text: string) => {
-    const ed = edRef.current;
-    if (!ed) return;
+  const insertMention = (mention: MentionItem) => {
     ensureCaretInEditor();
-    const frag = document.createDocumentFragment();
-    const lines = text.split("\n");
-    lines.forEach((line, i) => {
-      if (i > 0) frag.appendChild(document.createElement("br"));
-      if (line) frag.appendChild(document.createTextNode(line));
-    });
-    insertFragManually(frag);
-    pushHistory(true);
+    richEditor.current?.insertMention(mention);
     refreshEmpty();
-    detectMentionRef.current?.();
-  };
-
-  const insertMention = (m: MentionItem) => {
-    insertNodesAtCaret([makeMentionEl(m), document.createTextNode("\u00a0")]);
   };
 
   // Make the whole webview a valid drop target. VS Code only routes drag events
@@ -1194,16 +1233,13 @@ export function Composer({
       ].filter(Boolean);
       const paths = parseDroppedPaths(raws);
       if (paths.length) {
-        const nodes: Node[] = [];
         for (const p of paths) {
           const name = p.split(/[\\/]/).pop() || p;
-          nodes.push(makeMentionEl({ path: p, name, kind: "file" }));
-          nodes.push(document.createTextNode("\u00a0"));
+          insertMention({ path: p, name, kind: "file" });
         }
-        insertNodesAtCaret(nodes);
       } else if (!dt.files.length) {
         const plain = dt.getData("text/plain");
-        if (plain) insertNodesAtCaret([document.createTextNode(plain)]);
+        if (plain) insertTextAtCaret(plain);
       }
     };
     const over = (e: DragEvent) => {
@@ -1269,7 +1305,7 @@ export function Composer({
     }
     const range = sel.getRangeAt(0);
     const node = range.startContainer;
-    if (node.nodeType !== Node.TEXT_NODE) {
+    if (node.nodeType !== Node.TEXT_NODE || !edRef.current?.contains(node) || node.parentElement?.closest("pre, code, .mention")) {
       close();
       return;
     }
@@ -1313,8 +1349,7 @@ export function Composer({
     const qr = queryRangeRef.current;
     if (!ed) return;
     if (qr) {
-      // Select the typed "@query"; insertHTML then replaces the selection in
-      // one undoable step (native undo stack stays intact).
+      // Replace the typed query and insert the mention as one undoable edit.
       const sel = window.getSelection();
       sel?.removeAllRanges();
       sel?.addRange(qr);
@@ -1338,33 +1373,10 @@ export function Composer({
     edRef.current?.focus();
   }, []);
 
-  // Serialize editor content to a plain string. Mention pills become full
+  // Serialize the document as Markdown. Mention pills become full
   // <attached type=".." title=".." content=".." /> tags — the message text
   // itself carries the complete mention data and is sent to the AI as-is.
-  const serialize = (): string => {
-    const ed = edRef.current;
-    if (!ed) return "";
-    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-    let out = "";
-    const walk = (n: Node) => {
-      n.childNodes.forEach((c) => {
-        if (c.nodeType === Node.TEXT_NODE) {
-          out += (c.textContent || "").replace(/\u00a0/g, " ");
-        } else if (c instanceof HTMLElement) {
-          if (c.classList.contains("mention")) {
-            out += `<attached type="${esc(c.dataset.kind || "file")}" title="${esc(c.dataset.name || "")}" content="${esc(c.dataset.path || "")}" />`;
-          } else if (c.tagName === "BR") {
-            out += "\n";
-          } else {
-            walk(c);
-            if (c.tagName === "DIV") out += "\n";
-          }
-        }
-      });
-    };
-    walk(ed);
-    return out.trim();
-  };
+  const serialize = (): string => richEditor.current?.getText() ?? "";
   serializeRef.current = serialize;
 
   // Keep parent draft map in sync (typing + attachment chips).
@@ -1375,10 +1387,9 @@ export function Composer({
 
   const clear = () => {
     if (edRef.current) {
-      edRef.current.innerHTML = "";
+      richEditor.current?.setText("");
       edRef.current.focus();
     }
-    histRef.current = { stack: [{ html: "", caret: 0 }], idx: 0, lastPush: 0 };
     refreshEmpty();
     if (!editing) onTabDraftRef.current?.({ text: "", attachments: [] });
   };
@@ -1400,6 +1411,7 @@ export function Composer({
     setCat(null);
     onSubmit(text, sent);
   };
+  submitRef.current = submit;
 
   const hasContent = !empty || attachments.length > 0;
   const canSend = hasContent;
@@ -1408,13 +1420,13 @@ export function Composer({
   const showStop = !editing && isRunning && !hasContent;
 
   return (
-    <div className="chat-input">
+    <div className={"chat-input" + (editing ? " is-editing" : "")}>
       <div
         className={"composer" + (dragOver ? " drag-over" : "")}
       >
         {dragOver && (
           <div className="drop-hint">
-            <AtSign size={13} /> Drop to mention &nbsp;·&nbsp; hold <kbd>Shift</kbd> if it opens the file instead
+            <Icon name="at" size={13} /> Drop to mention &nbsp;·&nbsp; hold <kbd>Shift</kbd> if it opens the file instead
           </div>
         )}
         {attachments.length > 0 && (
@@ -1422,13 +1434,16 @@ export function Composer({
             {attachments.map((a) => (
               <div className="attach-chip" key={a.id} title={a.name}>
                 {a.kind === "image" ? (
-                  <img className="attach-thumb" src={a.data} alt="" />
+                  <button type="button" className="image-attachment-trigger" aria-label={`Preview image ${a.name}`}
+                    aria-haspopup="dialog" onClick={() => setPreviewImageId(a.id)}>
+                    <img className="attach-thumb" src={a.data} alt="" />
+                  </button>
                 ) : (
                   <div className="attach-file">
                     <Icon name="file" size={16} />
                   </div>
                 )}
-                <button className="attach-remove" onClick={() => removeAttachment(a.id)} aria-label="Remove">
+                <button type="button" className="attach-remove" onClick={() => removeAttachment(a.id)} aria-label={`Remove ${a.name}`}>
                   <Icon name="close" size={11} />
                 </button>
               </div>
@@ -1439,7 +1454,7 @@ export function Composer({
           <div className="mention-popup" onMouseDown={(e) => e.preventDefault()}>
             {mentionCat === null ? (
               <>
-                {/* Cursor layout: quick file results on top, divider, then categories. */}
+                {/* Quick file results, divider, then categories. */}
                 {mentionItems.slice(0, 3).map((m, i) => (
                   <div
                     key={m.kind + m.path}
@@ -1464,7 +1479,7 @@ export function Composer({
                     >
                       <Icon name={c.icon} size={14} />
                       <span className="mi-name">{c.label}</span>
-                      {!c.leaf && <ChevronRight size={12} className="mi-chev" />}
+                      {!c.leaf && <Icon name="chevR" size={12} className="mi-chev" />}
                     </div>
                   );
                 })}
@@ -1472,7 +1487,7 @@ export function Composer({
             ) : (
               <>
                 <div className="mention-head">
-                  <AtSign size={11} /> {MENTION_CATEGORIES.find((c) => c.id === mentionCat)?.label ?? mentionCat}
+                  <Icon name="at" size={11} /> {MENTION_CATEGORIES.find((c) => c.id === mentionCat)?.label ?? mentionCat}
                 </div>
                 {mentionItems.length === 0 ? (
                   <div className="mention-empty">{mentionCat === "link" ? "Type or paste a URL after @" : "No matches"}</div>
@@ -1496,11 +1511,12 @@ export function Composer({
         )}
         <div
           ref={edRef}
-          className={"editor" + (empty ? " empty" : "")}
+          className={"editor" + (showPlaceholder && attachments.length === 0 ? " empty" : "")}
           contentEditable
           role="textbox"
+          aria-label={editing ? "Edit message" : "Message OpenCursor"}
           aria-multiline="true"
-          data-placeholder={isFirst ? "Plan, Build, / for skills, @ for context" : "Add a follow-up"}
+          data-placeholder={isFirst ? "Ask OpenCursor anything, @ to add context" : "Add a follow-up"}
           suppressContentEditableWarning
           onDragOver={(e) => e.preventDefault()}
           onClick={(e) => {
@@ -1509,20 +1525,17 @@ export function Composer({
             if (!el) return;
             e.preventDefault();
             if (t.closest(".mention-x")) {
-              // Remove the pill (and the nbsp spacer that follows it).
-              const next = el.nextSibling;
-              if (next?.nodeType === Node.TEXT_NODE && next.textContent === "\u00a0") next.remove();
-              el.remove();
-              pushHistory(true);
-              refreshEmpty();
+              e.stopPropagation();
+              removeMention(el);
               return;
             }
             if (el.dataset.path) {
               post({ type: "openMention", kind: (el.dataset.kind as MentionItem["kind"]) || "file", path: el.dataset.path });
             }
           }}
-          onInput={() => {
-            pushHistory();
+          onInput={(e) => {
+            if ((e.nativeEvent as InputEvent).isComposing) return;
+            richEditor.current?.getText();
             refreshEmpty();
             detectMention();
             emitDraft();
@@ -1543,32 +1556,46 @@ export function Composer({
             }
             const text = dt.getData("text/plain");
             if (!text) return; // nothing we can do better than the browser
-            // Always paste as plain text (strip rich HTML), via insertText so
-            // native undo/redo works like a textarea.
+            // Parse the clipboard's Markdown without inserting arbitrary HTML.
             e.preventDefault();
-            // Pasting a bare URL auto-becomes a @Link mention (Cursor behavior);
+            const anchor = window.getSelection()?.anchorNode;
+            if (anchor && edRef.current?.contains(anchor) && (anchor instanceof Element ? anchor : anchor.parentElement)?.closest("pre")) {
+              insertTextAtCaret(text, false);
+              return;
+            }
+            // Pasting a bare URL creates a @Link mention;
             // Ctrl+Shift+V skips this and pastes the raw text.
             const t = text.trim();
             if (!plain && /^https?:\/\/\S+$/.test(t) && !t.includes("\n")) {
-              insertNodesAtCaret([
-                makeMentionEl({ kind: "link", path: t, name: t.replace(/^https?:\/\//, "").replace(/\/$/, "") }),
-                document.createTextNode("\u00a0"),
-              ]);
+              insertMention({ kind: "link", path: t, name: t.replace(/^https?:\/\//, "").replace(/\/$/, "") });
               return;
             }
-            // Code copied from a project file → @code mention (Cursor behavior).
+            // Convert code copied from a project file into a @code mention.
             // Ask the host to locate the text; insert on reply (fast round-trip).
-            if (!plain && t.includes("\n")) {
+            if (!plain && t.includes("\n") && !/^(?: {0,3}(?:#{1,6} |`{3,}|~{3,}|[-*+] |>|\d+\. ))/m.test(t) && getCodeLanguage(t).id !== "plaintext") {
               const id = ++mentionReqId;
               pastePendingRef.current = { id, text };
               post({ type: "resolvePastedCode", text: t, requestId: id });
               return;
             }
-            insertTextAtCaret(text);
+            insertTextAtCaret(text, !plain);
           }}
           onKeyDown={(e) => {
-            // Own the undo/redo chords (native contenteditable undo is broken
-            // inside VS Code webviews).
+            if (e.defaultPrevented || e.nativeEvent.isComposing || e.keyCode === 229) return;
+            const remove = (e.target as HTMLElement).closest(".mention-x");
+            if (remove) {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                const pill = remove.closest<HTMLElement>(".mention");
+                if (pill) removeMention(pill);
+                return;
+              }
+              // Tab keeps its normal focus traversal; other button keystrokes
+              // cannot select a suggestion or accidentally submit the message.
+              if (!((e.ctrlKey || e.metaKey) && ["z", "y"].includes(e.key.toLowerCase()))) return;
+            }
+            // Mention controls forward history shortcuts to the document too.
             if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "z") {
               e.preventDefault();
               e.stopPropagation();
@@ -1591,7 +1618,7 @@ export function Composer({
               navigator.clipboard
                 .readText()
                 .then((text) => {
-                  if (text) insertTextAtCaret(text);
+                  if (text) insertTextAtCaret(text, false);
                 })
                 .catch(() => {
                   // Clipboard API blocked: fall back to the paste event path.
@@ -1650,6 +1677,25 @@ export function Composer({
             }
           }}
         />
+        {codeBlocks.map(block => createPortal(
+          <div className="composer-code-toolbar" onKeyDownCapture={event => {
+            if (event.target instanceof Element && event.target.closest("button") && (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
+              event.preventDefault(); event.stopPropagation(); richEditor.current?.selectAll();
+            }
+          }}>
+            <CodeLanguagePicker value={block.language} detectedLabel={codeLabels.get(block.id) || ""}
+              onChange={language => richEditor.current?.setCodeLanguage(block.id, language)} />
+            <div className="composer-code-actions">
+              <button type="button" aria-label="Insert text before code block" title="Insert text before code block"
+                onClick={() => richEditor.current?.insertTextBesideCode(block.id, -1)}><Icon name="arrowUp" size={14} /></button>
+              <button type="button" aria-label="Insert text after code block" title="Insert text after code block"
+                onClick={() => richEditor.current?.insertTextBesideCode(block.id, 1)}><Icon name="arrowDown" size={14} /></button>
+              <button type="button" aria-label="Remove code block" title="Remove code block"
+                onClick={() => richEditor.current?.removeCodeBlock(block.id)}><Icon name="trash" size={14} /></button>
+            </div>
+          </div>,
+          block.element, block.id,
+        ))}
         <input
           ref={fileRef}
           type="file"
@@ -1664,22 +1710,22 @@ export function Composer({
           }}
         />
         <div className="composer-bar">
-          <ModePicker mode={mode} onMode={onMode} />
-          {mode === "project" && <TeamPicker teams={teams ?? []} selected={activeTeamIds ?? []} onChange={(ids) => onTeams?.(ids)} />}
-          <ModelPicker models={models} modelList={modelList} selected={selectedModel} onSelect={onSelectModel} onSaveOptions={onSaveModelOptions} onResetOptions={onResetModelOptions} />
+          <div className="composer-actions">
+          <AttachmentMenu onFiles={(imagesOnly) => {
+            const input = fileRef.current;
+            if (!input) return;
+            input.accept = imagesOnly ? "image/*" : "image/*,text/*,.md,.json,.ts,.tsx,.js,.jsx,.py,.css,.html,.yaml,.yml,.toml,.csv,.log";
+            input.click();
+          }} />
+          {!editing && <ApprovalPicker policy={approvalPolicy} />}
+          </div>
           <div className="right">
             {!editing && (() => {
               const sel = modelList.find((m) => m.id === selectedModel);
               const total = parseContextSize(sel?.options.find((o) => o.key === "max_context")?.value) || 128_000;
               return <ContextRing used={usedTokens ?? 0} total={total} />;
             })()}
-            <button
-              className="attach-btn"
-              title="Attach images or files"
-              onClick={() => fileRef.current?.click()}
-            >
-              <Icon name="paperclip" size={15} />
-            </button>
+            <ModelPicker models={models} modelList={modelList} selected={selectedModel} onSelect={onSelectModel} onSaveOptions={onSaveModelOptions} onResetOptions={onResetModelOptions} />
             {editing && (
               <button className="attach-btn" title="Cancel edit (Esc)" onClick={() => onCancelEdit?.()}>
                 <Icon name="close" size={15} />
@@ -1687,18 +1733,30 @@ export function Composer({
             )}
             <button
               className={"send-btn" + (showStop ? " stop" : canSend ? "" : " disabled")}
-              title={showStop ? "Stop" : editing ? "Resend" : isRunning ? "Queue message" : "Send"}
+              title={showStop ? "Stop" : `${editing ? "Resend" : isRunning ? "Queue message" : "Send"} (${submitWithCtrlEnter ? "Ctrl+Enter" : "Enter"})`}
+              aria-label={showStop ? "Stop" : editing ? "Resend" : isRunning ? "Queue message" : "Send"}
+              disabled={!showStop && !canSend}
               onClick={showStop ? onCancel : submit}
             >
-              {showStop ? (
-                <Square size={10} fill="currentColor" strokeWidth={0} />
-              ) : (
-                <ArrowUp size={16} strokeWidth={2.25} />
-              )}
+              <span className="composer-send-glyph" aria-hidden="true">
+                <Icon name="send" size={20} />
+              </span>
+              <span className="composer-stop-glyph" aria-hidden="true">
+                <span className="composer-stop-ring" />
+                <Icon name="stop" className="composer-stop-square" size={16} />
+              </span>
             </button>
           </div>
         </div>
       </div>
+      <div className="composer-footer">
+        <div className="composer-footer-options">
+          <ModePicker mode={mode} onMode={onMode} />
+          {mode === "project" && <TeamPicker teams={teams ?? []} selected={activeTeamIds ?? []} onChange={(ids) => onTeams?.(ids)} />}
+        </div>
+        {persona && persona.id !== "default" && <span className="composer-persona" title={persona.description}><Icon name="agent" size={13} />{persona.name}</span>}
+      </div>
+      <ImagePreview images={previewImages} activeId={previewImageId} onClose={() => setPreviewImageId(null)} />
     </div>
   );
 }

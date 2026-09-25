@@ -7,16 +7,27 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-import { sendMessageIntent, restoreTurns } from "../../src/shared/chatSession";
+import { sendMessageIntent, restoreTurns, type QueuedMessage, type ConversationGoal } from "../../src/shared/chatSession";
 import { setQuestionAnswers } from "../../src/shared/turns";
 import * as React from "react";
 import { Icon } from "../shared/icons";
+import { Select } from "../shared/Select";
+import { ImagePreview } from "../shared/ImagePreview";
 import { renderMarkdown } from "../shared/markdown";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
-import { ToolCard, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
+import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
 import { History } from "./components/History";
-import type { AgentEvent, ApprovalMode, ApprovalRequestInfo, AssistantBlock, AssistantTurn, Attachment, ConversationSummary, ErrorBlock, InMessage, MentionItem, Mode, ModelDef, ModelOption, OutMessage, PendingChangeInfo, PersonaInfo, TeamInfo, ThinkingBlock, ToolBlock, Turn, UserTurn } from "./types";
+import { MessageActions } from "./components/MessageActions";
+import { WorkingSection } from "./components/WorkingSection";
+import { splitWork, hasLiveWork } from "./workPresentation";
+import { QueuedMessageRow } from "./components/QueuedMessageRow";
+import { ThinkingStatus } from "../shared/ThinkingStatus";
+import { StaggerReveal, TextSwap } from "../shared/TextTransitions";
+import { AnimatedDisclosure } from "../shared/AnimatedDisclosure";
+import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
+import { WorkflowDialog, GoalBanner, VerificationCard } from "./components/Workflow";
+import type { AgentEvent, ApprovalMode, ApprovalPolicy, ApprovalRequestInfo, AssistantBlock, AssistantTurn, Attachment, ConversationSummary, ErrorBlock, InMessage, MentionItem, Mode, ModelDef, ModelOption, OutMessage, PendingChangeInfo, PersonaInfo, TeamInfo, ThinkingBlock, ToolBlock, Turn, UserTurn } from "./types";
 import { applyEvent, applyToBlocks, closeTrailingThinking, forceSettleOpenWork, parsePartialArgs, renderMentionTokens } from "./types";
 
 function post(msg: OutMessage) {
@@ -53,9 +64,7 @@ export class ErrorBoundary extends React.Component<
   }
 }
 
-// Present-tense status verbs aligned to Cursor's tool display names (`tlA`):
-// Read, Grep, Glob, Shell, Edit, LS, SemanticSearch, Delete, WebSearch, Task,
-// CreatePlan, ReadLints, TodoWrite, AskQuestion.
+// Present-tense labels for tool activity.
 const TOOL_LABELS: Record<string, string> = {
   // Read
   read_file: "Reading file",
@@ -115,6 +124,11 @@ const TOOL_LABELS: Record<string, string> = {
   CallMcpTool: "Running MCP tool",
   FetchMcpResource: "Fetching MCP resource",
   ListMcpResources: "Listing MCP resources",
+  BrowserNavigate: "Opening browser page",
+  BrowserInspect: "Inspecting browser page",
+  BrowserScreenshot: "Taking browser screenshot",
+  BrowserInteract: "Interacting with browser page",
+  BrowserClose: "Closing browser",
 };
 function toolLabel(name: string): string {
   if (name.startsWith("mcp__")) return "Running MCP tool";
@@ -163,9 +177,8 @@ function groupBlocks(blocks: AssistantBlock[]): RenderItem[] {
   return out;
 }
 
-// Split turns into groups, each starting at a user turn (so the sticky "You"
-// header sticks only within its own group). Leading assistant turns (e.g. the
-// greeting) form their own initial group.
+// Each user prompt stays pinned within its own response. Leading assistant
+// turns form a separate group without a pinned prompt.
 function groupTurns(turns: Turn[]): { turn: Turn; index: number }[][] {
   const groups: { turn: Turn; index: number }[][] = [];
   turns.forEach((turn, index) => {
@@ -173,6 +186,10 @@ function groupTurns(turns: Turn[]): { turn: Turn; index: number }[][] {
     else groups[groups.length - 1].push({ turn, index });
   });
   return groups;
+}
+
+function responseText(blocks: AssistantBlock[]): string {
+  return blocks.flatMap(block => block.kind === "text" ? [block.text] : block.kind === "error" ? [block.message] : []).join("\n\n");
 }
 
 // Summarize a finished explore group, e.g. "Explored 3 files · 2 searches".
@@ -226,15 +243,15 @@ function ExploringSection({
       {timed.map((t) => (
         <ToolTimeoutWatch key={`watch-${t.callId}`} block={t} />
       ))}
-      <div className="explore-head" onClick={toggleOpen}>
+      <button type="button" className="explore-head" onClick={toggleOpen} aria-expanded={open}>
         <span className={"tchev" + (open ? " open" : "")}>
-          <Icon name="chevD" size={12} />
+          <Icon name="chevD" size={14} />
         </span>
-        <Icon name="search" size={12} className="explore-icon" />
+        <Icon name="search" size={14} className="explore-icon" />
         <span className="explore-title">{running ? "Exploring" : exploreSummary(tools)}</span>
         {headTimed ? <TimeoutBadge block={headTimed} /> : null}
         {running ? <span className="spinner" /> : <span className="explore-count">{tools.length}</span>}
-      </div>
+      </button>
       {!open && running && <div className="explore-subtitle">{subtitle}</div>}
       {open && (
         <div className="explore-body">
@@ -259,7 +276,7 @@ function ExploringSection({
 // only the trailing block's text actually changes. Without this, every earlier
 // message in the conversation re-parses its markdown on each delta.
 const Markdown = React.memo(function Markdown({ text }: { text: string }) {
-  return <div className="markdown-content" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />;
+  return <div className="markdown-content" dir="auto" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />;
 });
 
 // Render <attached /> tags as the SAME pill as the composer editor:
@@ -280,7 +297,7 @@ function renderMentionHtml(text: string): string {
 
 /** Message text with mention pills; swaps generic SVGs for the IDE's exact
  *  file icons after every render (innerHTML is replaced on re-render). */
-function MentionText({ text }: { text: string }) {
+const MentionText = React.memo(function MentionText({ text }: { text: string }) {
   const ref = React.useRef<HTMLDivElement>(null);
   React.useLayoutEffect(() => {
     ref.current?.querySelectorAll<HTMLElement>(".mention[data-path] .mention-icon").forEach((icon) => {
@@ -293,7 +310,7 @@ function MentionText({ text }: { text: string }) {
       <Markdown text={renderMentionHtml(text)} />
     </div>
   );
-}
+});
 
 /** Run paused at the step limit: Continue button with an "always auto continue" dropdown. */
 function MaxStepsCard({ block, running }: { block: import("./types").AssistantBlock & { kind: "max-steps" }; running: boolean }) {
@@ -368,8 +385,30 @@ function CompactionCard({ block }: { block: import("./types").AssistantBlock & {
 function ThinkingCard({ block }: { block: ThinkingBlock }) {
   const live = !block.endedAt;
   const [open, toggleOpen] = useLiveDisclosure(live);
+  const bodyRef = React.useRef<HTMLDivElement>(null);
+  const followLatest = React.useRef(true);
+  React.useLayoutEffect(() => {
+    if (!open || !live) return;
+    followLatest.current = true;
+    const body = bodyRef.current;
+    if (!body) return;
+    const follow = () => { if (followLatest.current) body.scrollTop = body.scrollHeight; };
+    follow();
+    // Wrapped text and loaded content can change height without a new delta.
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(follow) : undefined;
+    observer?.observe(body);
+    if (body.firstElementChild) observer?.observe(body.firstElementChild);
+    return () => observer?.disconnect();
+  }, [open, live]);
+  React.useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (open && live && followLatest.current && body) body.scrollTop = body.scrollHeight;
+  }, [block.text, open, live]);
   const secs = block.endedAt && block.startedAt ? Math.max(1, Math.round((block.endedAt - block.startedAt) / 1000)) : 0;
-  const title = live ? "Thinking" : secs ? `Thought for ${secs}s` : "Thought";
+  const hours = Math.floor(secs / 3600);
+  const minutes = Math.floor((secs % 3600) / 60);
+  const duration = [hours ? `${hours}h` : "", hours || minutes ? `${minutes}m` : "", `${secs % 60}s`].filter(Boolean).join(" ");
+  const title = live ? "Thinking" : secs ? `Thought for ${duration}` : "Thought";
   return (
     <div className={"thinking-card" + (open ? " open" : "") + (live ? " live" : "")}>
       <div className="thinking-head" onClick={toggleOpen}>
@@ -377,7 +416,10 @@ function ThinkingCard({ block }: { block: ThinkingBlock }) {
         <span className="thinking-title">{title}</span>
         <Icon name={open ? "chevD" : "chevR"} size={12} className="thinking-chev" />
       </div>
-      {open && <div className="thinking-body"><Markdown text={block.text} /></div>}
+      {open && <div className="thinking-body" ref={bodyRef} onScroll={event => {
+        const body = event.currentTarget;
+        followLatest.current = body.scrollHeight - body.scrollTop - body.clientHeight <= 24;
+      }}><Markdown text={block.text} /></div>}
     </div>
   );
 }
@@ -413,22 +455,10 @@ function PersonaSelect({
   return (
     <div className="persona-select">
       <div className="persona-select-label">Persona</div>
-      <div className="persona-cards">
-        {personas.map((p) => (
-          <button
-            key={p.id}
-            className={"persona-card" + (p.id === personaId ? " active" : "")}
-            onClick={() => onSelect(p.id)}
-          >
-            <span className="pc-top">
-              <Icon name="agent" size={14} />
-              <span className="pc-name">{p.name}</span>
-              {p.id === personaId && <Icon name="check" size={13} className="pc-check" />}
-            </span>
-            <span className="pc-desc">{p.description}</span>
-          </button>
-        ))}
-      </div>
+      <Select aria-label="Persona" value={personaId} onChange={event => onSelect(event.target.value)}>
+        {personas.map(persona => <option key={persona.id} value={persona.id} title={persona.description}>{persona.name}</option>)}
+      </Select>
+      <div className="persona-description">{personas.find(persona => persona.id === personaId)?.description}</div>
     </div>
   );
 }
@@ -456,6 +486,40 @@ function parentTaskCallId(turns: Turn[], nestedCallId: string): string | undefin
   return undefined;
 }
 
+const AssistantContent = React.memo(function AssistantContent({ turn, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals }: {
+  turn: AssistantTurn; running: boolean; phase?: string;
+  onImplement?: (path: string) => void; onOpenSubagent?: (callId: string) => void;
+  approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
+}) {
+  const { activity, conclusion } = splitWork(turn, running);
+  const forceOpen = turn.blocks.some(block => block.kind === "tool" && (
+    !!approvals[block.callId] || !!taskApprovals[block.callId]?.length ||
+    block.status === "running" && (block.name === "AskQuestion" || block.name === "ask_question")
+  ));
+  const render = (blocks: AssistantBlock[], live: boolean) => {
+    const items = groupBlocks(blocks);
+    return items.map((block, index) => {
+      if (block.kind === "explore-group") return <ExploringSection key={index} tools={block.tools}
+        live={live && index === items.length - 1} onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvals} />;
+      if (block.kind === "text") return <div className="block-group" key={index}><Markdown text={block.text} /></div>;
+      if (block.kind === "thinking") return <ThinkingCard key={index} block={block} />;
+      if (block.kind === "error") return <div className="block-group" key={index}><ErrorCard block={block} /></div>;
+      if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} /></div>;
+      if (block.kind === "max-steps") return <div className="block-group" key={index}><MaxStepsCard block={block} running={running} /></div>;
+      if (block.kind === "verification") return <VerificationCard key={index} summary={block.summary} />;
+      return <div className="block-group" key={index}>
+        <ToolCard block={block} onImplement={onImplement} onOpenSubagent={onOpenSubagent} awaitingApproval={!!taskApprovals[block.callId]?.length} />
+        {approvals[block.callId] && <ApprovalCard request={approvals[block.callId]} inline />}
+        {taskApprovals[block.callId]?.map(request => <ApprovalCard key={request.requestId} request={request} />)}
+      </div>;
+    });
+  };
+  return <WorkingSection running={running} startedAt={turn.startedAt} endedAt={turn.endedAt} durationMs={turn.durationMs}
+    hasActivity={activity.length > 0} forceOpen={forceOpen} activity={render(activity, running)}
+    conclusion={conclusion.length ? render(conclusion, false) : undefined}
+    status={phase ? <div className="phase-row"><ThinkingStatus text={phase} /></div> : undefined} />;
+});
+
 function SubagentChat({
   block,
   approvals,
@@ -463,6 +527,7 @@ function SubagentChat({
   block: import("./types").ToolBlock;
   approvals?: Record<string, ApprovalRequestInfo>;
 }) {
+  const parentRunning = React.useContext(TaskActivityContext);
   const subDone = block.subStatus === "finished" || block.subStatus === "cancelled" || block.subStatus === "error";
   const running = !subDone && (block.status === "running" || !!block.subStatus || (block.subBlocks?.length ?? 0) > 0);
   const sub = block.subBlocks ?? [];
@@ -473,8 +538,9 @@ function SubagentChat({
   const pinnedApprovals = React.useMemo(() => approvalsForSubagent(block, approvals), [block, approvals]);
 
   return (
-    <div className="subagent-view">
-      <div className="msg user subagent-task-msg">
+    <div className="subagent-view" data-running={running}>
+      <TaskActivityContext.Provider value={parentRunning && running}>
+      <div className="msg user subagent-task-msg message-shell">
         <div className="role">
           <Icon name="task" /> Task
           {subName ? <span className="sub-chip sub-type" title={`Subagent: ${subName}`}>{subName}</span> : null}
@@ -491,8 +557,9 @@ function SubagentChat({
         ) : (
           <span className="subagent-prompt-empty">(no task prompt)</span>
         )}
+        <MessageActions variant="user" text={taskPrompt} />
       </div>
-      <div className="msg assistant">
+      <div className="msg assistant message-shell">
         <div className="role"><Icon name="bot" /> Subagent</div>
         <div className="bubble">
           {sub.length === 0 ? (
@@ -511,13 +578,15 @@ function SubagentChat({
                 <div className="block-group" key={bi}><CompactionCard block={b} /></div>
               ) : b.kind === "max-steps" ? (
                 <div className="block-group" key={bi}><MaxStepsCard block={b} running={false} /></div>
+              ) : b.kind === "verification" ? (
+                <VerificationCard key={bi} summary={b.summary} />
               ) : (
                 <div className="block-group" key={bi}><ToolCard block={b} /></div>
               )
             )
           )}
           {running && (
-            <div className="phase-row"><span className="phase-shimmer">Working</span></div>
+            <div className="phase-row"><ThinkingStatus text="Working" /></div>
           )}
           {pinnedApprovals.length > 0 && (
             <div className="subagent-approvals">
@@ -533,7 +602,9 @@ function SubagentChat({
             </div>
           )}
         </div>
+        <MessageActions variant="assistant" text={[responseText(sub), !running ? block.result : ""].filter(Boolean).join("\n\n")} />
       </div>
+      </TaskActivityContext.Provider>
     </div>
   );
 }
@@ -545,6 +616,8 @@ interface ChatSession {
   /** Tokens used in the last request (context consumption). */
   usedTokens?: number;
 }
+const NO_APPROVALS: ApprovalRequestInfo[] = [];
+const NO_TASK_APPROVALS: Record<string, ApprovalRequestInfo[]> = {};
 const ACTION_LABEL: Record<ApprovalRequestInfo["actionType"], string> = {
   shell: "Terminal command",
   edits: "File edit",
@@ -660,7 +733,13 @@ export function App() {
   const [selectedModel, setSelectedModel] = React.useState("");
   const [conversations, setConversations] = React.useState<ConversationSummary[]>([]);
   const [activeId, setActiveId] = React.useState<string | undefined>(undefined);
+  const [workspaceRoot, setWorkspaceRoot] = React.useState<string>();
+  const [approvalPolicy, setApprovalPolicy] = React.useState<ApprovalPolicy>();
   const [openTabs, setOpenTabs] = React.useState<string[]>([]); // IDs of tabs visible in tab bar
+  const workspaceReady = React.useRef(false);
+  const [goals, setGoals] = React.useState<Record<string, ConversationGoal>>({});
+  const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
+  const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
   const draftsRef = React.useRef<Map<string, ComposerDraft>>(new Map());
   const [, setDraftTick] = React.useReducer((n: number) => n + 1, 0);
@@ -675,6 +754,7 @@ export function App() {
     const empty = !d.text.trim() && d.attachments.length === 0;
     if (empty) draftsRef.current.delete(id);
     else draftsRef.current.set(id, d);
+    if (workspaceReady.current) post({ type: "updateChatWorkspace", state: { drafts: Object.fromEntries(draftsRef.current) } });
     // Keep a New Chat tab pinned while its composer has content.
     if (id === "") {
       setOpenTabs((t) => {
@@ -685,6 +765,9 @@ export function App() {
       setDraftTick();
     }
   }, []);
+  React.useEffect(() => {
+    if (workspaceReady.current) post({ type: "updateChatWorkspace", state: { openTabs } });
+  }, [openTabs]);
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [moreOpen, setMoreOpen] = React.useState(false);
   const moreRef = React.useRef<HTMLDivElement>(null);
@@ -701,7 +784,8 @@ export function App() {
   const [hasProviders, setHasProviders] = React.useState(true);
   const [teams, setTeams] = React.useState<TeamInfo[]>([]);
   const [activeTeamIds, setActiveTeamIds] = React.useState<string[]>([]);
-  const [uiPrefs, setUiPrefs] = React.useState<{ chatTextSize: string; submitWithCtrlEnter: boolean; maxTabCount: number; completionSound: boolean; perTabDrafts: boolean }>({ chatTextSize: "default", submitWithCtrlEnter: false, maxTabCount: 0, completionSound: false, perTabDrafts: false });
+  const [uiPrefs, setUiPrefs] = React.useState<{ chatTextSize: string; submitWithCtrlEnter: boolean; maxTabCount: number; completionSound: boolean; perTabDrafts: boolean; motion?: MotionPreference }>({ chatTextSize: "default", submitWithCtrlEnter: false, maxTabCount: 0, completionSound: false, perTabDrafts: false, motion: "full" });
+  React.useEffect(() => { setMotionPreference(uiPrefs.motion); }, [uiPrefs.motion]);
   const uiPrefsRef = React.useRef(uiPrefs);
   React.useEffect(() => { uiPrefsRef.current = uiPrefs; }, [uiPrefs]);
   const draftKey = uiPrefs.perTabDrafts ? (activeId ?? "") : SHARED_DRAFT;
@@ -709,9 +793,15 @@ export function App() {
   // Pending in-chat approval requests, keyed by conversation id.
   const [approvals, setApprovals] = React.useState<Record<string, ApprovalRequestInfo[]>>({});
   const [reviewOpen, setReviewOpen] = React.useState(false);
+  const reviewDetailsId = React.useId();
+  const changeTotals = pendingChanges.reduce((total, change) => ({
+    added: total.added + (change.added ?? 0), removed: total.removed + (change.removed ?? 0),
+  }), { added: 0, removed: 0 });
   // Editing an earlier user message: index of that turn. The edit composer
   // shares the global model/mode selection (one selection for all composers).
   const [editingIndex, setEditingIndex] = React.useState<number | null>(null);
+  const [imagePreview, setImagePreview] = React.useState<{ images: Attachment[]; activeId: string } | null>(null);
+  React.useEffect(() => { setImagePreview(null); }, [activeId]);
   // Pending edit awaiting the revert-confirm dialog. `restore` = return the
   // message to the bottom composer instead of resending it.
   const [revertPrompt, setRevertPrompt] = React.useState<{ index: number; text: string; attachments: Attachment[]; restore?: boolean } | null>(null);
@@ -760,6 +850,14 @@ export function App() {
   const turns = active.turns;
   const isRunning = active.running;
   const status = active.status;
+  // The host supplies a fresh transcript whenever a conversation is selected.
+  // Keep only the visible chat and live background runs instead of retaining
+  // every transcript (including attachments and tool output) ever opened.
+  React.useEffect(() => {
+    for (const [id, session] of sessionsRef.current) {
+      if (id !== (activeId ?? "") && !session.running) sessionsRef.current.delete(id);
+    }
+  });
   // Whether the view is pinned to the bottom. Starts true; flips off ONLY on an
   // explicit user gesture scrolling up (wheel/touch/scrollbar drag), back on
   // when the user returns to the bottom (gesture or the jump button). Mirrored
@@ -778,13 +876,9 @@ export function App() {
   const selfScrollRef = React.useRef(false);
   // Detects conversation switches so we can reset to the bottom on switch.
   const prevActiveIdRef = React.useRef<string | undefined>(activeId);
-  // Per-conversation queue of messages typed while a run was in flight. Sent
-  // automatically (FIFO) when the current run settles.
-  type QueuedMsg = { text: string; attachments?: Attachment[]; model?: string; mode?: Mode };
-  const queueRef = React.useRef<Map<string, QueuedMsg[]>>(new Map());
-  // Conversations whose next settle must NOT auto-flush the queue (a "send now"
-  // replaced the run: the abort's settle event belongs to the replaced run).
-  const suppressFlushRef = React.useRef<Set<string>>(new Set());
+  // Host-owned durable queue. UI snapshots never trigger execution.
+  const queueRef = React.useRef<Map<string, (QueuedMessage & { steering?: boolean; optimisticSteering?: boolean })[]>>(new Map());
+  const pendingSteeringRef = React.useRef(new Map<string, Map<string, QueuedMessage>>());
   // The last group gets a min-height = viewport so it can be pinned to the top
   // without any real spacer element (purely visual "virtual" space that grows no
   // extra scrollable height beyond one viewport). Set imperatively so it tracks
@@ -816,7 +910,9 @@ export function App() {
 
   React.useEffect(() => {
     window.addEventListener("resize", sizeSpacer);
-    return () => window.removeEventListener("resize", sizeSpacer);
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(sizeSpacer);
+    if (scrollRef.current) observer?.observe(scrollRef.current);
+    return () => { window.removeEventListener("resize", sizeSpacer); observer?.disconnect(); };
   }, [sizeSpacer]);
 
   // Stick-to-bottom may ONLY be re-armed by an explicit user gesture that lands
@@ -844,14 +940,25 @@ export function App() {
     const onDown = () => { draggingRef.current = true; }; // possible scrollbar drag
     const onUp = () => { draggingRef.current = false; };
     const onTouch = () => { userScrolledRef.current = true; evalStick(); };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !(event.target instanceof Element)) return;
+      if (event.target.closest('input, textarea, select, [contenteditable="true"], [role="combobox"]')) return;
+      if (event.key === " " && event.target.closest('button, [role="button"], summary')) return;
+      if (!["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) return;
+      userScrolledRef.current = true;
+      if (["ArrowUp", "PageUp", "Home"].includes(event.key) || event.key === " " && event.shiftKey) setStick(false);
+      else evalStick();
+    };
     el.addEventListener("wheel", onWheel, { passive: true });
     el.addEventListener("touchmove", onTouch, { passive: true });
     el.addEventListener("pointerdown", onDown);
+    el.addEventListener("keydown", onKey);
     window.addEventListener("pointerup", onUp);
     return () => {
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("touchmove", onTouch);
       el.removeEventListener("pointerdown", onDown);
+      el.removeEventListener("keydown", onKey);
       window.removeEventListener("pointerup", onUp);
     };
   }, [setStick]);
@@ -943,8 +1050,7 @@ export function App() {
       // the pin agree. Only a manual scroll-up turns follow off.
       setStick(true);
       userScrolledRef.current = false;
-      const users = el.querySelectorAll<HTMLElement>(".msg.user");
-      const last = users[users.length - 1];
+      const last = el.querySelector<HTMLElement>(".chat-turn-group:last-child");
       if (last) {
         const top = el.scrollTop + (last.getBoundingClientRect().top - el.getBoundingClientRect().top);
         selfScrollRef.current = true;
@@ -991,7 +1097,8 @@ export function App() {
       const live = set.has(id);
       if (live && !s.running) {
         s.running = true;
-        if (!s.status.text) s.status = { text: "Working" };
+        s.turns = applyEvent(s.turns, { type: "run-status", status: "running" });
+        if (!s.status.text) s.status = { text: "Thinking" };
       } else if (!live && s.running) {
         // Host no longer has this run (stop, crash, IDE reopen) — clear Working.
         s.running = false;
@@ -1005,7 +1112,8 @@ export function App() {
   const seedSession = (id: string | undefined, persisted: Turn[], usedTokens?: number, running = false) => {
     if (!id) return;
     // Stale "running" tools left on disk after IDE close → settle them.
-    const clean = restoreTurns(persisted, running);
+    const restored = restoreTurns(persisted, running);
+    const clean = running ? applyEvent(restored, { type: "run-status", status: "running" }) : restored;
     const s = sessionsRef.current.get(id);
     if (!s) {
       sessionsRef.current.set(id, { turns: clean, running, status: { text: running ? "Working" : "" }, usedTokens });
@@ -1031,6 +1139,8 @@ export function App() {
       const msg = event.data;
       switch (msg.type) {
         case "initialState":
+          setWorkspaceRoot(msg.workspaceRoot);
+          setApprovalPolicy(msg.approvalPolicy);
           setMode(msg.mode);
           setSelectedModel(msg.selectedModel || "");
           seedSession(msg.activeId, msg.turns || [], msg.usedTokens, msg.runningConvIds?.includes(msg.activeId ?? "") ?? false);
@@ -1042,13 +1152,72 @@ export function App() {
           if (msg.teams) setTeams(msg.teams);
           if (msg.activeTeamIds) setActiveTeamIds(msg.activeTeamIds);
           if (msg.uiPrefs) setUiPrefs(msg.uiPrefs);
-          if (msg.activeId) setOpenTabs((t) => t.includes(msg.activeId!) ? t : [...t, msg.activeId!]);
+          if (msg.workspaceState) {
+            draftsRef.current = new Map(Object.entries(msg.workspaceState.drafts));
+            setOpenTabs([...new Set([...msg.workspaceState.openTabs, ...msg.activeId ? [msg.activeId] : []])]);
+            setDraftTick();
+          } else if (msg.activeId) setOpenTabs((t) => t.includes(msg.activeId!) ? t : [...t, msg.activeId!]);
+          workspaceReady.current = true;
           force();
           break;
+        case "workflowState": {
+          const next = new Map<string, (QueuedMessage & { steering?: boolean; optimisticSteering?: boolean })[]>();
+          const ids = new Set([...Object.keys(msg.queues), ...Object.keys(msg.steeringQueues ?? {}), ...pendingSteeringRef.current.keys()]);
+          for (const id of ids) {
+            const rows = [...msg.queues[id] ?? []] as (QueuedMessage & { steering?: boolean; optimisticSteering?: boolean })[];
+            const previous = queueRef.current.get(id) ?? [];
+            const mailbox = msg.steeringQueues?.[id] ?? [];
+            const waiting = new Map((pendingSteeringRef.current.get(id) ?? new Map()).entries());
+            for (const item of mailbox) waiting.set(item.id, item);
+            for (const item of waiting.values()) {
+              if (rows.some(row => row.id === item.id)) continue;
+              const index = previous.findIndex(row => row.id === item.id);
+              rows.splice(index < 0 ? rows.length : Math.min(index, rows.length), 0, {
+                ...item, steering: mailbox.some(entry => entry.id === item.id),
+                optimisticSteering: !mailbox.some(entry => entry.id === item.id),
+              });
+            }
+            next.set(id, rows);
+          }
+          queueRef.current = next;
+          setGoals(msg.goals);
+          force();
+          break;
+        }
+        case "queueSteeringResult":
+          pendingSteeringRef.current.get(msg.convId)?.delete(msg.requestId);
+          if (!msg.accepted) queueRef.current.set(msg.convId, (queueRef.current.get(msg.convId) ?? [])
+            .filter(item => item.id !== msg.requestId || !item.optimisticSteering));
+          force();
+          break;
+        case "conversationSearchResults":
+          setHistoryResults({ requestId: msg.requestId, list: msg.list });
+          break;
+        case "requestAccepted":
+          if (msg.created) {
+            const pending = sessionsRef.current.get("");
+            if (pending) { sessionsRef.current.set(msg.convId, pending); sessionsRef.current.delete(""); }
+            activeIdRef.current = msg.convId;
+            setActiveId(msg.convId);
+            setOpenTabs((tabs) => [...new Set([...tabs.filter((id) => id !== ""), msg.convId])]);
+          }
+          break;
+        case "steeringAccepted":
+          sessionFor(msg.convId).status = { text: "Update will apply at the next agent step" };
+          force();
+          break;
+        case "queueDraft": {
+          const key = uiPrefsRef.current.perTabDrafts ? msg.convId : SHARED_DRAFT;
+          draftsRef.current.set(key, msg.draft);
+          if (activeIdRef.current === msg.convId) setDraft(msg.draft);
+          setDraftTick();
+          break;
+        }
         case "modelSelected":
           setSelectedModel(msg.model || ""); // auto hidden for now
           break;
         case "configState":
+          if (msg.approvalPolicy) setApprovalPolicy(msg.approvalPolicy);
           setPersonas(msg.personas || []);
           setHasProviders(!!msg.hasProviders);
           if (msg.teams) setTeams(msg.teams);
@@ -1075,6 +1244,7 @@ export function App() {
           markRunning(msg.runningConvIds);
           break;
         case "loadConversation":
+          setWorkspaceRoot(msg.workspaceRoot);
           if (!msg.activeId) sessionsRef.current.set("", { turns: [], running: false, status: { text: "" } });
           else seedSession(msg.activeId, msg.turns || [], msg.usedTokens, msg.running === true);
           setActiveId(msg.activeId);
@@ -1112,13 +1282,15 @@ export function App() {
           const s = sessionFor(msg.convId);
           if (msg.turns) s.turns = msg.turns;
           s.running = true;
-          s.status = { text: "Generating…" };
+          s.turns = applyEvent(s.turns, { type: "run-status", status: "running" });
+          s.status = { text: "Thinking" };
           force();
           break;
         }
         case "error": {
           const s = sessionFor(msg.convId ?? activeIdRef.current);
           s.running = false;
+          s.turns = applyEvent(s.turns, { type: "run-status", status: "error" });
           s.status = { text: "Error: " + msg.message, error: true };
           force();
           break;
@@ -1144,6 +1316,7 @@ export function App() {
           const s = sessionFor(msg.convId);
           const settled = ev.type === "run-status" && (ev.status === "finished" || ev.status === "cancelled" || ev.status === "error");
           if (ev.type === "run-status") {
+            s.turns = applyEvent(s.turns, ev);
             s.status = { text: ev.status === "running" ? "Planning next moves" : ev.status === "finished" ? "" : ev.status };
             if (settled) {
               const wasRunning = s.running;
@@ -1155,14 +1328,13 @@ export function App() {
                 ev.status === "error" ? "error" : "cancelled",
               );
               post({ type: "persistTurns", convId: msg.convId, turns: s.turns });
-              // Auto-start the next queued message once (duplicate settle from host finally must not double-flush).
-              if (wasRunning) {
-                if (suppressFlushRef.current.has(msg.convId)) suppressFlushRef.current.delete(msg.convId);
-                else window.setTimeout(() => flushQueueRef.current(msg.convId), 0);
-              }
             }
           } else {
             s.turns = applyEvent(s.turns, ev);
+            if (ev.type === "user-steering" && ev.requestId) {
+              pendingSteeringRef.current.get(msg.convId)?.delete(ev.requestId);
+              queueRef.current.set(msg.convId, (queueRef.current.get(msg.convId) ?? []).filter(item => item.id !== ev.requestId));
+            }
             // Throttle-persist live turns so a pane move / remount (which destroys
             // the webview without a reliable pagehide) restores the in-flight chat.
             schedulePersist(msg.convId, s);
@@ -1184,11 +1356,15 @@ export function App() {
               post({ type: "setMode", mode: ev.mode });
             }
           }
+          // Background runs update their session without rerendering the visible
+          // transcript on every token. Settling still updates the tab indicator.
+          if (msg.convId !== activeIdRef.current && !settled) break;
           // Immediate paint on settle / tool complete; coalesce stream deltas.
           if (
             settled ||
             ev.type === "tool-call-completed" ||
             ev.type === "tool-call-started" ||
+            ev.type === "user-steering" ||
             ev.type === "error" ||
             ev.type === "run-result"
           ) {
@@ -1215,6 +1391,8 @@ export function App() {
     return () => {
       if (raf) cancelAnimationFrame(raf);
       flush();
+      for (const timer of persistTimers.current.values()) window.clearTimeout(timer);
+      persistTimers.current.clear();
       window.removeEventListener("message", handler);
       window.removeEventListener("pagehide", flush);
       window.removeEventListener("beforeunload", flush);
@@ -1223,72 +1401,45 @@ export function App() {
 
   const sendNow = React.useCallback((convId: string | undefined, text: string, attachments?: Attachment[], model?: string, mode2?: Mode) => {
     const s = sessionFor(convId);
-    s.turns = [...s.turns, { role: "user", text, attachments, model, mode: mode2 }];
+    if (!s.running && !(queueRef.current.get(convId ?? "") ?? []).some(item => item.status !== "running")) {
+      s.turns = [...s.turns, { role: "user", text, attachments, model, mode: mode2 }];
+      s.running = true;
+      s.turns = applyEvent(s.turns, { type: "run-status", status: "running" });
+    }
     pinTopRef.current = true;
     force();
-    s.running = true;
-    post(sendMessageIntent(convId, text, attachments, model, mode2));
+    post({ ...sendMessageIntent(convId, text, attachments, model, mode2), requestId: crypto.randomUUID() });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Send the next queued message for a conversation (FIFO). Returns true if sent.
-  const flushQueue = React.useCallback((convId: string): boolean => {
-    const q = queueRef.current.get(convId);
-    if (!q?.length) return false;
-    const [next, ...rest] = q;
-    if (rest.length) queueRef.current.set(convId, rest);
-    else queueRef.current.delete(convId);
-    sendNow(convId || undefined, next.text, next.attachments, next.model, next.mode);
-    return true;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const flushQueueRef = React.useRef(flushQueue);
-  flushQueueRef.current = flushQueue;
 
   const onSubmit = (text: string, attachments: Attachment[]) => {
-    const s = sessionFor(activeIdRef.current);
-    const id = activeIdRef.current ?? "";
-    // A run is in flight, or other messages are already waiting (e.g. saving an
-    // edited queue item): append to the END of the queue — never jump ahead.
-    if (s.running || (queueRef.current.get(id)?.length ?? 0) > 0) {
-      const q = queueRef.current.get(id) ?? [];
-      queueRef.current.set(id, [...q, { text, attachments: attachments.length ? attachments : undefined, model: selectedModel, mode }]);
-      force();
-      if (!s.running) window.setTimeout(() => flushQueueRef.current(id), 0);
-      return;
-    }
     sendNow(activeIdRef.current, text, attachments.length ? attachments : undefined, selectedModel, mode);
   };
 
   // Queue item actions.
-  const queued = queueRef.current.get(activeId ?? "") ?? [];
+  const queued = (queueRef.current.get(activeId ?? "") ?? []).filter((item) => item.status !== "running");
+  const isQueuedSteering = (item: typeof queued[number]) => !!item.steering || !!pendingSteeringRef.current.get(activeId ?? "")?.has(item.id);
   const removeQueued = (i: number) => {
-    const id = activeId ?? "";
-    const q = [...(queueRef.current.get(id) ?? [])];
-    q.splice(i, 1);
-    if (q.length) queueRef.current.set(id, q);
-    else queueRef.current.delete(id);
-    force();
+    const item = queued[i];
+    if (activeId && item && !isQueuedSteering(item)) post({ type: "queueAction", convId: activeId, id: item.id, action: "remove" });
   };
   const editQueued = (i: number) => {
-    const q = queueRef.current.get(activeId ?? "") ?? [];
-    const item = q[i];
-    if (!item) return;
-    removeQueued(i);
-    setDraft({ text: item.text, attachments: item.attachments });
+    const item = queued[i];
+    if (activeId && item && !isQueuedSteering(item)) post({ type: "queueAction", convId: activeId, id: item.id, action: "edit" });
   };
-  // Promote a queued item to run immediately. The host aborts any in-flight run
-  // for this conversation and starts the new one; suppress the settle-time
-  // auto-flush so the cancelled run doesn't also fire the next queued item.
   const runQueuedNow = (i: number) => {
-    const id = activeId ?? "";
-    const q = [...(queueRef.current.get(id) ?? [])];
-    const [item] = q.splice(i, 1);
-    if (!item) return;
-    if (q.length) queueRef.current.set(id, q);
-    else queueRef.current.delete(id);
-    if (sessionFor(id).running) suppressFlushRef.current.add(id);
-    sendNow(id || undefined, item.text, item.attachments, item.model, item.mode);
+    const item = queued[i];
+    if (activeId && item && !isQueuedSteering(item)) post({ type: "queueAction", convId: activeId, id: item.id, action: "run" });
+  };
+  const steerQueued = (item: QueuedMessage) => {
+    if (activeId && isRunning && item.status === "queued" && item.text.trim() && !item.attachments?.length) {
+      const pending = pendingSteeringRef.current.get(activeId) ?? new Map<string, QueuedMessage>();
+      if (pending.has(item.id) || queueRef.current.get(activeId)?.find(row => row.id === item.id)?.steering) return;
+      pending.set(item.id, item);
+      pendingSteeringRef.current.set(activeId, pending);
+      force();
+      post({ type: "queueAction", convId: activeId, id: item.id, action: "steer" });
+    }
   };
 
   // Clicking outside the inline edit composer cancels the edit.
@@ -1303,12 +1454,14 @@ export function App() {
   }, [editingIndex]);
 
   const startEdit = (index: number, _turn: UserTurn) => {
+    if (isRunning) return;
     setEditingIndex(index);
   };
 
   // Resend an edited earlier message. If there are file changes below it, ask the
   // user whether to revert them first; otherwise resend straight away.
   const requestEditSubmit = (index: number, text: string, attachments: Attachment[]) => {
+    if (isRunning) return;
     if (pendingChanges.length > 0) {
       setRevertPrompt({ index, text, attachments });
     } else {
@@ -1319,6 +1472,7 @@ export function App() {
   // Revert to a message: drop it + everything after, put its text back into the
   // bottom composer as an unsent draft.
   const requestRevert = (index: number, turn: UserTurn) => {
+    if (isRunning) return;
     if (pendingChanges.length > 0) {
       setRevertPrompt({ index, text: turn.text, attachments: turn.attachments ?? [], restore: true });
     } else {
@@ -1328,6 +1482,7 @@ export function App() {
 
   const restoreMessage = (index: number, text: string, attachments: Attachment[], revertFiles: boolean) => {
     const s = sessionFor(activeIdRef.current);
+    if (s.running) return;
     s.turns = s.turns.slice(0, index);
     setDraft({ text, attachments: attachments.length ? attachments : undefined });
     setRevertPrompt(null);
@@ -1338,13 +1493,27 @@ export function App() {
 
   const commitEdit = (index: number, text: string, attachments: Attachment[], revertFiles: boolean) => {
     const s = sessionFor(activeIdRef.current);
+    if (s.running) return;
     // Drop this turn and everything after it, then append the edited message.
     s.turns = [...s.turns.slice(0, index), { role: "user", text, attachments: attachments.length ? attachments : undefined, model: selectedModel, mode }];
+    s.running = true;
+    s.turns = applyEvent(s.turns, { type: "run-status", status: "running" });
+    s.status = { text: "Starting" };
     setEditingIndex(null);
     setRevertPrompt(null);
     pinTopRef.current = true;
     force();
     post({ type: "sendMessage", convId: activeIdRef.current ?? null, text, attachments: attachments.length ? attachments : undefined, fromIndex: index, model: selectedModel, mode, revertFiles });
+  };
+
+  const retryResponse = (index: number) => {
+    for (let preceding = index - 1; preceding >= 0; preceding--) {
+      const turn = turns[preceding];
+      if (turn.role === "user") {
+        requestEditSubmit(preceding, turn.text, turn.attachments ?? []);
+        return;
+      }
+    }
   };
 
   // Switch to agent mode and kick off implementation of a written plan.
@@ -1379,7 +1548,7 @@ export function App() {
   // Pending approvals for the active conversation, keyed by tool callId so
   // the prompt renders directly on its tool card. Requests without a callId
   // (e.g. beforeSubmit) fall back to the bottom stack.
-  const activeApprovals = approvals[activeId ?? ""] || [];
+  const activeApprovals = approvals[activeId ?? ""] || NO_APPROVALS;
   const approvalsByCall = React.useMemo(() => {
     const m: Record<string, ApprovalRequestInfo> = {};
     for (const r of activeApprovals) if (r.callId) m[r.callId] = r;
@@ -1387,6 +1556,7 @@ export function App() {
   }, [activeApprovals]);
   // Nested tool approvals → parent Task callId (shown on the subagent card).
   const approvalsByTask = React.useMemo(() => {
+    if (!activeApprovals.length) return NO_TASK_APPROVALS;
     const m: Record<string, ApprovalRequestInfo[]> = {};
     for (const r of activeApprovals) {
       if (!r.callId) continue;
@@ -1505,6 +1675,12 @@ export function App() {
             </button>
             {moreOpen && (
               <div className="more-menu">
+                <button title="Create an isolated checkout from committed HEAD. Uncommitted changes stay in this checkout." onClick={() => { setMoreOpen(false); post({ type: "createWorktreeConversation" }); }}><Icon name="gitBranch" size={13} /> New worktree chat</button>
+                <button onClick={() => { setMoreOpen(false); setWorkflowDialog("review"); }}><Icon name="code" size={13} /> Review code</button>
+                <button disabled={!!activeId && !!goals[activeId] && goals[activeId].status !== "complete"} onClick={() => { setMoreOpen(false); setWorkflowDialog("goal"); }}><Icon name="list" size={13} /> Start a goal</button>
+                <button disabled={!isRunning || !activeId} onClick={() => { setMoreOpen(false); setWorkflowDialog("steer"); }}><Icon name="edit" size={13} /> Update active task</button>
+                <button disabled={!activeId || isRunning} onClick={() => { setMoreOpen(false); if (activeId) post({ type: "forkConversation", id: activeId }); }}><Icon name="plus" size={13} /> Fork conversation</button>
+                <button disabled={!activeId || isRunning} onClick={() => { setMoreOpen(false); if (activeId) post({ type: "archiveConversation", id: activeId, archived: true }); }}><Icon name="history" size={13} /> Archive conversation</button>
                 <button onClick={() => { setMoreOpen(false); post({ type: "openBrowserTab" }); }}>
                   <Icon name="globe" size={13} /> Open Browser Tab
                 </button>
@@ -1516,7 +1692,7 @@ export function App() {
                 </button>
                 <button
                   disabled={openTabs.length === 0}
-                  onClick={() => { setMoreOpen(false); draftsRef.current.clear(); setOpenTabs([]); post({ type: "newConversation" }); }}
+                  onClick={() => { setMoreOpen(false); draftsRef.current.clear(); post({ type: "updateChatWorkspace", state: { drafts: {} } }); setOpenTabs([]); post({ type: "newConversation" }); }}
                 >
                   <Icon name="close" size={13} /> Close All Tabs
                 </button>
@@ -1532,31 +1708,53 @@ export function App() {
           activeId={activeId}
           onSelect={(id) => post({ type: "selectConversation", id })}
           onDelete={(id) => post({ type: "deleteConversation", id })}
+          onArchive={(id, archived) => post({ type: "archiveConversation", id, archived })}
+          onFork={(id) => post({ type: "forkConversation", id })}
+          onSearch={(query, archived, requestId) => post({ type: "searchConversations", query, archived, requestId })}
+          results={historyResults}
           onClose={() => setHistoryOpen(false)}
         />
       )}
+      {activeId && goals[activeId] && <GoalBanner goal={goals[activeId]} onStatus={(status) => post({ type: "setGoalStatus", convId: activeId, status })} />}
+      {workspaceRoot && <div className="worktree-banner" title={workspaceRoot}><Icon name="gitBranch" size={12} /><span>Isolated worktree · {workspaceRoot.split(/[\\/]/).pop()}</span><button className="btn-ghost" onClick={() => post({ type: "openMention", kind: "folder", path: workspaceRoot })}>Show folder</button></div>}
+      {workflowDialog && <WorkflowDialog kind={workflowDialog} onClose={() => setWorkflowDialog(null)}
+        onGoal={(objective, tokenBudget) => post({ type: "setGoal", convId: activeId, objective, tokenBudget })}
+        onReview={(target) => post({ type: "startReview", target })}
+        onSteer={(text) => { if (activeId) post({ type: "steerMessage", convId: activeId, text }); }} />}
 
-      <div className="chat-messages" ref={scrollRef} onScroll={onScroll}>
+      <div className={"chat-messages" + (!subBlock && hasProviders && turns.length === 0 ? " is-empty" : "")} data-running={isRunning} ref={scrollRef} onScroll={onScroll} tabIndex={0} role="region" aria-label="Conversation">
+        <TaskActivityContext.Provider value={isRunning}>
         {subBlock ? (
           <SubagentChat block={subBlock} approvals={approvalsByCall} />
         ) : !hasProviders ? (
           <div className="setup-screen">
             <img className="app-logo" src={document.getElementById("root")?.dataset.icon} alt="OpenCursor" />
-            <div className="setup-title">Set up a provider to start</div>
-            <div className="setup-desc">OpenCursor needs an AI provider before you can chat.</div>
-            <ol className="setup-steps">
-              <li>Open <b>Settings → Providers</b>.</li>
-              <li>Add a provider (OpenAI, Anthropic, OpenRouter, Ollama or llama.cpp).</li>
-              <li>Enter its base URL and API key, then set it active.</li>
-            </ol>
+            <StaggerReveal>
+              <h1 className="setup-title t-stagger-line">Build with OpenCursor</h1>
+              <div className="setup-desc t-stagger-line t-stagger-line--2">Connect your account, add an API key, or run a local model to start building.</div>
+            </StaggerReveal>
             <button className="setup-btn" onClick={() => post({ type: "openSettings", section: "providers" })}>
-              <Icon name="settings" size={14} /> Add a provider
+              Get started <Icon name="chevR" size={14} />
             </button>
           </div>
         ) : turns.length === 0 ? (
           <div className="chat-empty">
             <img className="app-logo" src={document.getElementById("root")?.dataset.icon} alt="OpenCursor" />
-            <div className="empty-hint">Ask the agent to build or explain something.</div>
+            <StaggerReveal>
+              <h1 className="empty-title t-stagger-line">Let’s build something</h1>
+              <div className="empty-hint t-stagger-line t-stagger-line--2">Turn an idea into code.</div>
+            </StaggerReveal>
+            <div className="empty-actions">
+              {([
+                { icon: "code", label: "Explore code", text: "Give me an overview of this codebase and explain how the main parts fit together." },
+                { icon: "tools", label: "Find a bug", text: "Look through this codebase for a bug and explain how to fix it." },
+                { icon: "list", label: "Make a plan", text: "Help me plan a change to this project. First, ask me what I want to build." },
+              ] as const).map((suggestion) => (
+                <button className="empty-action" key={suggestion.label} onClick={() => setDraft({ text: suggestion.text })}>
+                  <Icon name={suggestion.icon} size={14} /> {suggestion.label}
+                </button>
+              ))}
+            </div>
             <PersonaSelect
               personas={personas}
               personaId={personaId}
@@ -1567,9 +1765,7 @@ export function App() {
             />
           </div>
         ) : (
-          // Group each user turn with the assistant turns that follow it, so the
-          // sticky "You" header only sticks within its own group and the next
-          // user message pushes it up on scroll (instead of overlapping).
+          // Keep each user message and its assistant response in one scroll group.
           groupTurns(turns).map((group, gi, all) => (
             // Pin-to-top space only on the last group when it isn't the first one.
             <div className="chat-turn-group" key={gi} ref={gi === all.length - 1 && all.length > 1 ? lastGroupRef : undefined}>
@@ -1613,25 +1809,33 @@ export function App() {
                       />
                     </div>
                   ) : (
-                    <div className="msg user" key={index}>
-                      <button
-                        className="msg-revert-btn"
-                        title="Revert to here — returns this message to the composer"
-                        onClick={(e) => { e.stopPropagation(); requestRevert(index, turn); }}
-                      >
-                        <Icon name="reset" size={12} />
-                      </button>
+                    <div className="msg user message-shell" key={index} data-turn-index={index}>
                       <div
                         className="bubble"
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(event) => {
+                          if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+                            event.preventDefault(); event.currentTarget.click();
+                          }
+                        }}
                         onClick={() => startEdit(index, turn)}
-                        title="Click to edit & resend"
+                        aria-disabled={isRunning || undefined}
+                        title={isRunning ? "User message" : "Click to edit & resend"}
                         ref={(el) => { if (el) el.classList.toggle("clamped", el.scrollHeight > el.clientHeight + 1); }}
                       >
                         {turn.attachments && turn.attachments.length > 0 && (
                           <div className="msg-attachments">
                             {turn.attachments.map((a) =>
                               a.kind === "image" ? (
-                                <img key={a.id} className="msg-attach-img" src={a.data} alt={a.name} title={a.name} />
+                                <button key={a.id} type="button" className="image-attachment-trigger"
+                                  aria-label={`Preview image ${a.name}`} aria-haspopup="dialog" title={a.name}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setImagePreview({ images: turn.attachments!.filter(attachment => attachment.kind === "image"), activeId: a.id });
+                                  }}>
+                                  <img className="msg-attach-img" src={a.data} alt="" />
+                                </button>
                               ) : (
                                 <span key={a.id} className="msg-attach-file">
                                   <Icon name="file" /> {a.name}
@@ -1642,65 +1846,32 @@ export function App() {
                         )}
                         {turn.text && <MentionText text={turn.text} />}
                       </div>
+                      <MessageActions variant="user" text={turn.text} disabled={isRunning}
+                        onEdit={() => startEdit(index, turn)}
+                        onRetry={() => requestEditSubmit(index, turn.text, turn.attachments ?? [])}
+                        onRevert={() => requestRevert(index, turn)} />
                     </div>
                   )
                 ) : (
-                  <div className="msg assistant" key={index}>
+                  <div className="msg assistant message-shell" key={index} data-turn-index={index}>
                     <div className="role">
                       <Icon name="bot" /> Agent
                     </div>
                     <div className="bubble">
-                      {(() => { const items = groupBlocks((turn as AssistantTurn).blocks); const lastTurn = turn === turns[turns.length - 1]; return items.map((b, bi) =>
-                        b.kind === "explore-group" ? (
-                          <ExploringSection
-                            key={bi}
-                            tools={b.tools}
-                            live={isRunning && lastTurn && bi === items.length - 1}
-                            onImplement={onImplement}
-                            onOpenSubagent={onOpenSubagent}
-                            approvals={approvalsByCall}
-                          />
-                        ) : b.kind === "text" ? (
-                          <div className="block-group" key={bi}>
-                            <Markdown text={b.text} />
-                          </div>
-                        ) : b.kind === "thinking" ? (
-                          <ThinkingCard key={bi} block={b} />
-                        ) : b.kind === "error" ? (
-                          <div className="block-group" key={bi}><ErrorCard block={b} /></div>
-                        ) : b.kind === "compaction" ? (
-                          <div className="block-group" key={bi}><CompactionCard block={b} /></div>
-                        ) : b.kind === "max-steps" ? (
-                          <div className="block-group" key={bi}><MaxStepsCard block={b} running={isRunning} /></div>
-                        ) : (
-                          <div className="block-group" key={bi}>
-                            <ToolCard
-                              block={b}
-                              onImplement={onImplement}
-                              onOpenSubagent={onOpenSubagent}
-                              awaitingApproval={!!(b.callId && approvalsByTask[b.callId]?.length)}
-                            />
-                            {b.callId && approvalsByCall[b.callId] && <ApprovalCard request={approvalsByCall[b.callId]} inline />}
-                            {b.callId && approvalsByTask[b.callId]?.map((r) => (
-                              <ApprovalCard key={r.requestId} request={r} />
-                            ))}
-                          </div>
-                        )
-                      ); })()}
+                      <AssistantContent turn={turn} running={isRunning && (turn === turns[turns.length - 1] || hasLiveWork(turn.blocks))}
+                        phase={isRunning && turn === turns[turns.length - 1] && !status.error ? status.text : undefined}
+                        onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask} />
                     </div>
+                    <MessageActions variant="assistant" text={responseText(turn.blocks)} disabled={isRunning}
+                      onRetry={group[0].turn.role === "user" ? () => retryResponse(index) : undefined} />
                   </div>
                 )
               )}
-              {/* Live status belongs to the last group so it reads as part of the
-                  conversation and sits inside the virtual space (no extra scroll). */}
-              {gi === all.length - 1 && !subBlock && isRunning && status.text && !status.error && (
-                <div className="phase-row">
-                  <span className="phase-shimmer">{status.text}</span>
-                </div>
-              )}
+
             </div>
           ))
         )}
+        </TaskActivityContext.Provider>
       </div>
 
       <div className="bottom-stack" style={hasProviders && !subBlock ? undefined : { display: "none" }}>
@@ -1709,32 +1880,44 @@ export function App() {
             <Icon name="chevD" size={14} />
           </button>
         )}
+        {orphanApprovals.map((r) => (
+          <ApprovalCard key={r.requestId} request={r} />
+        ))}
+        {status.error && (
+          <div className="status" style={{ padding: "0 14px" }}>
+            <span className="error">{status.text}</span>
+          </div>
+        )}
+        {(pendingChanges.length > 0 || queued.length > 0) && <div className="composer-tray">
         {pendingChanges.length > 0 && (
           <div className="review-bar">
-            <div className="review-head">
-              <span className="review-title" onClick={() => setReviewOpen((o) => !o)}>
-                <Icon name={reviewOpen ? "chevD" : "chevR"} size={12} className="rv-chev" />
-                {pendingChanges.length} File{pendingChanges.length > 1 ? "s" : ""}
-              </span>
+            <div className="review-head" onClick={() => setReviewOpen((open) => !open)}>
+              <div className="review-title" role="button" tabIndex={0} aria-label="Changed files"
+                aria-expanded={reviewOpen} aria-controls={reviewDetailsId} onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setReviewOpen((open) => !open);
+                  }
+                }}>
+                <TextSwap text={`${pendingChanges.length} file${pendingChanges.length === 1 ? "" : "s"} changed`} />
+                <span className="rv-stats">
+                  {changeTotals.added > 0 && <span className="rv-add" aria-label={`${changeTotals.added} lines added`}><TextSwap text={`+${changeTotals.added}`} /></span>}
+                  {changeTotals.removed > 0 && <span className="rv-del" aria-label={`${changeTotals.removed} lines removed`}><TextSwap text={`-${changeTotals.removed}`} /></span>}
+                </span>
+              </div>
               <div className="review-actions">
-                <button className="rv-link" onClick={() => post({ type: "rejectAllChanges" })}>
-                  Undo All
-                </button>
-                <button className="rv-link" onClick={() => post({ type: "acceptAllChanges" })}>
-                  Keep All
-                </button>
-                {/* <button className="rv-review" onClick={() => setReviewOpen((o) => !o)}>
-                  Review
-                </button> */}
+                <button className="rv-link" onClick={(event) => { event.stopPropagation(); post({ type: "rejectAllChanges" }); }}>Undo All</button>
+                <button className="rv-link" onClick={(event) => { event.stopPropagation(); post({ type: "acceptAllChanges" }); }}>Keep All</button>
               </div>
             </div>
-            {reviewOpen && (
+            <AnimatedDisclosure open={reviewOpen}>
+            <div className="review-details" id={reviewDetailsId}>
             <div className="review-list">
               {pendingChanges.map((c) => {
                 const name = c.path.split(/[\\/]/).pop() || c.path;
                 return (
                   <div className="review-item" key={c.path}>
-                    <span className="rv-file" title={c.path} onClick={() => post({ type: "diffChange", path: c.path })}>
+                    <button className="rv-file" title={c.path} aria-label={`Review changes to ${c.path}`} onClick={() => post({ type: "diffChange", path: c.path })}>
                       <Icon name="file" size={13} />
                       <span className="rv-name">{name}</span>
                       {!c.existedBefore && <span className="rv-tag">new</span>}
@@ -1742,7 +1925,7 @@ export function App() {
                         {(c.added ?? 0) > 0 && <span className="rv-add">+{c.added}</span>}
                         {(c.removed ?? 0) > 0 && <span className="rv-del">-{c.removed}</span>}
                       </span>
-                    </span>
+                    </button>
                     <span className="rv-item-actions">
                       <button className="rv-icon reject" title="Undo" onClick={() => post({ type: "rejectChange", path: c.path })}>
                         <Icon name="close" size={13} />
@@ -1755,58 +1938,26 @@ export function App() {
                 );
               })}
             </div>
-            )}
-          </div>
-        )}
-        {orphanApprovals.map((r) => (
-          <ApprovalCard key={r.requestId} request={r} />
-        ))}
-        {status.error && (
-          <div className="status" style={{ padding: "0 14px" }}>
-            {status.error ? (
-              <span className="error">{status.text}</span>
-            ) : (
-              <span className="status-live">
-                {isRunning && <span className="status-spinner" />}
-                <span className="status-text">{status.text}</span>
-              </span>
-            )}
+            </div>
+            </AnimatedDisclosure>
           </div>
         )}
         {queued.length > 0 && (
           <div className="queue-bar">
             {queued.map((q, i) => (
-              <div className="queue-item" key={i}>
-                <Icon name="clock" size={12} />
-                <span className="queue-text" title={renderMentionTokens(q.text)}>{renderMentionTokens(q.text)}</span>
-                <span className="queue-actions">
-                  <button className="q-btn" title="Send now (stops current run)" onClick={() => runQueuedNow(i)}>
-                    <Icon name="play" size={12} />
-                  </button>
-                  <button className="q-btn" title="Edit (back to composer)" onClick={() => editQueued(i)}>
-                    <Icon name="edit" size={12} />
-                  </button>
-                  <button className="q-btn" title="Remove" onClick={() => removeQueued(i)}>
-                    <Icon name="close" size={12} />
-                  </button>
-                </span>
-              </div>
+              <QueuedMessageRow key={q.id} item={q} running={isRunning} canMoveUp={queued.slice(0, i).some(item => !isQueuedSteering(item))}
+                steering={isQueuedSteering(q)}
+                onSteer={() => steerQueued(q)} onRun={() => runQueuedNow(i)}
+                onEdit={() => editQueued(i)} onRemove={() => removeQueued(i)}
+                onMoveUp={() => activeId && post({ type: "queueAction", convId: activeId, id: q.id, action: "up" })} />
             ))}
           </div>
         )}
-        {turns.length > 0 && (() => {
-          const p = personas.find((x) => x.id === personaId);
-          return p ? (
-            <div className="persona-badge-bar">
-              <span className="persona-badge" title={p.description}>
-                <Icon name="agent" size={12} />
-                {p.name}
-              </span>
-            </div>
-          ) : null;
-        })()}
+        </div>}
         <Composer
           focusKey={activeId ?? "new"}
+          approvalPolicy={approvalPolicy}
+          persona={turns.length ? personas.find(persona => persona.id === personaId) : undefined}
           mode={mode}
           onMode={(m) => {
             setMode(m);
@@ -1833,14 +1984,15 @@ export function App() {
           isRunning={isRunning}
           isFirst={turns.length === 0}
           usedTokens={active.usedTokens}
-          queuedCount={queued.length}
-          onRunNextQueued={() => runQueuedNow(0)}
+          queuedCount={queued.filter(item => !isQueuedSteering(item)).length}
+          onRunNextQueued={() => runQueuedNow(queued.findIndex(item => !isQueuedSteering(item)))}
           draft={draft}
           tabDraft={draftsRef.current.get(draftKey) ?? null}
           onTabDraft={(d) => setTabDraft(draftKey, d)}
           onSubmit={(text, attachments) => {
             setDraft(null);
             draftsRef.current.delete(draftKey);
+            post({ type: "updateChatWorkspace", state: { drafts: Object.fromEntries(draftsRef.current) } });
             onSubmit(text, attachments);
           }}
           onCancel={() => post({ type: "cancelRun", convId: activeId })}
@@ -1848,6 +2000,7 @@ export function App() {
         />
       </div>
 
+      <ImagePreview images={imagePreview?.images ?? []} activeId={imagePreview?.activeId ?? null} onClose={() => setImagePreview(null)} />
       {revertPrompt && (
         <div className="modal-overlay" onClick={() => setRevertPrompt(null)}>
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
@@ -1857,8 +2010,8 @@ export function App() {
             </div>
             <div className="modal-actions">
               <button className="btn-ghost" onClick={() => setRevertPrompt(null)}>Cancel</button>
-              <button className="btn-ghost" onClick={() => (revertPrompt.restore ? restoreMessage : commitEdit)(revertPrompt.index, revertPrompt.text, revertPrompt.attachments, false)}>Don't revert</button>
-              <button className="btn-primary" onClick={() => (revertPrompt.restore ? restoreMessage : commitEdit)(revertPrompt.index, revertPrompt.text, revertPrompt.attachments, true)}>Revert</button>
+              <button className="btn-ghost" disabled={isRunning} onClick={() => (revertPrompt.restore ? restoreMessage : commitEdit)(revertPrompt.index, revertPrompt.text, revertPrompt.attachments, false)}>Don't revert</button>
+              <button className="btn-primary" disabled={isRunning} onClick={() => (revertPrompt.restore ? restoreMessage : commitEdit)(revertPrompt.index, revertPrompt.text, revertPrompt.attachments, true)}>Revert</button>
             </div>
           </div>
         </div>

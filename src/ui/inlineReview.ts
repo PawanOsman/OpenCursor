@@ -8,18 +8,24 @@
  */
 
 import * as vscode from "vscode";
-import { computeHunks, pendingChanges } from "../stores/pendingChanges";
+import { computeHunks, pendingChanges, type ChangeScope, type PendingChange } from "../stores/pendingChanges";
 import { safePath } from "../context/workspaceUtils";
+import { createHash } from "node:crypto";
 
 const SCHEME = "ocursor-inline-original";
 const ORIGINALS = new Map<string, string>();
 const originalsChanged = new vscode.EventEmitter<vscode.Uri>();
 
-function beforeUriFor(relPath: string): vscode.Uri {
+interface DiffEntry { path: string; scope?: ChangeScope; snapshotId?: string }
+function snapshotId(change: PendingChange): string {
+  return createHash("sha256").update(JSON.stringify([change.before, change.after, change.owner])).digest("hex");
+}
+function beforeUriFor(entry: DiffEntry, side = "before"): vscode.Uri {
   // Build via `from` rather than `parse`: a path like `/workspace/lib/a.ts`
   // would otherwise be parsed as an authority ("//workspace").
-  const p = relPath.replace(/\\/g, "/");
-  return vscode.Uri.from({ scheme: SCHEME, path: p.startsWith("/") ? p : `/${p}` });
+  const p = entry.path.replace(/\\/g, "/");
+  const query = new URLSearchParams({ side, ...(entry.scope ? { conversation: entry.scope.conversationId, snapshot: entry.snapshotId! } : { overview: "all-pending" }) }).toString();
+  return vscode.Uri.from({ scheme: SCHEME, path: p.startsWith("/") ? p : `/${p}`, query });
 }
 
 function fileUriFor(relPath: string): vscode.Uri | undefined {
@@ -72,35 +78,56 @@ async function restoreInlineDiffSetting() {
 }
 
 /** Push the latest "before" text into an already-open diff without touching tabs. */
-function refreshOriginal(relPath: string) {
-  const change = pendingChanges.get(relPath);
-  if (!change) return;
-  const before = beforeUriFor(relPath);
-  ORIGINALS.set(before.path.replace(/^\//, ""), change.before);
+function changeForDiff(entry: DiffEntry) {
+  return entry.scope ? pendingChanges.snapshots(entry.path, entry.scope).find(change => snapshotId(change) === entry.snapshotId) : pendingChanges.get(entry.path);
+}
+function refreshOriginal(entry: DiffEntry) {
+  const change = changeForDiff(entry);
+  if (!change) return false;
+  const before = beforeUriFor(entry);
+  ORIGINALS.set(before.toString(), change.before);
   originalsChanged.fire(before);
+  if (entry.scope) {
+    const after = beforeUriFor(entry, "after");
+    ORIGINALS.set(after.toString(), change.after);
+    originalsChanged.fire(after);
+  }
+  return true;
 }
 
 /** Open the inline diff for a tracked change. Only ever called from an explicit user action. */
-async function showInlineDiff(relPath: string, preserveFocus = true) {
-  const change = pendingChanges.get(relPath);
-  if (!change) return;
+async function showInlineDiff(relPath: string, preserveFocus = true, scope?: ChangeScope) {
   const fileUri = fileUriFor(relPath);
   if (!fileUri) return;
-  const before = beforeUriFor(relPath);
-  refreshOriginal(relPath);
+  const entry: DiffEntry = { path: fileUri.fsPath, scope: scope ? { ...scope } : undefined };
+  let label = "all pending changes";
+  if (scope) {
+    const snapshots = pendingChanges.snapshots(entry.path, scope);
+    if (!snapshots.length) return;
+    const selected = snapshots.length === 1 ? { change: snapshots[0], index: 0 } : await vscode.window.showQuickPick(snapshots.map((change, index) => ({
+      label: `Edit ${index + 1}`, description: `Chat ${scope.conversationId.slice(0, 8)}${change.owner?.turnIndex === undefined ? "" : ` · turn ${change.owner.turnIndex + 1}`}`,
+      detail: change.owner?.runId ? `Run ${change.owner.runId}` : undefined, change, index,
+    })), { placeHolder: "Choose this conversation's edit to review" });
+    if (!selected) return;
+    entry.snapshotId = snapshotId(selected.change);
+    label = `chat ${scope.conversationId.slice(0, 8)} · edit ${selected.index + 1}${selected.change.owner?.turnIndex === undefined ? "" : ` · turn ${selected.change.owner.turnIndex + 1}`}`;
+  }
+  if (!refreshOriginal(entry)) return;
+  const before = beforeUriFor(entry);
   await applyInlineDiffSetting();
   await vscode.commands.executeCommand(
     "vscode.diff",
     before,
-    fileUri,
-    `${relPath.split(/[\\/]/).pop()} (changes)`,
+    scope ? beforeUriFor(entry, "after") : fileUri,
+    `${relPath.split(/[\\/]/).pop()} (${label})`,
     { preserveFocus, preview: false, viewColumn: vscode.ViewColumn.Active }
   );
+  openDiffs.set(before.toString(), entry);
 }
 
 /** Close any inline-diff tab we opened for `relPath`. */
-async function closeInlineDiff(relPath: string) {
-  const target = beforeUriFor(relPath).toString();
+async function closeInlineDiff(entry: DiffEntry) {
+  const target = beforeUriFor(entry).toString();
   const doomed: vscode.Tab[] = [];
   for (const group of vscode.window.tabGroups.all) {
     for (const tab of group.tabs) {
@@ -109,7 +136,8 @@ async function closeInlineDiff(relPath: string) {
     }
   }
   if (doomed.length) await vscode.window.tabGroups.close(doomed, true);
-  ORIGINALS.delete(relPath.replace(/\\/g, "/"));
+  ORIGINALS.delete(target);
+  ORIGINALS.delete(beforeUriFor(entry, "after").toString());
 }
 
 /**
@@ -159,7 +187,7 @@ function refreshEditor(editor: vscode.TextEditor) {
 
 let refreshTimer: NodeJS.Timeout | undefined;
 /** Paths we currently have an inline-diff tab open for. */
-const openDiffs = new Set<string>();
+const openDiffs = new Map<string, DiffEntry>();
 
 /**
  * Never opens or focuses anything. Agent edits only refresh the content of
@@ -169,14 +197,14 @@ const openDiffs = new Set<string>();
 async function sync() {
   const live = new Set(pendingChanges.list().map((c) => c.path));
 
-  for (const path of [...openDiffs]) {
-    if (!live.has(path)) {
-      openDiffs.delete(path);
-      await closeInlineDiff(path);
+  for (const [key, entry] of [...openDiffs]) {
+    if (!changeForDiff(entry)) {
+      openDiffs.delete(key);
+      await closeInlineDiff(entry);
     } else {
       // Update the virtual "before" document in place — no vscode.diff call,
       // so an edit can never pull the editor onto a diff tab.
-      refreshOriginal(path);
+      refreshOriginal(entry);
     }
   }
   if (!live.size) await restoreInlineDiffSetting();
@@ -196,11 +224,10 @@ export function registerInlineReview(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, {
       onDidChange: originalsChanged.event,
-      provideTextDocumentContent: (uri) => ORIGINALS.get(uri.path.replace(/^\//, "")) ?? "",
+      provideTextDocumentContent: (uri) => ORIGINALS.get(uri.toString()) ?? "",
     }),
-    vscode.commands.registerCommand("ocursor.viewDiff", async (path: string) => {
-      await showInlineDiff(path, false);
-      openDiffs.add(path);
+    vscode.commands.registerCommand("ocursor.viewDiff", async (path: string, scope?: ChangeScope) => {
+      await showInlineDiff(path, false, scope);
     }),
     addedDecoration,
     originalsChanged,

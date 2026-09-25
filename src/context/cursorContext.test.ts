@@ -8,18 +8,19 @@
  */
 
 import { beforeEach, expect, it, vi } from "vitest";
-const editor = vi.hoisted(() => ({ tabs: [] as string[], visible: [] as string[], selection: undefined as string | undefined }));
+vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} }, workspace: { getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }) } }));
+const editor = vi.hoisted(() => ({ tabs: [] as string[], visible: [] as string[], selection: undefined as string | undefined, rules: vi.fn(async (_paths: string[]) => "") }));
 vi.mock("./workspaceUtils", () => ({ getWorkspaceRoot: () => "/workspace", getRecentFiles: () => editor.tabs }));
 vi.mock("./workspaceContext", () => ({
   getActiveSelection: () => editor.selection,
   getOpenFiles: () => editor.visible,
   listSkills: async () => [],
   getGitContext: async () => "",
-  listRulesForPrompt: async () => "",
+  listRulesForPrompt: editor.rules,
 }));
 import { buildOpenFilesBlock, buildUserInfoBlock } from "./cursorContext";
 
-beforeEach(() => { editor.tabs = []; editor.visible = []; editor.selection = undefined; });
+beforeEach(() => { editor.tabs = []; editor.visible = []; editor.selection = undefined; editor.rules.mockClear(); });
 
 it("reports actual open tabs, visible files, and selection without inventing recency", async () => {
   editor.tabs = ["/workspace/app.ts", "/workspace/test.ts", "/workspace/app.ts"];
@@ -46,4 +47,11 @@ it("retains direct user restrictions when automatic workspace context is disable
   expect(block).toContain("<user_rules");
   expect(block).toContain("Do not execute tests for this task.");
   expect(block).not.toContain("<agent_skills>");
+});
+
+it("resolves scoped rules using open tabs, visible files and newly targeted files", async () => {
+  editor.tabs = ["/workspace/hidden.ts"];
+  editor.visible = ["visible.ts"];
+  await buildUserInfoBlock({ matchFiles: ["src/new.ts"] });
+  expect(editor.rules).toHaveBeenCalledWith(["visible.ts", "/workspace/hidden.ts", "src/new.ts"]);
 });

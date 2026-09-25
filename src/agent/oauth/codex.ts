@@ -11,8 +11,11 @@ import { createHash, randomUUID } from "crypto";
 import type { ProviderEvent, ResponsesReasoning, ToolSchema, WireMessage } from "../types";
 import { sseData } from "../provider/sse";
 import { UsageTracker } from "../provider/usage";
+import { PROVIDER_MODELS } from "../../shared/providerModels";
+import { supportsFastMode } from "../../shared/modelSpeed";
+import type { ModelParams } from "../provider/types";
 
-/** Protocol values from the local 9router Codex registry, not a latest-version claim. */
+/** OpenCursor's Codex protocol compatibility identifiers. */
 export const CODEX_CONFIG = {
   authUrl: "https://auth.openai.com/oauth/authorize",
   tokenUrl: "https://auth.openai.com/oauth/token",
@@ -21,11 +24,11 @@ export const CODEX_CONFIG = {
   path: "/auth/callback",
   scope: "openid profile email offline_access",
   originator: "codex_cli_rs",
-  cliVersion: "0.136.0",
+  cliVersion: "0.154.0",
   responsesUrl: "https://chatgpt.com/backend-api/codex/responses",
   modelsUrl: "https://chatgpt.com/backend-api/codex/models",
   fallbackModels: [
-    "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+    "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark",
   ],
 } as const;
@@ -64,7 +67,7 @@ type InputItem =
   | { type: "function_call_output"; call_id: string; output: string }
   | ResponsesReasoning["items"][number];
 
-type ResponsesIdentity = Pick<ResponsesReasoning, "model" | "provider">;
+type ResponsesIdentity = Pick<ResponsesReasoning, "model" | "provider" | "credential">;
 
 export function toResponsesInput(messages: WireMessage[], identity?: ResponsesIdentity): { instructions: string; input: InputItem[] } {
   const instructions: string[] = [];
@@ -85,9 +88,11 @@ export function toResponsesInput(messages: WireMessage[], identity?: ResponsesId
       input.push({ role: "user", content });
     } else if (message.role === "assistant") {
       const candidate = message.responsesReasoning;
-      const reasoning = identity && candidate?.provider === identity.provider && candidate.model === identity.model ? candidate : undefined;
-      // Encrypted reasoning is bound to its transport and model. Other models
-      // receive only the portable text, calls, and results from this history.
+      const reasoning = identity && candidate?.provider === identity.provider && candidate.model === identity.model
+        && candidate.credential === identity.credential ? candidate : undefined;
+      // Encrypted reasoning is bound to its transport, model, and credential.
+      // Changed accounts and unscoped legacy history retain only portable text,
+      // calls, and results when the current request has a credential identity.
       if (reasoning) {
         for (const item of reasoning.items) if (item.type === "reasoning" && item.id && item.encrypted_content) {
           input.push({ type: "reasoning", id: item.id, summary: item.summary, encrypted_content: item.encrypted_content });
@@ -126,12 +131,12 @@ export interface CodexRequestOptions {
   model: string;
   messages: WireMessage[];
   tools?: ToolSchema[];
-  modelParams?: { reasoningEffort?: string };
+  modelParams?: ModelParams;
   promptCacheKey?: string;
   signal?: AbortSignal;
 }
 
-/** Match 9router's model-specific max/ultra normalization without rewriting model IDs. */
+/** Apply model-specific max/ultra normalization without rewriting model IDs. */
 function reasoningEffort(model: string, requested = "low"): string {
   const effort = requested || "low";
   if (effort !== "max" && effort !== "ultra") return effort;
@@ -140,19 +145,22 @@ function reasoningEffort(model: string, requested = "low"): string {
   return "xhigh";
 }
 
-export function createCodexRequest(opts: CodexRequestOptions, account: CodexCredentials): { url: string; init: RequestInit } {
+export function createCodexRequest(opts: CodexRequestOptions, account: CodexCredentials & { id: string }): { url: string; init: RequestInit } {
   opts.signal?.throwIfAborted();
-  const { instructions, input } = toResponsesInput(opts.messages, { provider: "codex", model: opts.model });
+  const { instructions, input } = toResponsesInput(opts.messages, { provider: "codex", model: opts.model, credential: account.id });
   const sessionId = opts.promptCacheKey ? codexSessionId(opts.promptCacheKey) : randomUUID();
-  const effort = reasoningEffort(opts.model, opts.modelParams?.reasoningEffort);
+  const upstreamModel = PROVIDER_MODELS.find(model => model.kind === "codex" && model.id === opts.model)?.upstreamModelId ?? opts.model;
+  const effort = reasoningEffort(upstreamModel, opts.modelParams?.reasoningEffort);
+  const speed = supportsFastMode(upstreamModel, "codex") ? opts.modelParams?.speed : undefined;
   // Build the accepted Responses shape directly. Codex rejects max_output_tokens,
   // stream_options, previous_response_id, and Chat Completions sampling parameters.
   const body = {
-    model: opts.model,
+    model: upstreamModel,
     instructions: instructions || "You are OpenCursor, an AI coding assistant inside VS Code.",
     input: input.length ? input : [{ role: "user", content: [{ type: "input_text", text: "..." }] }],
     stream: true,
     store: false,
+    ...(speed === "fast" ? { service_tier: "priority" } : speed === "standard" ? { service_tier: "default" } : {}),
     reasoning: { effort, summary: "auto" },
     ...(effort !== "none" ? { include: ["reasoning.encrypted_content"] } : {}),
     prompt_cache_key: opts.promptCacheKey || sessionId,
@@ -170,6 +178,37 @@ export class CodexProtocolError extends Error {
     super(message);
     this.name = "CodexProtocolError";
   }
+}
+
+/** Preserve request/account/server distinctions from Responses error frames.
+ * https://developers.openai.com/api/docs/guides/error-codes
+ * https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response_error.py */
+function streamErrorStatus(fallback: number, ...sources: unknown[]): number {
+  const errors = sources.filter((value): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value));
+  for (const error of errors) {
+    for (const value of [error.status, error.status_code, error.code]) {
+      const status = typeof value === "number" || typeof value === "string" ? Number(value) : NaN;
+      if (Number.isInteger(status) && status >= 400 && status <= 599) return status;
+    }
+  }
+  for (const error of errors) {
+    // The specific code takes priority: a quota error can carry the broader
+    // invalid_request_error type despite needing account-specific handling.
+    for (const value of [error.code, error.type]) {
+      if (typeof value !== "string") continue;
+      const code = value.toLowerCase();
+      if (["rate_limit_exceeded", "rate_limit_error", "slow_down", "insufficient_quota", "usage_limit_reached", "credit_balance_exhausted",
+        "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "organization_usage_limit_exceeded"].includes(code)) return 429;
+      if (["authentication_error", "invalid_api_key", "invalid_token", "token_expired"].includes(code)) return 401;
+      if (["permission_error", "permission_denied", "access_denied"].includes(code)) return 403;
+      if (code === "model_not_found") return 404;
+      if (["server_is_overloaded", "service_unavailable_error", "overloaded_error"].includes(code)) return 503;
+      if (["server_error", "internal_server_error"].includes(code)) return 500;
+      if (code.startsWith("invalid_") || code.startsWith("unsupported_") || ["context_length_exceeded", "data_residency_mismatch", "bio_policy",
+        "misalignment_policy_violation", "image_content_policy_violation", "content_filter"].includes(code)) return 400;
+    }
+  }
+  return fallback;
 }
 
 interface StreamItem {
@@ -311,16 +350,16 @@ export async function* parseCodexStream(reader: ReadableStreamDefaultReader<Uint
           if (event.item) yield* finalizeItem(event.item, event.output_index);
           break;
         case "error":
-          throw new CodexProtocolError(502, `codex stream error: ${event.message || event.error?.message || "unknown error"}`);
+          throw new CodexProtocolError(streamErrorStatus(502, event.error, event), `codex stream error: ${event.message || event.error?.message || "unknown error"}`);
         case "response.incomplete":
           throw new CodexProtocolError(400, `codex response incomplete: ${event.response?.incomplete_details?.reason || "interrupted generation"}`);
         case "response.failed":
-          throw new CodexProtocolError(500, `codex: ${event.response?.error?.message || "response failed"}`);
+          throw new CodexProtocolError(streamErrorStatus(500, event.response?.error, event.response, event), `codex: ${event.response?.error?.message || "response failed"}`);
         case "response.completed":
         case "response.done": {
           // Some compatible endpoints use response.done for all terminal states.
           const response = event.response;
-          if (response?.status === "failed" || response?.error) throw new CodexProtocolError(500, `codex: ${response.error?.message || "response failed"}`);
+          if (response?.status === "failed" || response?.error) throw new CodexProtocolError(streamErrorStatus(500, response?.error, response, event), `codex: ${response.error?.message || "response failed"}`);
           if (response?.status && response.status !== "completed") throw new CodexProtocolError(400, `codex response incomplete: ${response.incomplete_details?.reason || response.status}`);
           if (Array.isArray(response?.output)) for (const [index, item] of response.output.entries()) yield* finalizeItem(item, index);
           finished = true;

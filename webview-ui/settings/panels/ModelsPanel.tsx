@@ -12,11 +12,12 @@ import { Icon } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
 import {
   FeatureConfig,
+  FREE_KINDS,
   LlamacppStatus,
   ModelDef,
+  ModelKind,
   OAUTH_PROVIDERS,
   OllamaModel,
-  OAuthKind,
   OAuthStatus,
   POPULAR_KINDS,
   PROVIDER_PRESETS,
@@ -39,7 +40,7 @@ function ModelRow({ model, enabled, onToggle, onRemove, badge }: { model: ModelD
       {onRemove && (
         <button className="icon-btn" onClick={onRemove} title="Remove model"><Icon name="trash" size={14} /></button>
       )}
-      <Toggle checked={enabled} onChange={onToggle} />
+      <Toggle label={`Enable ${model.name}`} checked={enabled} onChange={onToggle} />
     </div>
   );
 }
@@ -53,7 +54,7 @@ interface ModelSectionSpec {
   connected: boolean;
   models: ModelDef[];
   /** Enables the add-model-by-id input, tagging new customs to this provider. */
-  addTarget?: { providerId: string; kind: ProviderKind };
+  addTarget?: { providerId: string; kind: ModelKind };
   /** Refresh this provider's model list (undefined = not refreshable). */
   onRefresh?: () => void;
   /** True while a refresh for this section is in flight. */
@@ -142,7 +143,7 @@ function ModelSection({
               <input
                 type="text"
                 value={draft}
-                placeholder="Add model by id (e.g. gpt-4o)"
+                placeholder="Add model by id (e.g. gpt-6-sol)"
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") add(); }}
                 style={{ flex: 1 }}
@@ -155,9 +156,6 @@ function ModelSection({
     </div>
   );
 }
-
-/** Map an OAuth account kind to the ProviderKind used for its custom models. */
-const OAUTH_MODEL_KIND: Record<OAuthKind, ProviderKind> = { "claude-code": "anthropic", codex: "openai", antigravity: "google" };
 
 export function ModelsPanel({
   models: _models,
@@ -220,6 +218,7 @@ export function ModelsPanel({
           else setFetchedExtra((prev) => ({ ...prev, [m.providerId]: m.models || [] }));
         } else {
           // Global registry push: clears any OAuth/global refreshes.
+          setFetchedExtra((prev) => Object.fromEntries(Object.entries(prev).filter(([key]) => !key.startsWith("oauth:"))));
           setRefreshing((prev) => {
             const next = new Set([...prev].filter((k) => !k.startsWith("oauth:")));
             return next.size === prev.size ? prev : next;
@@ -273,7 +272,7 @@ export function ModelsPanel({
     setFeatures({ disabledLocalModels: [...next] });
   };
 
-  const addCustomModel = (id: string, providerId: string, kind: ProviderKind) => {
+  const addCustomModel = (id: string, providerId: string, kind: ModelKind) => {
     const name = id.trim();
     if (!name) return;
     if ((features.customModels || []).some((m) => m.id === name)) return;
@@ -314,15 +313,21 @@ export function ModelsPanel({
     vscode.postMessage({ type: "fetchModels", apiBaseUrl: p.baseUrl, providerId: p.id, anthropic: p.kind === "anthropic" });
   };
 
-  // Build every section unconditionally so users always see every provider,
-  // connected or not.
+  // Only configured, enabled connections belong on the model management page.
   const sections: ModelSectionSpec[] = [];
+  const connectedProvider = (provider: ProviderConfig): boolean => {
+    if (provider.enabled === false) return false;
+    if (!PROVIDER_PRESETS[provider.kind].needsKey) return true;
+    if (provider.apiKeys) return provider.apiKeys.some(key => key.enabled !== false && key.hasKey !== false);
+    return !!provider.hasKey || (!provider.id.startsWith("popular:") && modelList.some(model => model.providerId === provider.id));
+  };
 
-  for (const kind of POPULAR_KINDS) {
+  for (const kind of [...POPULAR_KINDS, ...FREE_KINDS]) {
     const id = `popular:${kind}`;
     const p = (features.providers || []).find((x) => x.id === id);
+    if (!p || !connectedProvider(p)) continue;
     const preset = PROVIDER_PRESETS[kind];
-    const connected = !!p?.hasKey || (!!p && !preset.needsKey);
+    const connected = true;
     sections.push({
       key: id,
       title: kind === "openai" ? "OpenAI" : preset.label,
@@ -339,8 +344,9 @@ export function ModelsPanel({
   }
 
   for (const p of (features.providers || []).filter((x) => !x.id.startsWith("popular:"))) {
+    if (!connectedProvider(p)) continue;
     const preset = PROVIDER_PRESETS[p.kind];
-    const connected = !!p.hasKey || !preset.needsKey;
+    const connected = true;
     sections.push({
       key: p.id,
       title: p.name || "(unnamed provider)",
@@ -356,13 +362,21 @@ export function ModelsPanel({
 
   for (const { kind, label } of OAUTH_PROVIDERS) {
     const id = `oauth:${kind}`;
-    const connected = (oauthStatus.accounts || []).some((a) => a.kind === kind);
+    const connected = (oauthStatus.accounts || []).some((a) => a.kind === kind && !a.disabled);
+    if (!connected) continue;
     const seen = new Set<string>();
     const list: ModelDef[] = [];
     const push = (m: ModelDef) => { if (!seen.has(m.id)) { seen.add(m.id); list.push(m); } };
-    for (const m of modelList) if (m.providerId === id) push(m);
-    for (const m of catalog) if (Array.isArray(m.kind) ? m.kind.includes(kind) : m.kind === kind) push(m);
-    for (const m of customs) if (m.providerId === id) push(m);
+    const discovered = modelList.filter((m) => m.providerId === id);
+    // Antigravity exposes a project-specific model list. A catalog entry or
+    // saved custom model must not imply access to an unadvertised model.
+    const available = kind === "antigravity" ? new Set(fetchedExtra[id] ?? discovered.map((m) => m.id)) : undefined;
+    for (const m of discovered) if (!available || available.has(m.id)) push(m);
+    for (const m of catalog) {
+      if ((Array.isArray(m.kind) ? m.kind.includes(kind) : m.kind === kind) && (!available || available.has(m.id))) push(m);
+    }
+    for (const m of customs) if (m.providerId === id && (!available || available.has(m.id))) push(m);
+    if (available) for (const modelId of available) push({ id: modelId, name: modelId, kind, providerId: id });
     sections.push({
       key: id,
       title: label,
@@ -371,7 +385,7 @@ export function ModelsPanel({
         : "Not connected — sign in from Providers → OAuth Accounts. Catalog models are shown for reference.",
       connected,
       models: list,
-      addTarget: { providerId: id, kind: OAUTH_MODEL_KIND[kind] },
+      addTarget: { providerId: id, kind },
       onRefresh: () => { startRefreshing(id); fetchModels(); },
       refreshing: refreshing.has(id),
       refreshError: refreshErrors[id],
@@ -382,7 +396,7 @@ export function ModelsPanel({
     key: "local:llamacpp",
     title: "Local · llama.cpp",
     subtitle: "GGUF models managed in the llama.cpp tab. Selecting one in chat auto-loads its server.",
-    connected: llamacppStatus.installed,
+    connected: llamacppStatus.installed && (features.llamacppModels || []).length > 0,
     models: (features.llamacppModels || []).map((m) => ({ id: m.id, name: m.name, kind: "llamacpp" as ProviderKind })),
     onRefresh: () => { startRefreshing("local:llamacpp"); vscode.postMessage({ type: "llamacppGet" }); },
     refreshing: refreshing.has("local:llamacpp"),
@@ -401,25 +415,9 @@ export function ModelsPanel({
     local: true,
   });
 
-  // Custom models whose provider was removed land in an "Other" bucket.
-  const provIds = new Set([
-    ...(features.providers || []).map((p) => p.id),
-    ...POPULAR_KINDS.map((k) => `popular:${k}`),
-    ...OAUTH_PROVIDERS.map((o) => `oauth:${o.kind}`),
-  ]);
-  const orphanCustom = customs.filter((m) => !m.providerId || !provIds.has(m.providerId));
-  if (orphanCustom.length > 0) {
-    sections.push({
-      key: "other",
-      title: "Other",
-      subtitle: "Custom models whose provider was removed.",
-      connected: false,
-      models: orphanCustom,
-    });
-  }
-
   // Search filters models inside every section; sections with hits auto-expand.
   const visibleSections = sections
+    .filter((s) => s.connected)
     .map((s) => ({ ...s, models: s.models.filter(match) }))
     .filter((s) => !q || s.models.length > 0);
 
@@ -447,11 +445,13 @@ export function ModelsPanel({
       </div>
 
       <p className="panel-hint">
-        All providers are listed below — connected or not. Expand a provider to enable/disable its models in
-        the chat picker, add custom models by id, or refresh its model list.
+        Only enabled, connected providers are listed below. Expand a provider to enable/disable its models in
+        the chat picker, add custom models by id, or refresh its model list. Configure each model's supported
+        reasoning, thinking and context options using Edit options in the chat model picker.
       </p>
 
       {q && visibleSections.length === 0 && <div className="empty-card">No models match "{query}".</div>}
+      {!q && visibleSections.length === 0 && <div className="empty-card">Connect and enable a provider in Providers to manage its models.</div>}
 
       {visibleSections.map((s) => (
         <ModelSection

@@ -78,6 +78,27 @@ beforeEach(async () => {
 afterEach(() => { beforeStore = undefined; vi.unstubAllGlobals(); });
 
 describe("OAuth credential persistence ordering", () => {
+  it("ignores a stale secret-load completion after switching contexts", async () => {
+    let release!: (value: string) => void;
+    initOAuth({ globalState: { get: (_key: string, fallback: unknown) => Array.isArray(fallback) ? ["stale"] : fallback },
+      secrets: { get: () => new Promise<string>(resolve => { release = resolve; }) } } as unknown as Parameters<typeof initOAuth>[0]);
+    await seed([fixture("current-context")]);
+    release(JSON.stringify(fixture("stale")));
+    await Promise.resolve(); await Promise.resolve();
+    expect(listAccounts().map(account => account.id)).toEqual(["current-context"]);
+  });
+
+  it("resets transient account cooldown when reinitializing the same fixture context", async () => {
+    const account = fixture("reinitialized");
+    await seed([account]);
+    const fetch = vi.fn().mockResolvedValueOnce(new Response("limited", { status: 429 }))
+      .mockResolvedValue(new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n'));
+    vi.stubGlobal("fetch", fetch);
+    await expect(chat()).rejects.toMatchObject({ status: 429 });
+    await seed([account]);
+    await expect(chat()).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
   it("keeps a later disable durable when refresh credential storage is still pending", async () => {
     const account = fixture("persistence-disable", Date.now() - 1);
     await seed([account]);

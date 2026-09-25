@@ -34,6 +34,20 @@ function expectCompleteExchanges(steps: Step[]): void {
 }
 
 describe("context budget fitting", () => {
+  it("counts preserved Chat reasoning once and keeps it intact when removing display thinking", () => {
+    const base: Step = { kind: "assistant", text: "Answer", calls: [] };
+    const content = "Exact provider reasoning ".repeat(100);
+    const steps: Step[] = [{ kind: "user", text: "Inspect the project" }, { ...base, thinking: content,
+      chatReasoning: { endpoint: "https://api.deepseek.com/v1", model: "deepseek-flash", content } }];
+    expect(stepsTokens([steps[1]]) - stepsTokens([base])).toBe(content.length / 4);
+    const original = structuredClone(steps);
+    const fitted = fitStepsToBudget(steps, 0, 10000);
+    expect(fitted[1]).toMatchObject({ chatReasoning: { content } });
+    expect(fitted[1]).not.toHaveProperty("thinking", content);
+    expect(steps).toEqual(original);
+    expect(buildMessages("System", fitted)[2]).toMatchObject({ chatReasoning: { content } });
+  });
+
   it("drops signatures when emergency fitting rewrites historical call arguments", () => {
     const steps: Step[] = [{ kind: "user", text: "Read the file" },
       { kind: "assistant", text: "", calls: [{ id: "signed-call", name: "Read", arguments: JSON.stringify({ path: "x".repeat(8000) }), thoughtSignature: "original-signature" }] },

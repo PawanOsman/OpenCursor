@@ -1083,16 +1083,41 @@ export const BUILTIN_TEAMS: TeamDef[] = [
 	},
 ];
 
-/** Ids of the shipped team-member presets — their prompts always refresh from source. */
+/** Ids of the shipped team-member presets. */
 const BUILTIN_SUBAGENT_IDS = new Set(BUILTIN_TEAM_SUBAGENTS.map((s) => s.id));
+const SUBAGENT_FIELDS = ["name", "description", "prompt", "readonly", "model"] as const;
+export type BuiltinSubagentOverrides = Record<string, Partial<Pick<SubagentDef, typeof SUBAGENT_FIELDS[number]>>>;
+
+/** Store only changed fields so unmodified defaults can receive future updates. */
+export function builtinSubagentOverrides(subagents: SubagentDef[]): BuiltinSubagentOverrides {
+	const result: BuiltinSubagentOverrides = {};
+	for (const preset of BUILTIN_TEAM_SUBAGENTS) {
+		const saved = subagents.find(s => s.id === preset.id);
+		if (!saved) continue;
+		const fields: Record<string, string | boolean> = {};
+		for (const key of SUBAGENT_FIELDS) {
+			const value = key === "model" ? saved.model || "" : saved[key];
+			const original = key === "model" ? preset.model || "" : preset[key];
+			if (value !== original && typeof value === (key === "readonly" ? "boolean" : "string")) fields[key] = value;
+		}
+		if (Object.keys(fields).length) result[preset.id] = fields;
+	}
+	return result;
+}
 
 /**
  * Merge built-in team subagents into a user's list.
- * Built-in ids always take the latest preset definition (prompt/description/readonly),
- * so prompt updates ship to existing installs. Custom subagents are preserved as-is.
+ * Apply saved field overrides to current defaults. Missing built-ins are restored,
+ * and their identities remain protected. Custom subagents are preserved as-is.
  */
-export function withBuiltinTeamSubagents(subagents: SubagentDef[]): SubagentDef[] {
-	const byId = new Map(BUILTIN_TEAM_SUBAGENTS.map((s) => [s.id, s]));
+export function withBuiltinTeamSubagents(subagents: SubagentDef[], overrides: BuiltinSubagentOverrides = {}): SubagentDef[] {
+	const presets = BUILTIN_TEAM_SUBAGENTS.map(preset => {
+		const fields = Object.fromEntries(SUBAGENT_FIELDS.filter(key =>
+			typeof overrides[preset.id]?.[key] === (key === "readonly" ? "boolean" : "string")
+		).map(key => [key, overrides[preset.id][key]]));
+		return { ...preset, ...fields, builtin: true };
+	});
+	const byId = new Map(presets.map((s) => [s.id, s]));
 	const custom = subagents.filter((s) => !BUILTIN_SUBAGENT_IDS.has(s.id));
 	const have = new Set(subagents.map((s) => s.id));
 	// Keep the user's ordering for builtins they already have; refresh their fields.
@@ -1100,7 +1125,7 @@ export function withBuiltinTeamSubagents(subagents: SubagentDef[]): SubagentDef[
 		.filter((s) => BUILTIN_SUBAGENT_IDS.has(s.id))
 		.map((s) => byId.get(s.id)!)
 		.filter(Boolean);
-	const missing = BUILTIN_TEAM_SUBAGENTS.filter((s) => !have.has(s.id));
+	const missing = presets.filter((s) => !have.has(s.id));
 	return [...missing, ...refreshed, ...custom];
 }
 

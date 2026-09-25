@@ -13,5 +13,5 @@ exports.hostBuildOptions = {
   format: 'cjs',
   platform: 'node',
   target: ['node20.18'],
-  external: ['vscode', '@huggingface/transformers', '@huggingface/hub', 'onnxruntime-node', 'sharp', 'pdf-parse'],
+  external: ['vscode', '@huggingface/transformers', '@huggingface/hub', 'onnxruntime-node', 'sharp', 'pdf-parse', '@lydell/node-pty', 'playwright-core'],
 };

@@ -7,161 +7,182 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-// Ollama local model manager.
-// - Uses the `ollama` CLI for install-check / pull / delete, and the daemon's
-//   /api/tags for a structured model list (the CLI has no JSON output).
-// - Chat goes through Ollama's OpenAI-compatible endpoint at /v1 (served by the
-//   running daemon), so we never spawn a server ourselves.
-
-import { spawn, execFile } from "child_process";
+// Native Ollama API: the configured endpoint owns models and pull operations.
+import { execFile } from "child_process";
 import * as vscode from "vscode";
+import { localJson, normalizeLocalEndpoint, type LocalModelState } from "./localRuntime";
 
-/** Base URL of the Ollama daemon (no trailing slash). */
 let HOST = "http://localhost:11434";
-const CLI = "ollama";
-
 export function setOllamaHost(host: string): void {
-  HOST = host.replace(/\/+$/, "");
+  const next = normalizeLocalEndpoint(host);
+  if (next === HOST) return;
+  if (operations.size) throw new Error("Wait for active load/unload operations before changing endpoints.");
+  for (const job of pulls.values()) job.controller.abort();
+  pulling.clear(); progress.clear(); capabilities.clear();
+  HOST = next; reachable = false; version = undefined; loaded = {}; states.clear(); errors.clear(); emit();
 }
-
-/** OpenAI-compatible endpoint Ollama serves for chat. */
-export function ollamaOpenAIBase(): string {
-  return `${HOST}/v1`;
-}
-
+export function ollamaOpenAIBase(): string { return `${HOST}/v1`; }
 export interface OllamaModel {
-  /** e.g. "llama3.1:8b" — also the id used in chat requests. */
-  name: string;
-  sizeBytes?: number;
-  parameterSize?: string;
-  quantization?: string;
-  family?: string;
+  name: string; sizeBytes?: number; parameterSize?: string; quantization?: string; family?: string;
 }
-
+export interface OllamaLoadedModel {
+  sizeBytes?: number; vramBytes?: number; contextLength?: number; expiresAt?: string;
+}
 export interface OllamaStatus {
   installed: boolean;
-  /** model name -> download progress percent (0-100) while pulling. */
+  reachable?: boolean;
+  endpoint?: string;
+  version?: string;
   pulling: Record<string, number>;
-  /** model name -> last error. */
+  progress?: Record<string, string>;
   errors: Record<string, string>;
+  loaded?: Record<string, OllamaLoadedModel>;
+  states?: Record<string, LocalModelState>;
+  capabilities?: Record<string, string[]>;
 }
-
 const pulling = new Map<string, number>();
+const progress = new Map<string, string>();
 const errors = new Map<string, string>();
-const pullProcs = new Map<string, ReturnType<typeof spawn>>();
-let installedCache = false;
-
+const states = new Map<string, LocalModelState>();
+const pulls = new Map<string, { controller: AbortController; promise: Promise<void> }>();
+const operations = new Map<string, Promise<void>>();
+const capabilities = new Map<string, string[]>();
+let installedCache = false, reachable = false;
+let version: string | undefined;
+let loaded: Record<string, OllamaLoadedModel> = {};
 const _onStatus = new vscode.EventEmitter<OllamaStatus>();
 export const onOllamaStatus = _onStatus.event;
-
-function snapshot(): OllamaStatus {
-  const p: Record<string, number> = {};
-  for (const [k, v] of pulling) p[k] = v;
-  const e: Record<string, string> = {};
-  for (const [k, v] of errors) e[k] = v;
-  return { installed: installedCache, pulling: p, errors: e };
-}
-function emit() {
-  _onStatus.fire(snapshot());
-}
-
 export function getStatus(): OllamaStatus {
-  return snapshot();
+  return { installed: installedCache, reachable, endpoint: HOST, version, pulling: Object.fromEntries(pulling),
+    progress: Object.fromEntries(progress), errors: Object.fromEntries(errors), loaded: { ...loaded },
+    states: Object.fromEntries(states), capabilities: Object.fromEntries(capabilities) };
 }
+function emit() { _onStatus.fire(getStatus()); }
+function modelName(value: string): string {
+  const name = String(value).trim();
+  if (!name || name.length > 512 || /[\s\x00-\x1f]/.test(name)) throw new Error("Enter a valid Ollama model name, for example qwen3:8b.");
+  return name;
+}
+const jsonBody = (model: string, extra: Record<string, unknown> = {}): RequestInit => ({
+  method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model, ...extra }),
+});
 
-/** Whether the `ollama` CLI is installed (`ollama --version`). */
-export function checkInstalled(): Promise<boolean> {
-  return new Promise((resolve) => {
-    execFile(CLI, ["--version"], (err) => {
-      installedCache = !err;
-      emit();
-      resolve(!err);
-    });
+/** CLI availability and daemon reachability are different states. */
+export async function checkInstalled(): Promise<boolean> {
+  installedCache = await new Promise<boolean>(resolve => {
+    execFile("ollama", ["--version"], { timeout: 5000, windowsHide: true, maxBuffer: 64 * 1024 }, error => resolve(!error));
   });
+  await refreshStatus(); emit(); return installedCache;
 }
-
-/** List models pulled locally (via /api/tags — the CLI has no JSON output). */
+export async function refreshStatus(): Promise<void> {
+  const host = HOST;
+  try {
+    const info = await localJson<{ version: string }>(`${host}/api/version`);
+    if (typeof info.version !== "string") throw new Error("The endpoint did not identify itself as an Ollama daemon.");
+    const running = await localJson<{ models: any[] }>(`${host}/api/ps`);
+    if (!Array.isArray(running.models)) throw new Error("Invalid Ollama running-model response.");
+    if (HOST !== host) return;
+    reachable = true; version = info.version; errors.delete("runtime");
+    loaded = Object.fromEntries(running.models.filter(m => typeof m.name === "string").map(m => [m.name, {
+      sizeBytes: m.size, vramBytes: m.size_vram, contextLength: m.context_length, expiresAt: m.expires_at,
+    }]));
+    for (const [name, state] of states) if (state === "ready" && !loaded[name]) states.set(name, "available");
+    for (const name of Object.keys(loaded)) if (!operations.has(name)) states.set(name, "ready");
+  } catch (error) {
+    if (HOST !== host) return;
+    reachable = false; loaded = {}; errors.set("runtime", error instanceof Error ? error.message : String(error));
+  }
+  emit();
+}
 export async function listModels(): Promise<OllamaModel[]> {
-  const r = await fetch(`${HOST}/api/tags`);
-  if (!r.ok) throw new Error(`ollama tags ${r.status}`);
-  const d: any = await r.json();
-  return (d?.models ?? []).map((m: any) => ({
-    name: m.name,
-    sizeBytes: m.size,
-    parameterSize: m.details?.parameter_size,
-    quantization: m.details?.quantization_level,
-    family: m.details?.family,
-  }));
+  const result = await localJson<{ models: any[] }>(`${HOST}/api/tags`);
+  if (!Array.isArray(result.models)) throw new Error("Endpoint did not return an Ollama model list.");
+  return result.models.filter(m => typeof m.name === "string").map(m => ({ name: m.name, sizeBytes: m.size,
+    parameterSize: m.details?.parameter_size, quantization: m.details?.quantization_level, family: m.details?.family }));
+}
+export async function inspectModel(name: string): Promise<string[]> {
+  name = modelName(name);
+  const result = await localJson(`${HOST}/api/show`, jsonBody(name));
+  const values = Array.isArray(result.capabilities) ? result.capabilities.filter((v: unknown) => typeof v === "string") : [];
+  capabilities.set(name, values); emit(); return values;
 }
 
-/**
- * Pull (download) a model via `ollama pull <name>`. Progress is printed to
- * stderr as a percentage; we parse it and report 0-100. Resolves on success.
- */
-export function pullModel(name: string, onProgress?: (pct: number) => void): Promise<void> {
-  errors.delete(name);
-  pulling.set(name, 0);
-  emit();
-  return new Promise<void>((resolve, reject) => {
-    const proc = spawn(CLI, ["pull", name], { stdio: ["ignore", "pipe", "pipe"] });
-    pullProcs.set(name, proc);
-    let stderrTail = "";
-    const onData = (b: Buffer) => {
-      const text = b.toString();
-      stderrTail = (stderrTail + text).slice(-500);
-      // Progress lines look like: "pulling manifest... 42%" (CR-updated).
-      const matches = text.match(/(\d+)\s*%/g);
-      if (matches?.length) {
-        const pct = parseInt(matches[matches.length - 1], 10);
-        if (!Number.isNaN(pct)) {
-          pulling.set(name, pct);
-          onProgress?.(pct);
-          emit();
-        }
+/** The daemon verifies layers and resumes cancelled pulls; no CLI text scraping. */
+export function pullModel(value: string, onProgress?: (pct: number) => void): Promise<void> {
+  const name = modelName(value);
+  const existing = pulls.get(name); if (existing) return existing.promise;
+  const controller = new AbortController();
+  const host = HOST;
+  errors.delete(name); pulling.set(name, 0); states.set(name, "downloading"); emit();
+  const promise = (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const reset = () => { clearTimeout(timer); timer = setTimeout(() => controller.abort(new Error("Download stalled; pull again to resume.")), 60_000); };
+    try {
+      reset();
+      const response = await fetch(`${host}/api/pull`, { ...jsonBody(name, { stream: true }), signal: controller.signal });
+      if (!response.ok || !response.body) throw new Error(`Ollama pull failed (HTTP ${response.status}).`);
+      reader = response.body.getReader();
+      const decoder = new TextDecoder(); let buffer = "", success = false;
+      const layers = new Map<string, { completed: number; total: number }>();
+      const consume = (line: string) => {
+        if (!line.trim()) return;
+        const data = JSON.parse(line);
+        if (data.error) throw new Error(String(data.error));
+        if (data.status === "success") success = true;
+        if (typeof data.digest === "string" && Number(data.total) > 0) layers.set(data.digest, { total: Number(data.total), completed: Math.max(0, Number(data.completed) || 0) });
+        const total = [...layers.values()].reduce((n, l) => n + l.total, 0);
+        const completed = [...layers.values()].reduce((n, l) => n + Math.min(l.total, l.completed), 0);
+        const pct = success ? 100 : total ? Math.min(99, Math.floor(completed / total * 100)) : 0;
+        if (HOST === host) { pulling.set(name, pct); progress.set(name, String(data.status || "Downloading")); onProgress?.(pct); emit(); }
+      };
+      for (;;) {
+        controller.signal.throwIfAborted(); reset();
+        const chunk = await reader.read();
+        buffer += chunk.done ? decoder.decode() : decoder.decode(chunk.value, { stream: true });
+        if (buffer.length > 1024 * 1024) throw new Error("Ollama progress record exceeded 1 MiB.");
+        let end: number;
+        while ((end = buffer.indexOf("\n")) >= 0) { consume(buffer.slice(0, end)); buffer = buffer.slice(end + 1); }
+        if (chunk.done) { consume(buffer); break; }
       }
-    };
-    proc.stdout?.on("data", onData);
-    proc.stderr?.on("data", onData);
-    proc.on("error", (e) => {
-      pullProcs.delete(name);
-      pulling.delete(name);
-      errors.set(name, e.message);
+      if (!success) throw new Error("Download ended before Ollama confirmed success; pull again to resume.");
+      if (HOST === host) states.set(name, "available");
+    } catch (error) {
+      if (HOST === host) { errors.set(name, controller.signal.aborted ? "Download cancelled or stalled. Pull again to resume." : error instanceof Error ? error.message : String(error)); states.set(name, "error"); }
+      throw error;
+    } finally {
+      clearTimeout(timer); await reader?.cancel().catch(() => {}); reader?.releaseLock();
+      if (pulls.get(name)?.controller === controller) { pulls.delete(name); pulling.delete(name); progress.delete(name); }
       emit();
-      reject(e);
-    });
-    proc.on("exit", (code) => {
-      pullProcs.delete(name);
-      pulling.delete(name);
-      if (code === 0) {
-        emit();
-        resolve();
-      } else {
-        const msg = stderrTail.trim() || `ollama pull exited (${code})`;
-        errors.set(name, msg);
-        emit();
-        reject(new Error(msg));
-      }
-    });
-  });
+    }
+  })();
+  pulls.set(name, { controller, promise }); return promise;
 }
+export function cancelPull(name: string): void { pulls.get(name)?.controller.abort(new Error("Download cancelled")); }
 
-/** Cancel an in-flight pull. */
-export function cancelPull(name: string): void {
-  pullProcs.get(name)?.kill();
-  pullProcs.delete(name);
-  pulling.delete(name);
-  emit();
+export function setModelLoaded(value: string, load: boolean, contextLength = 8192, keepAliveMinutes = 5): Promise<void> {
+  const name = modelName(value);
+  const existing = operations.get(name); if (existing) return existing;
+  if (!Number.isInteger(contextLength) || contextLength < 512 || contextLength > 1048576 || !Number.isFinite(keepAliveMinutes) || keepAliveMinutes < 0 || keepAliveMinutes > 1440) return Promise.reject(new Error("Invalid context size or keep-alive duration."));
+  errors.delete(name); states.set(name, load ? "loading" : "stopping"); emit();
+  const promise = (async () => {
+    try {
+      const result = await localJson(`${HOST}/api/generate`, jsonBody(name, { prompt: "", stream: false, keep_alive: load ? `${keepAliveMinutes}m` : 0,
+        ...(load ? { options: { num_ctx: contextLength } } : {}) }), 10 * 60_000);
+      if (result.done !== true) throw new Error("Ollama did not confirm the load/unload operation.");
+      states.set(name, load ? "ready" : "available");
+    } catch (error) { errors.set(name, error instanceof Error ? error.message : String(error)); states.set(name, "error"); throw error; }
+    finally { operations.delete(name); await refreshStatus(); }
+  })();
+  operations.set(name, promise); return promise;
 }
-
-/** Delete a locally-pulled model via `ollama rm <name>`. */
-export function deleteModel(name: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    execFile(CLI, ["rm", name], (err, _out, stderr) => {
-      if (err) return reject(new Error(stderr?.trim() || err.message));
-      emit();
-      resolve();
-    });
-  });
+export async function deleteModel(value: string): Promise<void> {
+  const name = modelName(value);
+  if (pulls.has(name) || operations.has(name)) throw new Error("Wait for the model operation to finish before deleting it.");
+  try {
+    await localJson(`${HOST}/api/delete`, { ...jsonBody(name), method: "DELETE" });
+    states.delete(name); capabilities.delete(name); errors.delete(name); await refreshStatus();
+  } catch (error) { errors.set(name, error instanceof Error ? error.message : String(error)); emit(); throw error; }
 }
 
 /** Open Ollama's install page. */
@@ -180,6 +201,7 @@ export interface OllamaLibraryModel {
 export async function searchLibrary(query: string): Promise<OllamaLibraryModel[]> {
   const r = await fetch(`https://ollama.com/search?q=${encodeURIComponent(query)}`, {
     headers: { "user-agent": "Mozilla/5.0", accept: "text/html" },
+    signal: AbortSignal.timeout(15_000),
   });
   if (!r.ok) throw new Error(`ollama search ${r.status}`);
   const html = await r.text();
@@ -204,6 +226,7 @@ export async function searchLibrary(query: string): Promise<OllamaLibraryModel[]
 export async function listLibraryTags(name: string): Promise<string[]> {
   const r = await fetch(`https://ollama.com/library/${encodeURIComponent(name)}/tags`, {
     headers: { "user-agent": "Mozilla/5.0", accept: "text/html" },
+    signal: AbortSignal.timeout(15_000),
   });
   if (!r.ok) throw new Error(`ollama tags ${r.status}`);
   const html = await r.text();
