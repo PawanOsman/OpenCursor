@@ -40,7 +40,7 @@ function loadEnv() {
 const ENV = loadEnv();
 const API_KEY = ENV.VERBOO_API_KEY || "";
 const BASE_URL = ENV.VERBOO_BASE_URL || "";
-const hasAPI = API_KEY && BASE_URL && API_KEY.startsWith("vbk_");
+const hasAPI = process.env.OPENCURSOR_LIVE_TESTS === "1" && API_KEY && BASE_URL && API_KEY.startsWith("vbk_");
 
 // ---- Real API call ----
 async function callRealAPI(prompt: string, model = "glm-4.7-flash"): Promise<{
@@ -139,20 +139,15 @@ describeIfApi("REAL API PIPELINE: model → handler → UI", () => {
       "Crie uma lista de tarefas detalhada com pelo menos 5 itens para analisar as issues do repositório anthropics/claude-code e propor melhorias para a extensão OpenCursor. Cada tarefa deve ser específica e acionável.",
     );
 
-    if (result.error) {
-      console.log("API error (skipping):", result.error);
-      return;
-    }
+    if (result.error) throw new Error(`Live API evaluation inconclusive: ${result.error}`);
 
     // Verify model called TodoWrite (or responded with text — model behavior varies)
     if (result.toolCalls.length === 0) {
-      console.log("Model responded with text instead of TodoWrite — skipping handler test");
-      return;
+      throw new Error("Model responded with text instead of TodoWrite — skipping handler test".replace(/skipping.*$/, "required model behavior was missing"));
     }
     const todoCall = result.toolCalls.find((tc) => tc.name === "TodoWrite");
     if (!todoCall) {
-      console.log("Model called other tools but not TodoWrite — skipping");
-      return;
+      throw new Error("Model called other tools but not TodoWrite — skipping".replace(/skipping.*$/, "required model behavior was missing"));
     }
 
     // Feed through handler
@@ -180,19 +175,14 @@ describeIfApi("REAL API PIPELINE: model → handler → UI", () => {
       "I need to implement a form rendering system in a VS Code extension. Create a detailed todo list with at least 10 specific tasks covering: schema design, component implementation, input validation, error handling, testing, documentation, deployment, and monitoring. Each task should be specific and actionable.",
     );
 
-    if (result.error) {
-      console.log("API error (skipping):", result.error);
-      return;
-    }
+    if (result.error) throw new Error(`Live API evaluation inconclusive: ${result.error}`);
 
     if (result.toolCalls.length === 0) {
-      console.log("Model responded with text — skipping");
-      return;
+      throw new Error("Model responded with text — skipping".replace(/skipping.*$/, "required model behavior was missing"));
     }
     const todoCall = result.toolCalls.find((tc) => tc.name === "TodoWrite");
     if (!todoCall) {
-      console.log("Model called other tools but not TodoWrite — skipping");
-      return;
+      throw new Error("Model called other tools but not TodoWrite — skipping".replace(/skipping.*$/, "required model behavior was missing"));
     }
 
     const ctx: ToolContext = { todos: [] };
@@ -212,14 +202,10 @@ describeIfApi("REAL API PIPELINE: model → handler → UI", () => {
       "Create a todo list with 3 tasks. Then mark the first task as in_progress using merge=true.",
     );
 
-    if (result.error) {
-      console.log("API error (skipping):", result.error);
-      return;
-    }
+    if (result.error) throw new Error(`Live API evaluation inconclusive: ${result.error}`);
 
     if (result.toolCalls.length === 0) {
-      console.log("Model responded with text — skipping");
-      return;
+      throw new Error("Model responded with text — skipping".replace(/skipping.*$/, "required model behavior was missing"));
     }
 
     // Process all tool calls in sequence
@@ -233,8 +219,7 @@ describeIfApi("REAL API PIPELINE: model → handler → UI", () => {
 
     // Should have at least 1 todo
     if (ctx.todos.length === 0) {
-      console.log("Model didn't create todos — skipping assertions");
-      return;
+      throw new Error("Model didn't create todos — skipping assertions".replace(/skipping.*$/, "required model behavior was missing"));
     }
     // At least one should be in_progress or completed
     const progressItems = ctx.todos.filter((t) => t.status !== "pending");
@@ -251,10 +236,7 @@ describeIfApi("REAL API PIPELINE: model → handler → UI", () => {
       "Create a simple todo list with 2 tasks.",
     );
 
-    if (result.error) {
-      console.log("API error (skipping):", result.error);
-      return;
-    }
+    if (result.error) throw new Error(`Live API evaluation inconclusive: ${result.error}`);
 
     const ctx: ToolContext = { todos: [] };
     for (const tc of result.toolCalls) {
@@ -280,19 +262,14 @@ describeIfApi("REAL API PIPELINE: 50+ task stress test", () => {
       "Create an extremely detailed todo list with AT LEAST 50 specific tasks for analyzing the anthropics/claude-code repository. Break down each major area (architecture, tools, testing, deployment, security, performance, UX, documentation, CI/CD, monitoring) into at least 5 subtasks each. Be very specific.",
     );
 
-    if (result.error) {
-      console.log("API error (skipping):", result.error);
-      return;
-    }
+    if (result.error) throw new Error(`Live API evaluation inconclusive: ${result.error}`);
 
     if (result.toolCalls.length === 0) {
-      console.log("Model responded with text — skipping (50+ task test needs TodoWrite)");
-      return;
+      throw new Error("Model responded with text — skipping (50+ task test needs TodoWrite)".replace(/skipping.*$/, "required model behavior was missing"));
     }
     const todoCall = result.toolCalls.find((tc) => tc.name === "TodoWrite");
     if (!todoCall) {
-      console.log("Model didn't call TodoWrite for 50+ tasks — skipping");
-      return;
+      throw new Error("Model didn't call TodoWrite for 50+ tasks — skipping".replace(/skipping.*$/, "required model behavior was missing"));
     }
 
     const ctx: ToolContext = { todos: [] };

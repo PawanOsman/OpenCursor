@@ -17,8 +17,22 @@ import type { ContextState } from "./contextState";
 
 /** Every input needed to drive a single {@link runAgent} run. */
 export interface RunAgentOptions {
+	workspaceRoot?: string;
+	executionProfile?: import("./execution").ExecutionProfile;
+	/** Host capability ceiling, inherited by every child. */
+	unavailableTools?: string[];
+	runId?: string;
+	goal?: { objective: string; status: string; tokenBudget?: number; tokensUsed: number };
+	onGoalUsage?: (deltaTokens: number) => void;
+	onGoalStatus?: (status: "active" | "paused" | "blocked" | "budgetLimited" | "complete") => void;
+	/** Internal parent budget ceiling, shared by concurrently running children. */
+	budgetExhausted?: () => boolean;
+	drainSteering?: () => string[] | Promise<string[]>;
+	onRunEvent?: (event: { type: string; at: number; data?: unknown }) => Promise<void>;
 	apiBaseUrl: string;
 	apiKey: string;
+	/** Live same-provider credential pool, shared by child and summary requests. */
+	apiKeyPool?: import("./provider/apiKeyPool").ApiKeyPool;
 	model: string;
 	mode: Mode;
 	prompt: string;
@@ -77,7 +91,7 @@ export interface RunAgentOptions {
 	 * Generic hook trigger for the remaining events (beforeMcp, beforeReadFile, subagentStop, preCompact).
 	 * For blocking "before" events the resolved string (if any) vetoes the action.
 	 */
-	onHook?: (event: "beforeMcp" | "beforeReadFile" | "beforeEdit" | "subagentStop" | "preCompact", context: Record<string, string>, tool?: string, signal?: AbortSignal) => Promise<string | undefined> | void;
+	onHook?: (event: import("../integrations/hooksRunner").TriggerEvent, context: Record<string, string>, tool?: string, signal?: AbortSignal) => Promise<string | undefined> | void;
 	signal: AbortSignal;
 	emit: (e: AgentEvent) => void;
 }

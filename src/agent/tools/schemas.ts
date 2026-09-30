@@ -10,6 +10,8 @@
 // Shared tool contracts with concise model-facing descriptions.
 // Every Tool schema is derived from here (see defineTool in types.ts).
 // Handlers live in the sibling files and reference these specs by name.
+import { LANGUAGE_TOOL_SPECS } from "./languageSchemas";
+import { BROWSER_TOOL_SPECS } from "./browserSchemas";
 
 export interface ToolSpec {
   name: string;
@@ -22,14 +24,25 @@ export const TOOL_SPECS: Record<string, ToolSpec> = {};
 function def(spec: ToolSpec) {
   TOOL_SPECS[spec.name] = spec;
 }
+for (const spec of LANGUAGE_TOOL_SPECS) def(spec);
+for (const spec of BROWSER_TOOL_SPECS) def(spec);
+def({ name: "WriteStdin", description: "Write characters to an owned interactive terminal, resize it, or terminate it. Characters can execute commands and require shell permission. Use a shell_id returned by Shell with tty=true. Output is bounded; use ReadContext for the transcript.", parameters: { type: "object", properties: { shell_id: { type: "string", minLength: 1 }, chars: { type: "string", maxLength: 65536 }, cols: { type: "integer", minimum: 20, maximum: 500 }, rows: { type: "integer", minimum: 5, maximum: 200 }, terminate: { type: "boolean" }, block_until_ms: { type: "integer", minimum: 0, maximum: 30000 } }, required: ["shell_id"] } });
+def({ name: "ListAgents", description: "List this conversation's collaborators with stable IDs, status, models, and queued messages.", parameters: { type: "object", properties: {} } });
+for (const name of ["SendAgentMessage", "FollowupAgent"]) def({ name, description: name === "FollowupAgent" ? "Send a follow-up to an existing collaborator. Starts an idle/interrupted agent with its saved history; steers a running agent at its next safe boundary." : "Queue a message for a collaborator. Running agents consume it at their next safe boundary; idle agents require FollowupAgent to resume.", parameters: { type: "object", properties: { id: { type: "string", minLength: 1 }, message: { type: "string", minLength: 1, maxLength: 30000 } }, required: ["id", "message"] } });
+def({ name: "InterruptAgent", description: "Interrupt an owned collaborator and await its cleanup; preserve its transcript for a future follow-up.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } });
+def({ name: "WaitForAgent", description: "Wait for a collaborator result, up to the bounded timeout. An interrupted wait does not cancel the collaborator.", parameters: { type: "object", properties: { id: { type: "string" }, timeout_ms: { type: "integer", minimum: 0, maximum: 60000 } }, required: ["id"] } });
+def({ name: "GetGoal", description: "Read the persisted conversation goal and budget, if configured.", parameters: { type: "object", properties: {} } });
+def({ name: "UpdateGoal", description: "Update an existing goal status. Complete only when the requested work is achieved; report verification limits in the answer. Pause only when the user asks.", parameters: { type: "object", properties: { status: { type: "string", enum: ["active", "paused", "blocked", "complete"] } }, required: ["status"] } });
+def({ name: "GetVerificationEvidence", description: "Read checks and their observed exit codes for this run. Checks become stale after a subsequent known file edit; passing checks do not prove all requirements.", parameters: { type: "object", properties: {} } });
+def({ name: "RunChecks", description: "Run a user-authorized test, build, lint or other verification command and record actual exit-code evidence. Follow no-test instructions. Use AwaitShell if still running.", parameters: { type: "object", properties: { command: { type: "string", minLength: 1 }, working_directory: { type: "string" }, block_until_ms: { type: "number", minimum: 0, maximum: 30000 }, description: { type: "string" } }, required: ["command"] } });
 
 def({
   name: "ReadContext",
-  description: "Read or search archived context by id, history for the full conversation, capabilities for current availability, mcp for its tool catalog, or a shell_ job id for retained terminal output. Returns a bounded excerpt; use next_line/next_column to continue. Load only the details needed for the current task.",
+  description: "Read or search archived context by id, history for the full conversation, capabilities for current availability, tools for optional built-in schemas, mcp for its tool catalog, or a shell_ job id for retained terminal output. Read a catalog entry's schema id to enable it. Returns a bounded excerpt; use next_line/next_column to continue. Load only the details needed for the current task.",
   parameters: {
     type: "object",
     properties: {
-      id: { type: "string", description: "Archive or shell_ job id from a previous result, history, capabilities, or mcp" },
+      id: { type: "string", description: "Archive or shell_ job id from a previous result, history, capabilities, tools, or mcp" },
       start_line: { type: "integer", minimum: 1, description: "First line, 1-based" },
       end_line: { type: "integer", minimum: 1, description: "Last line, inclusive" },
       start_column: { type: "integer", minimum: 1, description: "Resume a long line from next_column" },
@@ -46,6 +59,9 @@ def({
     type: "object",
     properties: {
       command: { type: "string", description: "The command to execute" },
+      tty: { type: "boolean", description: "Use a native interactive pseudoterminal; WriteStdin can supply input and resize. Available for local execution." },
+      cols: { type: "integer", minimum: 20, maximum: 500 },
+      rows: { type: "integer", minimum: 5, maximum: 200 },
       working_directory: { type: "string", description: "The absolute path to the working directory to execute the command in (defaults to current directory)" },
       block_until_ms: { type: "number", description: "How long to block and wait for the command to complete before moving it to background (in milliseconds). Defaults to 30000ms (30 seconds). Set to 0 to immediately run the command in the background. The timer includes the shell startup time." },
       description: { type: "string", description: "Clear, concise description of what this command does in 5-10 words" },
@@ -228,13 +244,13 @@ def({
             content: { type: "string", description: "The description/content of the todo item" },
             status: { type: "string", enum: ["pending", "in_progress", "completed", "cancelled"], description: "The current status of the TODO item" },
           },
-          required: ["id", "content", "status"],
+          required: ["id"],
         },
         description: "Array of TODO items to update or create. Can be a single item.",
       },
       merge: { type: "boolean", description: "Whether to merge the todos with the existing todos. If true, the todos will be merged into the existing todos based on the id field. You can leave unchanged properties undefined. If false, the new todos will replace the existing todos." },
     },
-    required: ["todos", "merge"],
+    required: ["todos"],
   },
 });
 
@@ -251,12 +267,12 @@ def({
 
 def({
   name: "SemanticSearch",
-  description: "`SemanticSearch`: semantic search that finds code by meaning, not exact text\n\n### When to Use This Tool\n\nUse `SemanticSearch` when you need to:\n- Explore unfamiliar codebases\n- Ask \"how / where / what\" questions to understand behavior\n- Find code by meaning rather than exact text\n\n### When NOT to Use\n\nSkip `SemanticSearch` for:\n1. Exact text matches (use `Grep`)\n2. Reading known files (use `Read`)\n3. Simple symbol lookups (use `Grep`)\n4. Find file by name (use `Glob`)\n\n### Examples\n\n<example>\n  Query: \"Where is interface MyInterface implemented in the frontend?\"\n<reasoning>\n  Good: Complete question asking about implementation location with specific context (frontend).\n</reasoning>\n</example>\n\n<example>\n  Query: \"Where do we encrypt user passwords before saving?\"\n<reasoning>\n  Good: Clear question about a specific process with context about when it happens.\n</reasoning>\n</example>\n\n<example>\n  Query: \"MyInterface frontend\"\n<reasoning>\n  BAD: Too vague; use a specific question instead. This would be better as \"Where is MyInterface used in the frontend?\"\n</reasoning>\n</example>\n\n<example>\n  Query: \"AuthService\"\n<reasoning>\n  BAD: Single word searches should use `Grep` for exact text matching instead.\n</reasoning>\n</example>\n\n<example>\n  Query: \"What is AuthService? How does AuthService work?\"\n<reasoning>\n  BAD: Combines two separate queries. A single semantic search is not good at looking for multiple things in parallel. Split into separate parallel searches: like \"What is AuthService?\" and \"How does AuthService work?\"\n</reasoning>\n</example>\n\n### Target Directories\n\n- Provide ONE directory or file path; [] searches the whole repo. No globs or wildcards.\n  Good:\n  - [\"backend/api/\"]   - focus directory\n  - [\"src/components/Button.tsx\"] - single file\n  - [] - search everywhere when unsure\n  BAD:\n  - [\"frontend/\", \"backend/\"] - multiple paths\n  - [\"src/**/utils/**\"] - globs\n  - [\"*.ts\"] or [\"**/*\"] - wildcard paths\n\n### Search Strategy\n\n1. Start with exploratory queries - semantic search is powerful and often finds relevant context in one go. Begin broad with [] if you're not sure where relevant code is.\n2. Review results; if a directory or file stands out, rerun with that as the target.\n3. Break large questions into smaller ones (e.g. auth roles vs session storage).\n4. For big files (>1K lines) run `SemanticSearch`, or `Grep` if you know the exact symbols you're looking for, scoped to that file instead of reading the entire file.\n\n<example>\n  Step 1: { \"query\": \"How does user authentication work?\", \"target_directories\": [], \"explanation\": \"Find auth flow\" }\n  Step 2: Suppose results point to backend/auth/ → rerun:\n          { \"query\": \"Where are user roles checked?\", \"target_directories\": [\"backend/auth/\"], \"explanation\": \"Find role logic\" }\n<reasoning>\n  Good strategy: Start broad to understand overall system, then narrow down to specific areas based on initial results.\n</reasoning>\n</example>\n\n<example>\n  Query: \"How are websocket connections handled?\"\n  Target: [\"backend/services/realtime.ts\"]\n<reasoning>\n  Good: We know the answer is in this specific file, but the file is too large to read entirely, so we use semantic search to find the relevant parts.\n</reasoning>\n</example>\n\n### Usage\n- When full chunk contents are provided, avoid re-reading the exact same chunk contents using the Read tool.\n- Sometimes, just the chunk signatures and not the full chunks will be shown. Chunk signatures are usually Class or Function signatures that chunks are contained in. Use the Read or Grep tools to explore these chunks or files if you think they might be relevant.\n- When reading chunks that weren't provided as full chunks (e.g. only as line ranges or signatures), you'll sometimes want to expand the chunk ranges to include the start of the file to see imports, expand the range to include lines from the signature, or expand the range to read multiple chunks from a file at once.",
+  description: "Find relevant code by fusing current lexical matches with version-checked semantic embeddings. Supports multiple file/directory scopes and unsaved editor buffers. Rankings are retrieval scores, not confidence. Results and scans are bounded; use Grep for exhaustive exact matches, language tools for symbols, and Read for more lines.",
   parameters: {
     type: "object",
     properties: {
       query: { type: "string", description: "A complete question about what you want to understand. Ask as if talking to a colleague: 'How does X work?', 'What happens when Y?', 'Where is Z handled?'" },
-      target_directories: { type: "array", items: { type: "string" }, description: "Prefix directory paths to limit search scope (single directory only, no glob patterns)" },
+      target_directories: { type: "array", items: { type: "string" }, description: "File or directory paths to limit search scope; no glob patterns" },
       num_results: { type: "integer", minimum: 1, maximum: 15, description: "The number of results to return. Defaults to 15. Do not specify a value larger than 15." },
     },
     required: ["query", "target_directories"],
@@ -352,12 +368,14 @@ def({
 
 def({
   name: "Task",
-  description: "Delegate an independent task to a fresh subagent. Include its task, necessary context, constraints, and expected report. Children inherit the parent permission ceiling and enabled tools. Explore and review types are read-only. Each call starts a new agent; resume and fork are unavailable. Multiple Task calls may run concurrently. run_in_background returns immediately while the child works; the parent run remains active, receives the child report, and can synthesize it. All child work stops with the parent run. Subagents share the workspace, so assign separate files for concurrent edits.",
+  description: "Delegate an independent task. Children inherit permissions and enabled tools; explore/review types are read-only. resume continues a saved collaborator; fork copies parent history into a new child. Use ListAgents/SendAgentMessage/FollowupAgent/WaitForAgent/InterruptAgent to coordinate stable IDs. Up to four active collaborators share the workspace; assign separate files. Background results arrive automatically; all live child work stops with the parent run, with history retained for explicit resume.",
   parameters: {
     type: "object",
     properties: {
       description: { type: "string", description: "A short, concrete title for the subagent shown in the UI." },
       prompt: { type: "string", description: "The task for the agent to perform" },
+      resume: { type: "string", description: "Existing collaborator ID to continue with its saved history" },
+      fork: { type: "boolean", description: "Copy parent history into a new collaborator" },
       model: { type: "string", description: "Optional model slug for this agent. Omit it unless the user explicitly named a model — by default the subagent inherits the parent agent's model. Never guess or invent a slug: an unknown slug is ignored and the parent model is used instead." },
       readonly: { type: "boolean", description: "If true, the subagent will run in readonly mode (\"Ask mode\") without filesystem mutations or MCP execution. Web access follows the parent settings." },
       subagent_type: {
@@ -429,8 +447,7 @@ def({
 });
 
 // ---------------------------------------------------------------------------
-// OpenCursor-specific tools (not part of Cursor's request). Same description
-// style and level of detail as the tools above.
+// Additional workspace tools.
 // ---------------------------------------------------------------------------
 
 def({

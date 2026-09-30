@@ -16,8 +16,11 @@ import { AnthropicUsageTracker } from "./anthropicUsage";
 import { sseData } from "./provider/sse";
 import { CLAUDE_OAUTH_CONFIG as ANTHROPIC, buildClaudeAuthorizationUrl, buildClaudeMessagesRequest, claudeOAuthHeaders } from "./oauth/claude";
 import { CODEX_CONFIG as CODEX, codexHeaders, createCodexRequest, parseCodexStream, CodexProtocolError } from "./oauth/codex";
-import { ANTIGRAVITY_CONFIG as ANTIGRAVITY, antigravityHeaders, toAntigravityRequest, parseAntigravityStream, resolveAntigravityProject, AntigravityProtocolError } from "./oauth/antigravity";
+import { ANTIGRAVITY_CONFIG as ANTIGRAVITY, antigravityHeaders, antigravityModelChoices, resolveAntigravityModel, toAntigravityRequest, parseAntigravityStream, resolveAntigravityProject, AntigravityProtocolError } from "./oauth/antigravity";
 import type { ModelParams, SamplingParams } from "./provider/types";
+import { OAUTH_KINDS, OAUTH_PROVIDER_DEFINITIONS, isOAuthProviderKind, supportsOAuthQuota } from "../shared/oauthProviders";
+import type { OAuthLoginOptions, AccountLogin } from "./oauth/accountAuth";
+export type { OAuthLoginOptions } from "./oauth/accountAuth";
 
 export type {
   OAuthKind,
@@ -45,7 +48,7 @@ export const BALANCE_LABELS: Record<OAuthBalanceStrategy, string> = {
   "nearest-reset": "Nearest reset time",
 };
 
-export const OAUTH_LABEL: Record<OAuthKind, string> = { "claude-code": "Claude Code", codex: "OpenAI Codex", antigravity: "Google Antigravity" };
+export const OAUTH_LABEL = Object.fromEntries(OAUTH_PROVIDER_DEFINITIONS.map(provider => [provider.kind, provider.label])) as Record<OAuthKind, string>;
 
 const redirectUri = (k: OAuthKind) =>
   k === "claude-code" ? `http://localhost:${ANTHROPIC.port}${ANTHROPIC.path}`
@@ -55,6 +58,9 @@ const redirectUri = (k: OAuthKind) =>
 // ---- Module state ----
 
 let ctx: vscode.ExtensionContext | undefined;
+let contextGeneration = 0;
+let loginGeneration = 0;
+let accountLogin: AccountLogin | undefined;
 /** Live in-memory accounts keyed by account id. */
 const accounts = new Map<string, OAuthAccount>();
 let pendingKind: OAuthKind | undefined;
@@ -75,25 +81,44 @@ const pending = new Map<OAuthKind, LoginAttempt>();
 /** Single-flight refresh lock per account id (Codex rotates refresh tokens). */
 const refreshing = new Map<string, Promise<OAuthAccount>>();
 const resolvingProjects = new Map<string, Promise<OAuthAccount>>();
+const antigravityCatalogs = new Map<string, { identity: string; expiresAt: number; ids: string[] }>();
+const ANTIGRAVITY_CATALOG_TTL_MS = 5 * 60_000;
+/** Failed accounts pause briefly; credential changes and re-enabling reset this. */
+const accountCooldowns = new Map<string, number>();
 let persistence: Promise<void> = Promise.resolve();
+
+/** Credential failures belong to this account, not to the user's model request. */
+class OAuthAccountError extends Error {
+  constructor(message: string) { super(message); this.name = "OAuthAccountError"; }
+}
+class OAuthConnectionError extends Error {
+  constructor(message: string) { super(message); this.name = "OAuthConnectionError"; }
+}
 
 /** Index of account ids persisted in globalState. */
 const INDEX_KEY = "ocursor.oauth.accountIds";
 const SECRET_KEY = (id: string) => `ocursor.oauth.acct.${id}`;
 
 export function initOAuth(context: vscode.ExtensionContext) {
+  const generation = ++contextGeneration;
+  loginGeneration++;
+  for (const active of pending.keys()) cancelLogin(active);
+  accountLogin?.cancel(); accountLogin = undefined; pendingKind = undefined;
+  accounts.clear(); accountCooldowns.clear(); rrCursor.clear(); refreshing.clear(); resolvingProjects.clear(); antigravityCatalogs.clear();
+  for (const key of Object.keys(loginErrors)) delete loginErrors[key as OAuthKind];
   ctx = context;
-  const ids = ctx.globalState.get<string[]>(INDEX_KEY, []) ?? [];
+  const ids = context.globalState.get<string[]>(INDEX_KEY, []) ?? [];
   void Promise.all(ids.map(async (id) => {
-    const raw = await ctx?.secrets.get(SECRET_KEY(id));
+    const raw = await Promise.resolve(context.secrets.get(SECRET_KEY(id))).catch(() => undefined);
+    if (ctx !== context || generation !== contextGeneration) return;
     if (!raw) return;
     try {
       const acc = JSON.parse(raw) as OAuthAccount;
-      accounts.set(acc.id, acc);
+      if (acc.id === id && isOAuthProviderKind(acc.kind) && typeof acc.accessToken === "string") accounts.set(acc.id, acc);
     } catch {
       /* skip corrupt */
     }
-  })).then(() => emit());
+  })).then(() => { if (ctx === context && generation === contextGeneration) emit(); });
 }
 
 function info(acc: OAuthAccount): OAuthAccountInfo {
@@ -107,22 +132,40 @@ function emit() {
 export function getStatus(): OAuthStatus {
   return { accounts: [...accounts.values()].map(info), pending: pendingKind,
     ...(pendingKind && pending.get(pendingKind) ? { authorizationUrl: pending.get(pendingKind)!.authorizationUrl } : {}),
-    errors: { ...loginErrors }, balanceStrategy: getBalanceStrategy() };
+    ...(accountLogin ? accountLogin.state : {}),
+    errors: { ...loginErrors }, balanceStrategy: getBalanceStrategy(), balanceStrategies: Object.fromEntries(OAUTH_KINDS.map(kind => [kind, getBalanceStrategy(kind)])) };
 }
 
 // ---- Enable/disable + load balancing ----
 
 const STRATEGY_KEY = "ocursor.oauth.balanceStrategy";
+let balancePersistence: Promise<void> = Promise.resolve();
 /** Round-robin cursor per kind (session-scoped). */
 const rrCursor = new Map<OAuthKind, number>();
 
-export function getBalanceStrategy(): OAuthBalanceStrategy {
-  return ctx?.globalState.get<OAuthBalanceStrategy>(STRATEGY_KEY) ?? "first";
+export function getBalanceStrategy(kind?: OAuthKind): OAuthBalanceStrategy {
+  const saved = kind ? ctx?.globalState.get<Partial<Record<OAuthKind, OAuthBalanceStrategy>>>(`${STRATEGY_KEY}.byKind`)?.[kind] : undefined;
+  const strategy = saved ?? ctx?.globalState.get<OAuthBalanceStrategy>(STRATEGY_KEY) ?? "first";
+  if (kind && !supportsOAuthQuota(kind) && (strategy === "highest-limit" || strategy === "nearest-reset")) return "first";
+  return Object.hasOwn(BALANCE_LABELS, strategy) ? strategy : "first";
 }
 
-export async function setBalanceStrategy(s: OAuthBalanceStrategy) {
-  await ctx?.globalState.update(STRATEGY_KEY, s);
-  emit();
+export async function setBalanceStrategy(s: OAuthBalanceStrategy, kind?: OAuthKind) {
+  if (!Object.hasOwn(BALANCE_LABELS, s) || (kind !== undefined && !isOAuthProviderKind(kind))) throw new Error("Unsupported account balancing setting.");
+  if (kind && !supportsOAuthQuota(kind) && (s === "highest-limit" || s === "nearest-reset")) throw new Error("This provider does not report account quota. Choose first account or round robin.");
+  const context = ctx;
+  const generation = contextGeneration;
+  const write = balancePersistence.then(async () => {
+    if (context !== ctx || generation !== contextGeneration) return;
+    if (kind) {
+      const saved = context?.globalState.get<Partial<Record<OAuthKind, OAuthBalanceStrategy>>>(`${STRATEGY_KEY}.byKind`) ?? {};
+      await context?.globalState.update(`${STRATEGY_KEY}.byKind`, { ...saved, [kind]: s });
+      rrCursor.delete(kind);
+    } else { await context?.globalState.update(STRATEGY_KEY, s); rrCursor.clear(); }
+    if (generation === contextGeneration) emit();
+  });
+  balancePersistence = write.catch(() => {});
+  await write;
 }
 
 export async function setAccountEnabled(id: string, enabled: boolean) {
@@ -137,21 +180,22 @@ function enabledOfKind(kind: OAuthKind): OAuthAccount[] {
   return [...accounts.values()].filter((a) => a.kind === kind && !a.disabled);
 }
 
-/** Pick the account to use for a request, honoring the balance strategy. */
-async function pickAccount(kind: OAuthKind): Promise<OAuthAccount | undefined> {
-  const pool = enabledOfKind(kind);
-  if (pool.length <= 1) return pool[0];
-  const strategy = getBalanceStrategy();
+/** Rank one bounded candidate snapshot per request, honoring the strategy. */
+async function rankedAccounts(kind: OAuthKind, signal: AbortSignal): Promise<OAuthAccount[]> {
+  const pool = enabledOfKind(kind).filter(account => (accountCooldowns.get(account.id) ?? 0) <= Date.now());
+  if (pool.length <= 1) return pool;
+  const strategy = getBalanceStrategy(kind);
   if (strategy === "round-robin") {
     const i = (rrCursor.get(kind) ?? -1) + 1;
     rrCursor.set(kind, i);
-    return pool[i % pool.length];
+    const offset = i % pool.length;
+    return [...pool.slice(offset), ...pool.slice(0, offset)];
   }
   if (strategy === "highest-limit" || strategy === "nearest-reset") {
     // Score each account by its limits; fall back to first on any failure.
     const scored = await Promise.all(pool.map(async (a) => {
       try {
-        const u = await getAccountLimits(a.id);
+        const u = await getAccountLimits(a.id, signal);
         const remaining = u.limits.length ? Math.min(...u.limits.map((l) => l.remaining)) : 100;
         const resetAt = Math.min(...u.limits.map((l) => l.resetsAt ?? Number.MAX_SAFE_INTEGER));
         return { a, remaining, resetAt };
@@ -161,9 +205,9 @@ async function pickAccount(kind: OAuthKind): Promise<OAuthAccount | undefined> {
     }));
     if (strategy === "highest-limit") scored.sort((x, y) => y.remaining - x.remaining);
     else scored.sort((x, y) => x.resetAt - y.resetAt);
-    return scored[0]?.a ?? pool[0];
+    return scored.map(item => item.a);
   }
-  return pool[0];
+  return pool;
 }
 
 export function listAccounts(): OAuthAccountInfo[] {
@@ -191,6 +235,11 @@ function pkce() {
 // ---- Persistence ----
 
 async function saveAccount(acc: OAuthAccount) {
+  const previous = accounts.get(acc.id);
+  if (!previous || antigravityCatalogIdentity(previous) !== antigravityCatalogIdentity(acc)) antigravityCatalogs.delete(acc.id);
+  if (!previous || previous.accessToken !== acc.accessToken || previous.refreshToken !== acc.refreshToken || (previous.disabled && !acc.disabled)) {
+    accountCooldowns.delete(acc.id);
+  }
   accounts.set(acc.id, acc);
   const context = ctx;
   const ids = [...accounts.keys()];
@@ -204,7 +253,11 @@ async function saveAccount(acc: OAuthAccount) {
 }
 
 export async function disconnect(id: string) {
+  const kind = accounts.get(id)?.kind;
   accounts.delete(id);
+  accountCooldowns.delete(id);
+  antigravityCatalogs.delete(id);
+  if (kind && !enabledOfKind(kind).length) rrCursor.delete(kind);
   const context = ctx;
   const ids = [...accounts.keys()];
   const write = persistence.then(async () => {
@@ -218,10 +271,42 @@ export async function disconnect(id: string) {
 
 // ---- Login flow (loopback redirect) ----
 
-export async function login(kind: OAuthKind) {
+export async function login(kind: OAuthKind, options?: OAuthLoginOptions) {
+  if (!isOAuthProviderKind(kind)) throw new Error("Unsupported account provider.");
+  accountLogin?.cancel(); accountLogin = undefined;
   // The UI has one active sign-in. A replacement must invalidate all older callbacks.
   for (const active of pending.keys()) cancelLogin(active);
+  const sequence = ++loginGeneration;
   delete loginErrors[kind];
+
+  if (!["claude-code", "codex", "antigravity"].includes(kind)) {
+    pendingKind = kind; emit();
+    const generation = contextGeneration;
+    const { AccountLogin: Login, safeLoginError } = await import("./oauth/accountAuth.js");
+    if (sequence !== loginGeneration || generation !== contextGeneration) return;
+    const attempt = new Login(kind, options ?? {}, {
+      change: emit,
+      complete: async account => {
+        if (accountLogin !== attempt || generation !== contextGeneration) throw new Error("Sign-in was cancelled or replaced.");
+        await saveAccount(account);
+        if (accountLogin === attempt) { accountLogin = undefined; pendingKind = undefined; delete loginErrors[kind]; emit(); }
+      },
+      error: message => { if (accountLogin === attempt) { loginErrors[kind] = message; accountLogin = undefined; pendingKind = undefined; emit(); } },
+      open: async url => {
+        if (accountLogin !== attempt) return;
+        try { if (!await vscode.env.openExternal(vscode.Uri.parse(url))) throw new Error(); }
+        catch { loginErrors[kind] = "VS Code could not open your browser. Copy the sign-in link and open it manually."; emit(); }
+      },
+    });
+    accountLogin = attempt; pendingKind = kind; emit();
+    try { await attempt.start(); }
+    catch (error) {
+      attempt.cancel();
+      if (accountLogin === attempt) { accountLogin = undefined; pendingKind = undefined; loginErrors[kind] = safeLoginError(error); emit(); }
+      throw new Error(safeLoginError(error));
+    }
+    return;
+  }
 
   const { verifier, challenge } = pkce();
   const state = crypto.randomBytes(16).toString("hex");
@@ -312,6 +397,11 @@ function updateLoginError(kind: OAuthKind, attempt: LoginAttempt) {
 
 /** Retry the current link without replacing its PKCE verifier or state. */
 export async function openLoginInBrowser(kind: OAuthKind): Promise<void> {
+  if (accountLogin?.kind === kind) {
+    const url = accountLogin.state.authorizationUrl;
+    if (!url) throw new Error("This account requires a token imported from its provider.");
+    await vscode.env.openExternal(vscode.Uri.parse(url)); return;
+  }
   const attempt = pending.get(kind);
   if (!attempt) throw new Error("No login in progress — click Add account first");
   if (attempt.completing) throw new Error("Sign-in is already being completed.");
@@ -325,6 +415,8 @@ export async function openLoginInBrowser(kind: OAuthKind): Promise<void> {
 }
 
 export function cancelLogin(kind: OAuthKind) {
+  if (pendingKind === kind) { loginGeneration++; pendingKind = undefined; }
+  if (accountLogin?.kind === kind) { accountLogin.cancel(); accountLogin = undefined; if (pendingKind === kind) pendingKind = undefined; }
   const attempt = pending.get(kind);
   if (attempt) clearLoginAttempt(kind, attempt);
   delete loginErrors[kind];
@@ -363,6 +455,17 @@ async function finishLoginAttempt(kind: OAuthKind, attempt: LoginAttempt, code: 
  * the raw code) when the loopback redirect never reaches us.
  */
 export async function completeManual(kind: OAuthKind, pasted: string): Promise<void> {
+  if (accountLogin?.kind === kind) {
+    const attempt = accountLogin;
+    try { await attempt.complete(pasted); }
+    catch (error) {
+      const { safeLoginError } = await import("./oauth/accountAuth.js");
+      const message = safeLoginError(error);
+      if (accountLogin === attempt) { loginErrors[kind] = message; emit(); }
+      throw new Error(message);
+    }
+    return;
+  }
   const p = pending.get(kind);
   if (!p) throw new Error("No login in progress — click Add account first");
   let code = "";
@@ -558,6 +661,7 @@ async function exchangeAntigravity(code: string): Promise<OAuthAccount> {
 }
 
 async function refreshAccount(acc: OAuthAccount): Promise<OAuthAccount> {
+  const generation = contextGeneration;
   const existing = refreshing.get(acc.id);
   if (existing) return existing;
   const p = (async () => {
@@ -583,7 +687,7 @@ async function refreshAccount(acc: OAuthAccount): Promise<OAuthAccount> {
       if (!r.ok) throw new Error(`Antigravity refresh ${r.status}: ${(await r.text()).slice(0, 200)}`);
       const d: any = await r.json();
       next = { ...acc, accessToken: d.access_token, refreshToken: d.refresh_token || acc.refreshToken, expiresAt: tokenExpiry(d) };
-    } else {
+    } else if (acc.kind === "codex") {
       const r = await fetch(CODEX.tokenUrl, {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
@@ -595,8 +699,12 @@ async function refreshAccount(acc: OAuthAccount): Promise<OAuthAccount> {
       const identity = codexIdentity(d);
       next = { ...acc, accessToken: d.access_token, refreshToken: d.refresh_token || acc.refreshToken, idToken: d.id_token || acc.idToken,
         accountId: identity.accountId || acc.accountId, email: identity.email || acc.email, expiresAt: tokenExpiry(d) };
+    } else {
+      const { refreshProviderAccount } = await import("./oauth/accountAuth.js");
+      next = await refreshProviderAccount(acc, AbortSignal.timeout(30_000));
     }
     // A delayed refresh must not reconnect a removed account or undo a toggle.
+    if (generation !== contextGeneration) throw new Error("The account context changed while refreshing.");
     const current = accounts.get(acc.id);
     if (!current) throw new Error(`Account ${acc.id} is no longer connected`);
     if (current.accessToken !== acc.accessToken || current.refreshToken !== acc.refreshToken) return current;
@@ -607,25 +715,29 @@ async function refreshAccount(acc: OAuthAccount): Promise<OAuthAccount> {
     if (!saved) throw new Error(`Account ${acc.id} is no longer connected`);
     return saved;
   })();
-  refreshing.set(acc.id, p);
+  const guarded = p.catch(error => { throw new OAuthAccountError(error instanceof Error ? error.message : String(error)); });
+  refreshing.set(acc.id, guarded);
   try {
-    return await p;
+    return await guarded;
   } finally {
-    refreshing.delete(acc.id);
+    if (refreshing.get(acc.id) === guarded) refreshing.delete(acc.id);
   }
 }
 
 /** Return an account with a fresh access token (refreshing if near expiry). */
 async function validAccount(id: string): Promise<OAuthAccount> {
+  const generation = contextGeneration;
   const acc = accounts.get(id);
-  if (!acc) throw new Error(`Account ${id} is not connected`);
+  if (!acc) throw new OAuthAccountError(`Account ${id} is not connected`);
   // Refresh 5 min before expiry.
   if (!acc.accessToken || !Number.isFinite(acc.expiresAt) || Date.now() > acc.expiresAt - 5 * 60 * 1000) {
     try {
       return await refreshAccount(acc);
     } catch (e) {
-      loginErrors[acc.kind] = String((e as any)?.message || e);
-      emit();
+      if (generation === contextGeneration && accounts.has(acc.id)) {
+        loginErrors[acc.kind] = String((e as any)?.message || e);
+        emit();
+      }
       throw e;
     }
   }
@@ -646,52 +758,65 @@ async function waitForAccount<T>(work: Promise<T>, signal?: AbortSignal): Promis
 }
 
 /** Replay a rejected request once, sharing rotated tokens across concurrent calls. */
-async function oauthFetch(id: string, build: (account: OAuthAccount) => { url: string; init: RequestInit }, signal?: AbortSignal): Promise<Response> {
+async function oauthFetch(id: string, build: (account: OAuthAccount) => { url: string; init: RequestInit }, signal?: AbortSignal, requireEnabled = false, onSentAccount?: (account: OAuthAccount) => void): Promise<Response> {
   signal?.throwIfAborted();
-  const account = await waitForAccount(validAccount(id), signal);
+  let account = await waitForAccount(validAccount(id), signal);
   signal?.throwIfAborted();
-  if (!accounts.has(id)) throw new Error(`Account ${id} is no longer connected`);
+  if (!accounts.has(id)) throw new OAuthAccountError(`Account ${id} is no longer connected`);
+  if (requireEnabled) account = enabledAccount(id);
   const request = build(account);
   const init = { ...request.init, signal: signal ?? request.init.signal ?? AbortSignal.timeout(30_000) };
-  const response = await fetch(request.url, init);
+  const send = (options: RequestInit, credential: OAuthAccount) => {
+    onSentAccount?.(credential);
+    return fetch(request.url, options).catch(error => {
+      if (error instanceof TypeError) throw new OAuthConnectionError(error.message);
+      throw error;
+    });
+  };
+  const response = await send(init, account);
   if (response.status !== 401 || !account.refreshToken) return response;
   await response.body?.cancel().catch(() => {});
   signal?.throwIfAborted();
   const current = accounts.get(id);
-  if (!current) throw new Error(`Account ${id} is no longer connected`);
+  if (!current) throw new OAuthAccountError(`Account ${id} is no longer connected`);
+  if (requireEnabled) enabledAccount(id);
   const fresh = await waitForAccount(current.accessToken !== account.accessToken ? validAccount(id) : refreshAccount(current), signal);
   signal?.throwIfAborted();
-  if (!accounts.has(id)) throw new Error(`Account ${id} is no longer connected`);
+  if (!accounts.has(id)) throw new OAuthAccountError(`Account ${id} is no longer connected`);
+  if (requireEnabled) enabledAccount(id);
   const headers = Object.fromEntries(new Headers(init.headers).entries());
   headers.authorization = `Bearer ${fresh.accessToken}`;
   if (fresh.kind === "codex") {
     delete headers["chatgpt-account-id"];
     if (fresh.accountId) headers["chatgpt-account-id"] = fresh.accountId;
   }
-  return fetch(request.url, { ...init, headers });
+  return send({ ...init, headers }, fresh);
 }
 
-async function ensureAntigravityProject(id: string, signal?: AbortSignal): Promise<OAuthAccount> {
+async function ensureAntigravityProject(id: string, signal?: AbortSignal, forceRefresh = false): Promise<OAuthAccount> {
+  const generation = contextGeneration;
   signal?.throwIfAborted();
   const account = await waitForAccount(validAccount(id), signal);
-  if (account.projectId?.trim()) return account;
-  let work = resolvingProjects.get(id);
+  if (account.projectId?.trim() && !forceRefresh) return account;
+  const workKey = forceRefresh ? `${id}:refresh` : id;
+  let work = resolvingProjects.get(workKey);
   if (!work) {
     work = (async () => {
       const deadline = AbortSignal.timeout(30_000);
       const project = await resolveAntigravityProject(account.accessToken, {
         signal: deadline,
+        projectId: account.projectId, forceRefresh,
         fetch: (url, init) => oauthFetch(id, (fresh) => ({ url: String(url), init: {
           ...init, headers: antigravityHeaders(fresh.accessToken, { purpose: "project" }),
         } }), deadline),
       });
       const current = accounts.get(id);
-      if (!current) throw new Error(`Account ${id} is no longer connected`);
+      if (!current || generation !== contextGeneration) throw new Error(`Account ${id} is no longer connected`);
       const next = { ...current, projectId: project.projectId };
       await saveAccount(next);
       return next;
-    })().finally(() => resolvingProjects.delete(id));
-    resolvingProjects.set(id, work);
+    })().finally(() => resolvingProjects.delete(workKey));
+    resolvingProjects.set(workKey, work);
   }
   return waitForAccount(work, signal);
 }
@@ -699,6 +824,49 @@ async function ensureAntigravityProject(id: string, signal?: AbortSignal): Promi
 /** First enabled account of a kind (default for routing). */
 function firstOfKind(kind: OAuthKind): OAuthAccount | undefined {
   return [...accounts.values()].find((a) => a.kind === kind && !a.disabled);
+}
+
+function antigravityCatalogIdentity(account: OAuthAccount): string {
+  return crypto.createHash("sha256").update(JSON.stringify([account.kind, account.projectId, account.accessToken, account.refreshToken])).digest("hex");
+}
+
+function cachedAntigravityModels(account: OAuthAccount): readonly string[] | undefined {
+  const cached = antigravityCatalogs.get(account.id);
+  if (cached && cached.expiresAt > Date.now() && cached.identity === antigravityCatalogIdentity(account)) return cached.ids;
+  antigravityCatalogs.delete(account.id);
+  return undefined;
+}
+
+/** Model IDs are account/project capabilities, independent of whether quota fields exist. */
+async function fetchAntigravityModels(id: string, signal?: AbortSignal): Promise<string[]> {
+  const generation = contextGeneration;
+  const deadline = signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
+  let requested: OAuthAccount | undefined;
+  let projectId: string | undefined;
+  const response = await oauthFetch(id, (account) => {
+    projectId = account.projectId;
+    return { url: ANTIGRAVITY.quotaUrl, init: {
+      method: "POST", headers: antigravityHeaders(account.accessToken, { purpose: "catalog" }),
+      body: JSON.stringify({ project: account.projectId }),
+    } };
+  }, deadline, true, (account) => { requested = { ...account, projectId }; });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`Antigravity model discovery failed (HTTP ${response.status}).`);
+  }
+  const payload: unknown = await response.json();
+  const models = payload && typeof payload === "object" && "models" in payload ? payload.models : undefined;
+  if (!models || typeof models !== "object" || Array.isArray(models)) throw new Error("Antigravity returned an invalid model catalog.");
+  const ids = Object.entries(models).filter(([id, info]) => id.trim() && info && typeof info === "object"
+    && !Array.isArray(info) && !("isInternal" in info && info.isInternal)).map(([id]) => id);
+  const current = accounts.get(id);
+  if (!requested || !current || current.disabled || generation !== contextGeneration || antigravityCatalogIdentity(current) !== antigravityCatalogIdentity(requested)) {
+    throw new Error("The Antigravity account changed during model discovery.");
+  }
+  antigravityCatalogs.delete(id);
+  if (antigravityCatalogs.size >= 256) antigravityCatalogs.delete(antigravityCatalogs.keys().next().value!);
+  antigravityCatalogs.set(id, { identity: antigravityCatalogIdentity(current), expiresAt: Date.now() + ANTIGRAVITY_CATALOG_TTL_MS, ids });
+  return ids;
 }
 
 // ---- Usage limits ----
@@ -762,7 +930,7 @@ export async function getAccountLimits(id: string, signal?: AbortSignal): Promis
     if (!accounts.has(id)) throw new Error(`Account ${id} is no longer connected`);
     const usage = fresh.kind === "claude-code" ? { limits: await getClaudeLimits(fresh, deadline) }
       : fresh.kind === "antigravity" ? { limits: await getAntigravityLimits(fresh, deadline) }
-      : await getCodexUsage(fresh, deadline);
+      : fresh.kind === "codex" ? await getCodexUsage(fresh, deadline) : { limits: [] };
     // A response for an account removed while the request ran must not become
     // a fresh quota snapshot in the settings panel's cache.
     if (!accounts.has(id)) throw new Error(`Account ${id} is no longer connected`);
@@ -869,6 +1037,10 @@ async function getAntigravityLimits(acc: OAuthAccount, signal?: AbortSignal): Pr
 // ---- Model listing ----
 
 export async function listOAuthModels(kind: OAuthKind): Promise<string[]> {
+  if (!["claude-code", "codex", "antigravity"].includes(kind)) {
+    const { accountModels } = await import("./oauth/providerTransport.js");
+    return accountModels(kind);
+  }
   if (kind === "claude-code") {
     const curated = [...ANTHROPIC.models];
     const acc = firstOfKind("claude-code");
@@ -901,21 +1073,14 @@ export async function listOAuthModels(kind: OAuthKind): Promise<string[]> {
     if (!acc) return [...ANTIGRAVITY.models];
     try {
       await ensureAntigravityProject(acc.id);
-      const r = await oauthFetch(acc.id, (fresh) => ({ url: ANTIGRAVITY.quotaUrl, init: {
-        method: "POST", headers: antigravityHeaders(fresh.accessToken, { purpose: "catalog" }),
-        body: JSON.stringify({ project: fresh.projectId }),
-      } }));
-      if (r.ok) {
-        const d: any = await r.json();
-        const ids = Object.entries<any>(d.models ?? {})
-          .filter(([, info]) => info?.quotaInfo && !info.isInternal)
-          .map(([id]) => id);
-        if (ids.length) return ids;
-      }
+      return antigravityModelChoices(await fetchAntigravityModels(acc.id));
     } catch {
       /* fall through to preset */
     }
-    return [...ANTIGRAVITY.models];
+    const current = accounts.get(acc.id);
+    if (!current || current.disabled) return [];
+    const cached = cachedAntigravityModels(current);
+    return cached === undefined ? [...ANTIGRAVITY.models] : antigravityModelChoices(cached);
   }
   const acc = firstOfKind("codex");
   if (!acc) return [...CODEX.fallbackModels];
@@ -944,40 +1109,136 @@ export async function oauthKindForModel(modelId: string): Promise<OAuthKind | un
 
 // ---- Chat streaming ----
 
+function enabledAccount(id: string): OAuthAccount {
+  const account = accounts.get(id);
+  if (!account) throw new OAuthAccountError(`Account ${id} is no longer connected`);
+  if (account.disabled) throw new OAuthAccountError(`Account ${id} was disabled`);
+  return account;
+}
+
+function canFailOverAccount(error: unknown): boolean {
+  if (error instanceof Error && (error as { retryable?: boolean }).retryable === false) return false;
+  if (error instanceof OAuthAccountError) return true;
+  if (error instanceof ChatHTTPError) return [401, 403, 408, 425, 429].includes(error.status) || error.status >= 500;
+  // Fetch connection failures are TypeErrors; arbitrary application exceptions
+  // and invalid request bodies are not evidence that another account will work.
+  return error instanceof OAuthConnectionError || (error instanceof Error && error.name === "TimeoutError");
+}
+
+function stopOAuthRetries(error: unknown): Error {
+  const failure = error instanceof Error ? error : new Error(String(error));
+  return Object.assign(failure, { retryable: false });
+}
+
+function pauseAccount(id: string, error: unknown): void {
+  if (!accounts.has(id)) return;
+  const status = error instanceof ChatHTTPError ? error.status : 0;
+  const retryAfter = Number((error as { retryAfterMs?: number } | undefined)?.retryAfterMs);
+  const fallback = error instanceof OAuthAccountError || status === 401 || status === 403 ? 60_000 : status === 429 ? 30_000 : 15_000;
+  accountCooldowns.set(id, Date.now() + (Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 86_400_000) : fallback));
+}
+
+async function oauthStreamError(label: string, response: Response): Promise<ChatHTTPError> {
+  const error = new ChatHTTPError(response.ok ? 502 : response.status, `${label} ${response.status}: ${(await response.text().catch(() => "")).slice(0, 500)}`);
+  const retry = response.headers.get("retry-after");
+  if (retry) {
+    const delay = /^\d+(?:\.\d+)?$/.test(retry.trim()) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+    if (Number.isFinite(delay) && delay > 0) Object.assign(error, { retryAfterMs: delay });
+  }
+  return error;
+}
+
 export async function* streamOAuthChat(kind: OAuthKind, opts: {
   model: string;
   messages: WireMessage[];
   tools?: ToolSchema[];
   maxTokens?: number;
   promptCacheKey?: string;
-  modelParams?: { thinking?: string; reasoningEffort?: string; maxContext?: string };
+  modelParams?: ModelParams;
   temperature?: number;
   sampling?: SamplingParams;
   signal: AbortSignal;
 }): AsyncGenerator<ProviderEvent> {
   opts.signal.throwIfAborted();
-  const acc = (await waitForAccount(pickAccount(kind), opts.signal)) ?? firstOfKind(kind);
+  const candidates = await waitForAccount(rankedAccounts(kind, opts.signal), opts.signal);
   opts.signal.throwIfAborted();
-  if (!acc) throw new Error(`${OAUTH_LABEL[kind]} is not connected`);
-  if (kind === "claude-code") return yield* streamClaudeCode(acc.id, opts);
-  if (kind === "antigravity") return yield* streamAntigravity(acc.id, opts);
-  return yield* streamCodex(acc.id, opts);
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    opts.signal.throwIfAborted();
+    const live = accounts.get(candidate.id);
+    if (!live || live.disabled || live.kind !== kind || (accountCooldowns.get(live.id) ?? 0) > Date.now()) continue;
+    let progressed = false;
+    const requestId = crypto.randomUUID();
+    try {
+      const stream = kind === "claude-code" ? streamClaudeCode(live.id, opts)
+        : kind === "antigravity" ? streamAntigravity(live.id, opts) : kind === "codex" ? streamCodex(live.id, opts) : streamProviderAccount(live.id, opts);
+      for await (const event of stream) {
+        // Switching after any response content could repeat visible output or
+        // tool side effects. Usage alone can be accounted without replaying it.
+        if (event.type !== "usage") progressed = true;
+        yield event.type === "usage" ? { ...event, requestId } : event;
+      }
+      accountCooldowns.delete(live.id);
+      return;
+    } catch (error) {
+      opts.signal.throwIfAborted();
+      if (error instanceof Error && error.name === "AbortError") throw error;
+      if (!canFailOverAccount(error)) throw stopOAuthRetries(error);
+      pauseAccount(live.id, error);
+      if (progressed) throw stopOAuthRetries(error);
+      lastError = error;
+    }
+  }
+  if (lastError) throw stopOAuthRetries(lastError);
+  const connected = enabledOfKind(kind);
+  if (!connected.length) throw stopOAuthRetries(new Error(`${OAUTH_LABEL[kind]} is not connected`));
+  const retryAt = Math.min(...connected.map(account => accountCooldowns.get(account.id) ?? Date.now()));
+  throw stopOAuthRetries(new ChatHTTPError(429, `${OAUTH_LABEL[kind]} accounts are temporarily unavailable. Retry in ${Math.max(1, Math.ceil((retryAt - Date.now()) / 1000))} seconds.`));
+}
+
+async function* streamProviderAccount(id: string, opts: Parameters<typeof streamOAuthChat>[1]): AsyncGenerator<ProviderEvent> {
+  const { streamAccountAdapter, ProviderTransportError } = await import("./oauth/providerTransport.js");
+  const generation = contextGeneration;
+  let account = await waitForAccount(validAccount(id), opts.signal);
+  let progressed = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      if (generation !== contextGeneration) throw stopOAuthRetries(new Error("The account context changed."));
+      account = enabledAccount(id);
+      for await (const event of streamAccountAdapter({ ...opts, onCredentialsRefresh: async patch => {
+        const current = accounts.get(id);
+        if (!current || generation !== contextGeneration) throw new Error("The account is no longer connected.");
+        if (current.disabled) throw new Error("The account was disabled.");
+        await saveAccount({ ...current, providerSpecificData: { ...current.providerSpecificData, ...patch.providerSpecificData } });
+      } }, account)) { if (event.type !== "usage") progressed = true; yield event; }
+      return;
+    } catch (error) {
+      opts.signal.throwIfAborted();
+      if (error instanceof ProviderTransportError) {
+        if (error.status === 401 && error.retryable !== false && !progressed && attempt === 0 && account.refreshToken) {
+          account = await waitForAccount(refreshAccount(account), opts.signal); continue;
+        }
+        throw Object.assign(new ChatHTTPError(error.status, error.message), { retryAfterMs: error.retryAfterMs, retryable: error.retryable });
+      }
+      throw error;
+    }
+  }
 }
 
 async function* streamClaudeCode(id: string, opts: Parameters<typeof buildClaudeMessagesRequest>[1]): AsyncGenerator<ProviderEvent> {
-  const response = await oauthFetch(id, (account) => buildClaudeMessagesRequest(account.accessToken, opts), opts.signal);
+  const response = await oauthFetch(id, (account) => buildClaudeMessagesRequest(account.accessToken, opts), opts.signal, true);
   if (!response.ok || !response.body) {
-    throw new ChatHTTPError(response.ok ? 502 : response.status, `claude-code ${response.status}: ${(await response.text().catch(() => "")).slice(0, 500)}`);
+    throw await oauthStreamError("claude-code", response);
   }
   yield* parseAnthropicStream(response.body.getReader());
 }
 
 async function* streamCodex(id: string, opts: Parameters<typeof createCodexRequest>[0]): AsyncGenerator<ProviderEvent> {
-  const response = await oauthFetch(id, (account) => createCodexRequest(opts, account), opts.signal);
+  const response = await oauthFetch(id, (account) => createCodexRequest(opts, account), opts.signal, true);
   if (!response.ok || !response.body) {
-    throw new ChatHTTPError(response.ok ? 502 : response.status, `codex ${response.status}: ${(await response.text().catch(() => "")).slice(0, 500)}`);
+    throw await oauthStreamError("codex", response);
   }
-  try { yield* parseCodexStream(response.body.getReader(), opts.signal, { provider: "codex", model: opts.model }); }
+  try { yield* parseCodexStream(response.body.getReader(), opts.signal, { provider: "codex", model: opts.model, credential: id }); }
   catch (error) {
     if (error instanceof CodexProtocolError) throw new ChatHTTPError(error.status, error.message);
     throw error;
@@ -998,7 +1259,9 @@ async function* parseAnthropicStream(reader: ReadableStreamDefaultReader<Uint8Ar
       // frame is silently dropped and the turn ends with no text and no error.
       if (chunk.type === "error") {
         const e = chunk.error ?? {};
-        throw new ChatHTTPError(502, `claude-code stream error: ${e.type ?? "error"} — ${e.message ?? data.slice(0, 300)}`);
+        const status = ({ authentication_error: 401, permission_error: 403, rate_limit_error: 429,
+          overloaded_error: 529, invalid_request_error: 400, not_found_error: 404, api_error: 500 } as Record<string, number>)[e.type] ?? 502;
+        throw new ChatHTTPError(status, `claude-code stream error: ${e.type ?? "error"} — ${e.message ?? data.slice(0, 300)}`);
       }
       if (chunk.type === "content_block_start" && chunk.content_block?.type === "tool_use") {
         const cb = chunk.content_block;
@@ -1048,20 +1311,45 @@ async function* streamAntigravity(id: string, opts: {
   signal: AbortSignal;
 }): AsyncGenerator<ProviderEvent> {
   try {
-    await ensureAntigravityProject(id, opts.signal);
+    const generation = contextGeneration;
+    const initial = await ensureAntigravityProject(id, opts.signal);
     const sessionId = opts.promptCacheKey
       ? crypto.createHash("sha256").update(`${id}:${opts.promptCacheKey}`).digest().readBigUInt64BE().toString()
       : undefined;
-    const response = await oauthFetch(id, (account) => ({
-      url: `${ANTIGRAVITY.apiBase}/v1internal:streamGenerateContent?alt=sse`,
-      init: {
-        method: "POST",
-        headers: antigravityHeaders(account.accessToken, { purpose: "generation" }),
-        body: JSON.stringify(toAntigravityRequest({ ...opts, projectId: account.projectId!, sessionId })),
-      },
-    }), opts.signal);
+    const ambiguousModel = resolveAntigravityModel(opts.model).model !== resolveAntigravityModel(opts.model, [opts.model]).model;
+    const send = async () => {
+      if (ambiguousModel && cachedAntigravityModels(enabledAccount(id)) === undefined) {
+        // Only ambiguous aliases need discovery before sending: a real dedicated
+        // model may have superseded the catalog's old shared "tiered" ID.
+        try { await fetchAntigravityModels(id, opts.signal); }
+        catch { opts.signal.throwIfAborted(); }
+      }
+      if (generation !== contextGeneration) throw new OAuthAccountError("The Antigravity account context changed before generation.");
+      return oauthFetch(id, (account) => ({
+        url: `${ANTIGRAVITY.apiBase}/v1internal:streamGenerateContent?alt=sse`,
+        init: {
+          method: "POST",
+          headers: antigravityHeaders(account.accessToken, { purpose: "generation" }),
+          body: JSON.stringify(toAntigravityRequest({ ...opts, projectId: account.projectId!, sessionId, availableModels: cachedAntigravityModels(account) })),
+        },
+      }), opts.signal, true);
+    };
+    let response = await send();
+    if (response.status === 404) {
+      await response.body?.cancel();
+      const refreshed = await ensureAntigravityProject(id, opts.signal, true);
+      if (refreshed.projectId !== initial.projectId) response = await send();
+      if (response.status === 404) {
+        await response.body?.cancel().catch(() => {});
+        let advertised: string[] = [];
+        try {
+          advertised = antigravityModelChoices(await fetchAntigravityModels(id, opts.signal));
+        } catch { opts.signal.throwIfAborted(); }
+        throw new ChatHTTPError(404, `Antigravity could not serve model "${opts.model}" for the connected project.${advertised.length ? ` Available models: ${advertised.slice(0, 24).join(", ")}${advertised.length > 24 ? ", …" : ""}.` : " Check model availability and account access."}`);
+      }
+    }
     if (!response.ok || !response.body) {
-      throw new ChatHTTPError(response.ok ? 502 : response.status, `antigravity ${response.status}: ${(await response.text().catch(() => "")).slice(0, 500)}`);
+      throw await oauthStreamError("antigravity", response);
     }
     yield* parseAntigravityStream(response.body.getReader(), { signal: opts.signal });
   } catch (error) {

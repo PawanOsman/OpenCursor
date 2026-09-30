@@ -1,0 +1,281 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+/* Shared surfaces, spacing, and controls. Host colors adapt the
+   same component system to light, dark, and high-contrast workbenches. */
+:root {
+  color-scheme: light dark;
+  --bg: var(--vscode-editor-background, #181818);
+  --bg-alt: var(--bg);
+  --bg-panel: var(--bg);
+  --fg: var(--vscode-foreground, #e8e8e8);
+  --fg-dim: var(--vscode-descriptionForeground, #a0a0a0);
+  --fg-faint: var(--fg-dim);
+  --accent: var(--fg);
+  --link: var(--vscode-textLink-foreground, #7eb8ff);
+  --focus: var(--vscode-focusBorder, #888);
+  --green: var(--vscode-charts-green, #4daa72);
+  --error: var(--vscode-errorForeground, #e76d6d);
+  --warn: var(--vscode-editorWarning-foreground, #d7ba7d);
+  --purple: var(--vscode-charts-purple, #c586c0);
+  --surface-1: color-mix(in oklab, var(--fg) 2.5%, transparent);
+  --surface-2: color-mix(in oklab, var(--fg) 5%, transparent);
+  --surface-3: color-mix(in oklab, var(--fg) 8%, transparent);
+  /* Opaque hairlines stay visible on both the page and nested surfaces. */
+  --line: color-mix(in srgb, var(--fg) 24%, var(--bg));
+  --line-soft: color-mix(in srgb, var(--fg) 16%, var(--bg));
+  --line-strong: color-mix(in srgb, var(--fg) 34%, var(--bg));
+  --border: var(--line);
+  --border-soft: var(--line-soft);
+  --hover: var(--vscode-list-hoverBackground, var(--surface-2));
+  --input-bg: var(--vscode-input-background, color-mix(in srgb, var(--fg) 6%, var(--bg)));
+  --input-fg: var(--vscode-input-foreground, var(--fg));
+  --input-border: var(--vscode-input-border, var(--line-strong));
+  --control-border: var(--vscode-button-border, var(--line-strong));
+  --control-height: 32px;
+  --control-height-sm: 28px;
+  --control-radius: 8px;
+  --control-radius-sm: 6px;
+  --control-gutter: 10px;
+  --control-bg: var(--input-bg);
+  --control-focus-border: var(--fg-dim);
+  --control-ring: var(--fg-dim);
+  --control-disabled-opacity: .5;
+  --bg-dark: var(--vscode-textCodeBlock-background, var(--surface-2));
+  --card-bg: transparent;
+  --card-head-bg: var(--surface-1);
+  --dropdown-bg: var(--vscode-dropdown-background, var(--bg));
+  --dropdown-border: var(--line);
+  --terminal-bg: var(--vscode-terminal-background, var(--bg));
+  --terminal-fg: var(--vscode-terminal-foreground, var(--fg));
+  --primary-bg: var(--fg);
+  --primary-fg: var(--bg);
+  --user-bubble: #414141;
+  --composer-bg: var(--vscode-menu-background, var(--input-bg));
+  --accent-weak: var(--surface-2);
+  --accent-soft: var(--surface-3);
+  --accent-line: var(--line-strong);
+  --green-weak: color-mix(in srgb, var(--green) 10%, transparent);
+  --green-line: color-mix(in srgb, var(--green) 30%, transparent);
+  --error-weak: color-mix(in srgb, var(--error) 10%, transparent);
+  --error-line: color-mix(in srgb, var(--error) 30%, transparent);
+  --warn-weak: color-mix(in srgb, var(--warn) 10%, transparent);
+  --warn-line: color-mix(in srgb, var(--warn) 30%, transparent);
+  --purple-weak: color-mix(in srgb, var(--purple) 10%, transparent);
+  --font-ui: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  --mono: var(--vscode-editor-font-family, ui-monospace, "Cascadia Code", Consolas, monospace);
+  --fs-2xs: 10px;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 12px;
+  --fs-base: 13px;
+  --fs-lg: 14px;
+  --fs-xl: 16px;
+  --lh-tight: 1.375;
+  --lh-normal: 1.5;
+  --lh-relaxed: 1.625;
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 10px;
+  --sp-6: 12px;
+  --sp-7: 14px;
+  --sp-8: 16px;
+  --sp-10: 20px;
+  --sp-12: 24px;
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-xl: 16px;
+  --r-2xl: 20px;
+  --r-composer: 22px;
+  --r-full: 999px;
+  --shadow: var(--vscode-widget-shadow, #00000026);
+  --ring: 0 0 0 .5px var(--line);
+  --el-1: 0 1px 2px -1px #00000014;
+  --el-2: 0 4px 16px #0000000d, var(--ring);
+  --el-3: 0 8px 24px -4px var(--shadow), var(--ring);
+  --dur-1: 100ms;
+  --dur-2: 150ms;
+  --dur-3: 200ms;
+  --ease: cubic-bezier(.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0, 0, .2, 1);
+}
+
+body.vscode-light, body.vscode-high-contrast-light {
+  color-scheme: light;
+  --user-bubble: #f3f3f3;
+  --composer-bg: var(--vscode-input-background, #f7f7f7);
+  --warn: var(--vscode-editorWarning-foreground, #8a5700);
+}
+body.vscode-dark, body.vscode-high-contrast { color-scheme: dark; }
+body.vscode-high-contrast, body.vscode-high-contrast-light {
+  --line: var(--vscode-contrastBorder, currentColor);
+  --line-soft: var(--line);
+  --line-strong: var(--line);
+  --input-border: var(--line);
+  --control-border: var(--line);
+  --control-focus-border: var(--vscode-contrastActiveBorder, var(--line));
+  --control-ring: var(--control-focus-border);
+  --user-bubble: var(--input-bg);
+}
+
+/* Low-specificity defaults let compact controls keep their own dimensions. */
+:where(button, input, textarea, select) {
+  box-sizing: border-box;
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+:where(button, input, textarea, select, summary, [role="button"]) { touch-action: manipulation; }
+:where(button) {
+  appearance: none;
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius-sm);
+  padding: 5px var(--control-gutter);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+:where(button:hover:not(:disabled)) { background: var(--surface-2); }
+:where(button:disabled, input:disabled, textarea:disabled, select:disabled) {
+  cursor: not-allowed;
+  opacity: var(--control-disabled-opacity);
+}
+:where(button, [role="button"], a, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--control-ring);
+  outline-offset: 2px;
+}
+:where(input:not([type]), input:is([type="text"], [type="password"], [type="email"], [type="number"], [type="search"], [type="url"], [type="tel"]), textarea) {
+  appearance: none;
+  min-width: 0;
+  border: 1px solid var(--input-border);
+  border-radius: var(--control-radius);
+  padding: 6px var(--control-gutter);
+  background: var(--control-bg);
+  color: var(--input-fg);
+  box-shadow: none;
+  outline: none;
+  transition: border-color var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease);
+}
+:where(input:not([type]), input:is([type="text"], [type="password"], [type="email"], [type="number"], [type="search"], [type="url"], [type="tel"]), textarea):focus {
+  border-color: var(--control-focus-border);
+  outline: none;
+  box-shadow: none;
+}
+:where(input, textarea)::placeholder { color: var(--vscode-input-placeholderForeground, var(--fg-dim)); opacity: 1; }
+:where(input, textarea)[aria-invalid="true"] { border-color: var(--error); }
+:where(input[type="number"]) { appearance: textfield; }
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { appearance: none; margin: 0; }
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-decoration { appearance: none; }
+
+/* Keep native semantics and keyboard behavior while drawing every surface. */
+input:is([type="checkbox"], [type="radio"]):not(.switch input) {
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  flex: 0 0 auto;
+  vertical-align: middle;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--control-bg);
+  color: var(--primary-fg);
+  cursor: pointer;
+  box-shadow: none;
+  transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+input:is([type="checkbox"], [type="radio"]):not(.switch input):hover:not(:disabled) { border-color: var(--control-focus-border); }
+input:is([type="checkbox"], [type="radio"]):not(.switch input):is(:checked, :indeterminate) {
+  background: var(--primary-bg);
+  border-color: var(--primary-bg);
+}
+input:is([type="checkbox"], [type="radio"]):not(.switch input)::before {
+  content: "";
+  display: block;
+  opacity: 0;
+}
+input[type="checkbox"]:not(.switch input)::before {
+  width: 8px;
+  height: 5px;
+  border-left: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-1px) rotate(-45deg);
+}
+input[type="checkbox"]:not(.switch input):indeterminate::before {
+  width: 8px;
+  height: 0;
+  border-left: 0;
+  transform: none;
+}
+input[type="radio"]:not(.switch input) { border-radius: 50%; }
+input[type="radio"]:not(.switch input)::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+input:is([type="checkbox"], [type="radio"]):not(.switch input):is(:checked, :indeterminate)::before { opacity: 1; }
+input:is([type="checkbox"], [type="radio"]):not(.switch input):focus-visible {
+  outline: 2px solid var(--control-ring);
+  outline-offset: 2px;
+}
+input:is([type="checkbox"], [type="radio"]):not(.switch input):disabled { cursor: not-allowed; }
+
+input[type="range"] { appearance: none; height: 20px; padding: 0; border: 0; background: transparent; cursor: pointer; }
+input[type="range"]::-webkit-slider-runnable-track { height: 4px; background: var(--line-strong); border-radius: var(--r-full); }
+input[type="range"]::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; margin-top: -5px; border: 1px solid var(--primary-bg); border-radius: 50%; background: var(--primary-bg); box-shadow: 0 1px 2px var(--shadow); }
+input[type="range"]:focus-visible { outline: 2px solid var(--control-ring); outline-offset: 3px; border-radius: var(--r-sm); }
+input[type="range"]:disabled { cursor: not-allowed; }
+input[type="file"] { color: var(--fg-dim); max-width: 100%; }
+input[type="file"]::file-selector-button {
+  min-height: var(--control-height-sm);
+  margin-inline-end: 8px;
+  padding: 4px var(--control-gutter);
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius-sm);
+  background: var(--control-bg);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+input[type="file"]:hover:not(:disabled)::file-selector-button { background: var(--surface-2); }
+input[type="file"]:focus-visible { outline: 2px solid var(--control-ring); outline-offset: 2px; border-radius: var(--control-radius-sm); }
+input[type="file"]:disabled::file-selector-button { cursor: not-allowed; }
+input[type="color"] { appearance: none; width: 32px; height: 28px; padding: 3px; border: 1px solid var(--input-border); border-radius: var(--control-radius-sm); background: var(--control-bg); cursor: pointer; }
+input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
+:where(summary) { list-style: none; cursor: pointer; }
+summary::-webkit-details-marker { display: none; }
+:where(summary)::before {
+  content: ""; display: inline-block; width: 5px; height: 5px;
+  margin: 0 8px 1px 2px; border-right: 1.25px solid currentColor; border-bottom: 1.25px solid currentColor;
+  transform: rotate(-45deg); transition: transform var(--dur-1) var(--ease);
+}
+:where(details[open] > summary)::before { transform: translateY(-1px) rotate(45deg); }
+svg { flex-shrink: 0; }
+::selection { background: var(--vscode-editor-selectionBackground, #80808055); }
+
+html[data-motion="reduced"] *,
+html[data-motion="reduced"] *::before,
+html[data-motion="reduced"] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+@media (forced-colors: active) {
+  :root { --control-ring: Highlight; --control-focus-border: Highlight; --input-border: ButtonBorder; --control-border: ButtonBorder; }
+  input:is([type="checkbox"], [type="radio"]):not(.switch input):is(:checked, :indeterminate) { forced-color-adjust: none; color: HighlightText; background: Highlight; border-color: Highlight; }
+  input[type="range"]::-webkit-slider-runnable-track { background: ButtonText; forced-color-adjust: none; }
+  input[type="range"]::-webkit-slider-thumb { background: Highlight; border-color: Highlight; forced-color-adjust: none; }
+}

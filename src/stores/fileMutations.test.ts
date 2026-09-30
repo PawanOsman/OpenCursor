@@ -10,11 +10,13 @@
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const editor = vi.hoisted(() => ({ root: "", documents: [] as any[] }));
 vi.mock("vscode", () => ({ workspace: { get workspaceFolders() { return [{ uri: { fsPath: editor.root } }]; }, get textDocuments() { return editor.documents; } } }));
 import { pendingChanges } from "./pendingChanges";
-import { mutateFile } from "./fileMutations";
+import { canonicalFilePath, canonicalFilePathSync, mutateFile } from "./fileMutations";
 import { writeTool, strReplaceTool, deleteFileTool, editNotebookTool } from "../agent/tools/files";
 
 let root: string;
@@ -23,6 +25,19 @@ afterEach(async () => { pendingChanges.acceptAll(); await fs.rm(root, { recursiv
 const context = (conversationId: string, turnIndex = 0) => ({ todos: [], changeOwner: { conversationId, runId: `run-${conversationId}`, turnIndex } });
 
 describe("production file transactions and undo", () => {
+  it.skipIf(process.platform !== "win32")("resolves existing Windows short paths and missing descendants consistently", async (ctx) => {
+    const directory = process.env.ProgramFiles;
+    if (!directory) ctx.skip();
+    const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:OPENCURSOR_PATH_FIXTURE).ShortPath"],
+    { windowsHide: true, timeout: 10_000, env: { ...process.env, OPENCURSOR_PATH_FIXTURE: directory } });
+    const shortDirectory = stdout.trim();
+    if (!shortDirectory || shortDirectory.toLowerCase() === (await fs.realpath(directory!)).toLowerCase()) ctx.skip();
+    // Read-only checks also run when new short-name creation is disabled in TEMP.
+    for (const candidate of [shortDirectory, path.join(shortDirectory, path.basename(root), "missing.txt")]) {
+      expect(canonicalFilePathSync(candidate)).toBe(await canonicalFilePath(candidate));
+    }
+  }, 20_000);
   it.each([Buffer.from([0, 255, 128, 72, 101]), Buffer.alloc(2 * 1024 * 1024 + 1, 88)])("restores exact bytes after Delete", async (contents) => {
     const file = path.join(root, "original.bin"); await fs.writeFile(file, contents);
     expect((await deleteFileTool.execute({ path: file })).output).toBe(`deleted ${file}`);
@@ -33,8 +48,9 @@ describe("production file transactions and undo", () => {
   });
   it("preserves executable permissions when restoring a deleted file", async () => {
     const file = path.join(root, "script"); await fs.writeFile(file, "echo hello\n", { mode: 0o755 });
+    const originalPermissions = (await fs.stat(file)).mode & 0o777;
     await deleteFileTool.execute({ path: file }); await pendingChanges.reject(file);
-    expect((await fs.stat(file)).mode & 0o777).toBe(0o755);
+    expect((await fs.stat(file)).mode & 0o777).toBe(originalPermissions);
   });
   it("serializes disjoint replacements through canonical aliases", async () => {
     const file = path.join(root, "real.txt"), alias = path.join(root, "alias.txt");
@@ -46,6 +62,22 @@ describe("production file transactions and undo", () => {
     expect(results.every((r) => !r.output.startsWith("error:"))).toBe(true);
     expect(await fs.readFile(file, "utf8")).toBe("ALPHA\nBETA\n");
     await pendingChanges.reject(file); expect(await fs.readFile(file, "utf8")).toBe("alpha\nbeta\n");
+  });
+  it.each(["edit", "delete"])("finds and accepts a pending %s through a directory alias", async (operation) => {
+    const real = path.join(root, "real"), alias = path.join(root, "alias");
+    await fs.mkdir(real); await fs.symlink(real, alias, process.platform === "win32" ? "junction" : "dir");
+    const file = path.join(alias, "code.txt"); await fs.writeFile(file, "original");
+    const result = operation === "edit"
+      ? await writeTool.execute({ path: file, contents: "agent" }, undefined, undefined, context("alias"))
+      : await deleteFileTool.execute({ path: file }, undefined, undefined, context("alias"));
+    expect(result.output).not.toMatch(/^error:/);
+    expect(pendingChanges.has(file)).toBe(true);
+    expect(pendingChanges.get(file)?.before).toBe("original");
+    expect(pendingChanges.snapshots(file)).toHaveLength(1);
+    expect(pendingChanges.snapshots(file)[0].owner?.conversationId).toBe("alias");
+    pendingChanges.accept(file);
+    expect(pendingChanges.has(file)).toBe(false);
+    expect(pendingChanges.count()).toBe(0);
   });
   it("refuses stale whole-file and hunk undo while preserving newer user content and tracking", async () => {
     const file = path.join(root, "manual.txt"); await fs.writeFile(file, "original\n");
@@ -77,6 +109,24 @@ describe("production file transactions and undo", () => {
       await fs.writeFile(file, "external change"); return { data: Buffer.from("agent"), result: true };
     })).rejects.toThrow("changed during");
     expect(await fs.readFile(file, "utf8")).toBe("external change"); expect(pendingChanges.has(file)).toBe(false);
+  });
+  it("retains the captured destination when its parent is retargeted during mutation preparation", async () => {
+    const original = path.join(root, "original"), moved = path.join(root, "moved"), other = path.join(root, "other");
+    await fs.mkdir(original); await fs.mkdir(other);
+    const file = path.join(await fs.realpath(original), "code.txt"), otherFile = path.join(await fs.realpath(other), "code.txt");
+    await fs.writeFile(file, "before"); await fs.writeFile(otherFile, "after");
+    await expect(mutateFile(file, {}, async () => {
+      await fs.rename(original, moved);
+      await fs.symlink(other, original, process.platform === "win32" ? "junction" : "dir");
+      return { data: Buffer.from("after"), result: true };
+    })).rejects.toThrow("destination changed");
+    // Matching bytes at the replacement destination must not claim ownership of it.
+    expect(pendingChanges.list().every(change => change.path === file)).toBe(true);
+    expect(pendingChanges.has(otherFile)).toBe(false);
+    await pendingChanges.reject(otherFile);
+    await expect(pendingChanges.reject(file)).rejects.toThrow("destination changed");
+    expect(await fs.readFile(otherFile, "utf8")).toBe("after");
+    expect(await fs.readFile(path.join(moved, "code.txt"), "utf8")).toBe("before");
   });
   it("does not reassign other conversations' changes during partial hunk review", async () => {
     const file = path.join(root, "mixed-hunks"); await fs.writeFile(file, "a\nb\nc");

@@ -1,0 +1,59 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+.oc-date-field { position: relative; display: flex; align-items: center; min-width: 0; width: 100%; }
+.oc-date-field > input {
+  box-sizing: border-box;
+  width: 100%; min-width: 0; min-height: var(--control-height);
+  padding: 6px 38px 6px var(--control-gutter);
+  border: 1px solid var(--input-border); border-radius: var(--control-radius);
+  background: var(--control-bg); color: var(--input-fg); font: inherit;
+}
+.oc-date-field > input:focus { border-color: var(--control-focus-border); outline: none; box-shadow: none; }
+.oc-date-field > input[aria-invalid="true"] { border-color: var(--error); }
+.oc-date-trigger, .oc-date-nav {
+  appearance: none; display: inline-flex; align-items: center; justify-content: center;
+  width: var(--control-height-sm); height: var(--control-height-sm); padding: 0;
+  border: 1px solid transparent; border-radius: var(--control-radius-sm);
+  background: transparent; color: var(--fg-dim); cursor: pointer;
+}
+.oc-date-trigger { position: absolute; right: 3px; }
+.oc-date-trigger svg { stroke: currentColor; stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; }
+.oc-date-trigger:hover:not(:disabled), .oc-date-nav:hover:not(:disabled) { background: var(--surface-2); color: var(--fg); }
+.oc-date-calendar {
+  box-sizing: border-box; position: fixed; z-index: 12000; width: 280px; padding: 8px;
+  transition: none;
+  overflow: auto; overscroll-behavior: contain;
+  border: 1px solid var(--line-soft); border-radius: 12px; background: var(--vscode-menu-background, var(--dropdown-bg));
+  color: var(--fg); box-shadow: var(--el-3); font: 12px/1.5 var(--font-ui);
+}
+.oc-date-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }
+.oc-date-heading > span { font-weight: 500; }
+.oc-date-weekdays, .oc-date-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; }
+.oc-date-weekdays { color: var(--fg-dim); text-align: center; font-size: 11px; padding-block: 3px 5px; }
+.oc-date-week + .oc-date-week { margin-top: 2px; }
+.oc-date-day {
+  appearance: none; display: flex; align-items: center; justify-content: center; min-width: 0; height: 30px;
+  padding: 0; border: 1px solid transparent; border-radius: var(--control-radius-sm);
+  color: var(--fg); background: transparent; font: inherit; cursor: pointer;
+}
+.oc-date-day[data-outside="true"] { color: var(--fg-dim); }
+.oc-date-day[data-today="true"] { border-color: var(--line-strong); }
+.oc-date-day:hover:not(:disabled) { background: var(--surface-2); }
+.oc-date-day[aria-selected="true"], .oc-date-day[aria-selected="true"]:hover { background: var(--primary-bg); color: var(--primary-fg); border-color: var(--primary-bg); }
+.oc-date-day:disabled { visibility: hidden; }
+.oc-date-trigger:focus-visible, .oc-date-calendar button:focus-visible { outline: 2px solid var(--control-ring); outline-offset: -2px; }
+.oc-date-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); color: var(--fg-dim); font-size: 11px; }
+.oc-date-footer > button { min-height: var(--control-height-sm); padding: 4px 8px; border: 1px solid var(--control-border); border-radius: var(--control-radius-sm); font: inherit; color: var(--fg); background: transparent; cursor: pointer; }
+.oc-date-footer > button:hover { background: var(--surface-2); }
+@media (forced-colors: active) {
+  .oc-date-calendar, .oc-date-field > input { border-color: ButtonBorder; }
+  .oc-date-day[aria-selected="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
+  .oc-date-trigger:focus-visible, .oc-date-calendar button:focus-visible { outline-color: Highlight; }
+}

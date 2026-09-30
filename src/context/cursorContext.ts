@@ -8,10 +8,12 @@
  */
 
 import * as os from "os";
+import { currentExecutionProfile } from "../agent/execution";
 import { getWorkspaceRoot, getRecentFiles } from "./workspaceUtils";
 import { getActiveSelection, getOpenFiles, listSkills, getGitContext, listRulesForPrompt } from "./workspaceContext";
 
 function shellName(): string {
+  if (currentExecutionProfile().kind === "container") return "/bin/sh inside the configured Docker image (POSIX commands)";
   if (process.platform === "win32") {
     return "powershell";
   }
@@ -40,13 +42,15 @@ function formatTimestamp(d: Date): string {
 }
 
 /**
- * First user content block, mirroring Cursor's request:
+ * Cached context in the first user content block:
  * <user_info>, <agent_transcripts>, <rules> (always-applied + user rules),
  * <agent_skills> (available skills). This block is cached.
  */
 export async function buildUserInfoBlock(opts: {
   userRules?: string;
   enableWorkspaceContext?: boolean;
+  /** Tool targets accumulated by the current run; includes unopened/new files. */
+  matchFiles?: string[];
 }): Promise<string> {
   const root = getWorkspaceRoot();
   const now = new Date();
@@ -54,13 +58,16 @@ export async function buildUserInfoBlock(opts: {
   const isRepo = gitInfo ? `Yes, at ${root.replace(/\\/g, "/")}` : "No";
 
   const parts: string[] = [];
+  const execution = currentExecutionProfile();
+  if (execution.kind === "container") parts.push(`<execution_environment>Commands run inside Docker image ${execution.image ?? "node:22-bookworm-slim"}, using /bin/sh and the workspace mount /workspace. The host OS below describes the editor, not the command environment. Use POSIX commands. Command networking is ${execution.network ? "enabled" : "disabled"}; configured model/embedding connections are managed by the host. File tools are restricted to workspace paths; host MCP execution is unavailable.</execution_environment>`);
   parts.push(
     `<user_info>\nOS Version: ${process.platform} ${os.release()}\n\nShell: ${shellName()}\n\nWorkspace Path: ${root}\n\nIs directory a git repo: ${isRepo}\n\nToday's date: ${formatDate(now)}\n</user_info>`
   );
 
   // Explicit user instructions apply even when automatic workspace context
   // is disabled; that setting controls only workspace discovery.
-  const always = opts.enableWorkspaceContext !== false ? await listRulesForPrompt() : "";
+  const matchFiles = [...new Set([...getOpenFiles(), ...getRecentFiles(), ...(opts.matchFiles ?? [])])];
+  const always = opts.enableWorkspaceContext !== false ? await listRulesForPrompt(matchFiles) : "";
   const userRules = (opts.userRules || "").trim();
   if (always || userRules) {
     let rules = `<rules>\nThe rules section has a number of possible rules/memories/context that you should consider. In each subsection, we provide instructions about what information the subsection contains and how you should consider/follow the contents of the subsection.`;

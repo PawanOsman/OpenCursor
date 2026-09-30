@@ -13,6 +13,11 @@ import * as path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({ root: "", rg: null as string | null, delayFirst: false }));
+vi.mock("child_process", async (original) => {
+  const actual = await original<typeof import("child_process")>();
+  return { ...actual, spawn: (command: string, args: string[] = [], options: import("child_process").SpawnOptions = {}) =>
+    command === fixture.rg ? actual.spawn(process.execPath, [command, ...args], options) : actual.spawn(command, args, options) };
+});
 vi.mock("fs/promises", async (original) => {
   const actual = await original<typeof import("fs/promises")>();
   return { ...actual, readFile: async (name: Parameters<typeof actual.readFile>[0], options: any) => {
@@ -220,7 +225,8 @@ describe("production Grep fallback", () => {
   });
 });
 
-// A protocol fixture drives the real child-process parser without installing rg.
+// A protocol fixture drives the real child-process parser; launch through Node
+// explicitly because Windows does not execute Unix shebang scripts.
 async function ripgrepFixture(events: unknown[], hanging = false) {
   const executable = await file("rg-fixture.cjs", `#!/usr/bin/env node\nconst fs = require('node:fs');\nfs.writeFileSync(${JSON.stringify(path.join(fixture.root, "args.json"))}, JSON.stringify(process.argv.slice(2)));\nprocess.stdout.write(${JSON.stringify(events.map((e) => JSON.stringify(e)).join("\n") + "\n")});\n${hanging ? "setInterval(() => {}, 1000);" : ""}\n`);
   await fs.chmod(executable, 0o700);

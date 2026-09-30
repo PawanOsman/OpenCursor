@@ -1,0 +1,96 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+.image-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(8px, 3vw, 28px);
+  box-sizing: border-box;
+  background: #0008;
+  overscroll-behavior: contain;
+  animation: image-preview-fade-in 150ms var(--ease-out) both;
+}
+.image-preview-dialog {
+  width: min(100%, 1200px);
+  height: min(100%, 1000px);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: var(--el-3);
+  animation: image-preview-enter 180ms var(--ease-out) both;
+}
+.image-preview-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+  padding: 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.image-preview-info { flex: 1; min-width: 0; }
+.image-preview-name { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; line-height: 1.5; }
+.image-preview-details { color: var(--fg-dim); font-size: 11px; line-height: 1.5; }
+.image-preview-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 150ms var(--ease), border-color 150ms var(--ease), transform 100ms var(--ease);
+}
+.image-preview-control:hover:not(:disabled) { background: var(--hover); border-color: var(--line); }
+.image-preview-control:active:not(:disabled) { transform: scale(.96); }
+.image-preview-control:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.image-preview-control:disabled { opacity: .45; cursor: default; }
+.image-preview-zoom { width: auto; min-width: 44px; padding-inline: 8px; font-size: 11px; }
+.image-preview-stage { position: relative; flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; background: var(--surface-1); }
+.image-preview-canvas { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; padding: 16px; box-sizing: border-box; }
+.image-preview-image { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; opacity: 0; transition: opacity 150ms var(--ease-out); }
+.image-preview-image[data-ready] { opacity: 1; }
+.image-preview-stage[data-zoomed] .image-preview-canvas { width: max-content; height: max-content; min-width: 100%; min-height: 100%; }
+.image-preview-stage[data-zoomed] .image-preview-image { flex: none; max-width: none; max-height: none; }
+.image-preview-message { position: absolute; inset: 16px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--fg-dim); text-align: center; font-size: 12px; }
+.image-preview-spinner { width: 14px; height: 14px; flex: none; box-sizing: border-box; border: 1.5px solid var(--line); border-top-color: var(--fg); border-radius: 50%; animation: image-preview-spin 850ms linear infinite; }
+.image-preview-navigation { display: flex; flex: none; align-items: center; justify-content: center; gap: 12px; padding: 8px 12px; border-top: 1px solid var(--line-soft); }
+.image-preview-position { min-width: 56px; color: var(--fg-dim); font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
+.image-preview-backdrop[data-exiting] { pointer-events: none; animation: image-preview-fade-out 150ms var(--ease-out) both; }
+.image-preview-backdrop[data-exiting] .image-preview-dialog { animation: image-preview-leave 150ms var(--ease-out) both; }
+@keyframes image-preview-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes image-preview-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes image-preview-enter { from { transform: translateY(6px) scale(.985); } to { transform: translateY(0) scale(1); } }
+@keyframes image-preview-leave { from { transform: scale(1); } to { transform: scale(.985); } }
+@keyframes image-preview-spin { to { transform: rotate(360deg); } }
+@media (max-width: 420px) {
+  .image-preview-toolbar { padding: 10px; gap: 6px; }
+  .image-preview-canvas { padding: 8px; }
+  .image-preview-dialog { border-radius: 12px; }
+}
+html[data-motion="reduced"] .image-preview-backdrop,
+html[data-motion="reduced"] .image-preview-dialog,
+html[data-motion="reduced"] .image-preview-spinner { animation: none; }
+html[data-motion="reduced"] .image-preview-control,
+html[data-motion="reduced"] .image-preview-image { transition: none; }

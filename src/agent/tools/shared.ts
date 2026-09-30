@@ -17,6 +17,7 @@ import type { ChildProcess } from "child_process";
 import type { SubagentRunner, QuestionAsker } from "./types";
 import type { ToolOutcome } from "../toolOutcome";
 import type { ContextReadInput } from "../contextArchive";
+import { spawnExecutionCommand, cleanupExecutionProcess, currentExecutionProfile } from "../execution";
 
 // Directories never walked/listed (tools + indexing).
 export { IGNORE, BINARY_EXTS, NOISE_FILES, isNoisePath } from "./ignore";
@@ -294,6 +295,7 @@ export interface BgShell {
   command: string;
   /** The child shell running this command (unset until spawned). */
   proc?: ChildProcess;
+  tty?: boolean;
   output: string;
   outputChars?: number;
   transcript?: ShellTranscript;
@@ -636,6 +638,8 @@ export interface ShellSession {
 
 const IS_WIN = process.platform === "win32";
 const shellSessions = new Map<string, ShellSession>();
+const processClosures = new WeakMap<ChildProcess, Promise<void>>();
+const processKills = new WeakMap<ChildProcess, Promise<boolean>>();
 
 /** Get (or lazily create) the shell state for a run key. */
 export function getShellSession(key: string, cwd: string): ShellSession {
@@ -653,7 +657,7 @@ export function getShellSession(key: string, cwd: string): ShellSession {
  * exit code and the shell terminates the moment the command does.
  */
 export function spawnShellCommand(command: string, cwd: string): ChildProcess {
-  const proc = IS_WIN
+  const proc = spawnExecutionCommand(command, cwd, () => IS_WIN
     ? spawn(
         "powershell.exe",
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -664,23 +668,35 @@ export function spawnShellCommand(command: string, cwd: string): ChildProcess {
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env, TERM: "dumb", PS1: "", PS2: "" },
-      });
+      }));
+  trackShellProcess(proc);
   // Nothing will ever type at this shell: close stdin so anything that prompts
   // reads EOF and exits instead of hanging forever.
   try {
     proc.stdin?.on("error", () => { /* ignore broken pipe */ });
     proc.stdin?.end();
   } catch { /* ignore */ }
-  if (!IS_WIN) proc.once("exit", () => killShellProcess(proc));
   return proc;
 }
 
+/** Register a pipe or native PTY process before exposing its job handle. */
+export function trackShellProcess(proc: ChildProcess): void {
+  processClosures.set(proc, new Promise<void>(resolve => proc.once("close", () => resolve())));
+  if (!IS_WIN && currentExecutionProfile().kind === "local") proc.once("exit", () => { void killShellProcess(proc); });
+}
+
 /** Kill a command and everything it spawned (npm/pnpm scripts spawn children). */
-export function killShellProcess(proc: ChildProcess): void {
-  if (!proc || (IS_WIN && (proc.exitCode != null || proc.signalCode))) return;
+export function killShellProcess(proc: ChildProcess): Promise<boolean> {
+  if (!proc) return Promise.resolve(true);
+  const existing = processKills.get(proc);
+  if (existing) return existing;
+  const closed = processClosures.get(proc) ?? ((proc.exitCode != null || proc.signalCode)
+    ? Promise.resolve() : new Promise<void>(resolve => proc.once("close", () => resolve())));
+  let killerClosed = Promise.resolve();
   try {
     if (IS_WIN && proc.pid) {
       const killer = spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true });
+      killerClosed = new Promise<void>(resolve => { killer.once("close", () => resolve()); killer.once("error", () => resolve()); });
       killer.on("error", () => { try { proc.kill(); } catch { /* ignore */ } });
     } else if (proc.pid) {
       // Negative pid targets the process group when detached; fall back to the pid.
@@ -689,6 +705,12 @@ export function killShellProcess(proc: ChildProcess): void {
       proc.kill();
     }
   } catch { /* ignore */ }
+  const result = new Promise<boolean>(resolve => {
+    const timer = setTimeout(() => resolve(false), 10_000);
+    void Promise.all([closed, killerClosed, cleanupExecutionProcess(proc)]).then(([, , cleaned]) => { clearTimeout(timer); resolve(cleaned); });
+  });
+  processKills.set(proc, result);
+  return result;
 }
 
 /**
@@ -705,13 +727,17 @@ export function applyCwdSideEffect(session: ShellSession, command: string): void
 }
 
 /** Tear down a run's shell state, killing anything still running. */
-export function disposeShellSession(key: string): void {
+export async function disposeShellSession(key: string): Promise<void> {
   const s = shellSessions.get(key);
   if (!s) return;
+  const processes = [...s.running];
+  const jobs = [...bgShells.values()].filter(sh => sh.sessionKey === key);
   for (const sh of bgShells.values()) {
     if (sh.sessionKey === key && !sh.done) sh.abort?.();
   }
-  for (const proc of s.running) killShellProcess(proc);
+  const stopped = await Promise.all(processes.map(proc => killShellProcess(proc)));
+  await Promise.all(jobs.filter(sh => sh.done).map(sh => finishShellTranscript(sh)));
+  if (stopped.some(ok => !ok)) throw new Error("Owned shell processes did not close within 10 seconds; termination is unconfirmed.");
   s.running.clear();
   shellSessions.delete(key);
 }

@@ -66,12 +66,14 @@ export function RulesPanel({
       )}
 
       <div className="rss-section-head" style={{ marginTop: 28 }}>
-        <span className="rss-title">Skills <span className="rss-help" title="Skills live in .cursor/skills/*/SKILL.md. The agent reads them when a task matches.">?</span></span>
+        <span className="rss-title">Skills <span className="rss-help" title="Workspace, user and installed plugin skills provide SKILL.md instructions. The agent reads them when a task matches.">?</span></span>
         <button className="btn-ghost sm" onClick={() => vscode.postMessage({ type: "createSkill" })}>
           <Icon name="plus" size={12} /> New
         </button>
       </div>
       <p className="panel-hint">Skills are specialized capabilities that help the agent accomplish specific tasks. Skills will be invoked by the agent when relevant.</p>
+      <div className="rss-section-head"><button className="btn-secondary" onClick={() => vscode.postMessage({ type: "managePlugins" })}>Manage plugins</button><button className="btn-ghost sm" onClick={() => vscode.postMessage({ type: "browserSettings" })}>Browser settings</button></div>
+      <p className="panel-hint">Install, update or remove local skill and MCP packages.</p>
       {skills.length === 0 ? (
         <div className="rss-empty">
           <div className="rss-empty-title">No Skills Yet</div>
@@ -91,13 +93,13 @@ export function RulesPanel({
                 <div className="lr-title">{s.name}</div>
                 <div className="lr-desc rss-clamp">{s.description}</div>
               </div>
-              <button
+              {!s.pluginId && <button
                 className="icon-btn rss-del"
                 title="Delete skill"
                 onClick={(e) => { e.stopPropagation(); vscode.postMessage({ type: "deleteSkill", path: s.path, name: s.name }); }}
               >
                 <Icon name="trash" size={13} />
-              </button>
+              </button>}
             </div>
           ))}
         </div>

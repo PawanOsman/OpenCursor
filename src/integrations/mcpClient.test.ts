@@ -79,6 +79,25 @@ describe("MCP request lifetime", () => {
     expect(await call).toBe("error: operation failed");
   });
 
+  it("handles server requests with colliding ids without settling an unrelated tool call", async () => {
+    const call = connection.callTool("fixture", {});
+    const id = requests.at(-1).id;
+    let settled = false; void call.then(() => { settled = true; });
+    proc.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, method: "ping", params: {} }) + "\n");
+    await Promise.resolve();
+    expect(requests.at(-1)).toEqual({ jsonrpc: "2.0", id, result: {} });
+    expect(settled).toBe(false);
+    respond(id, { content: [{ type: "text", text: "actual tool result" }] });
+    expect(await call).toBe("actual tool result");
+  });
+
+  it("refreshes tools on notifications and declines elicitation without an input host", async () => {
+    proc.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" }) + "\n");
+    await vi.waitFor(() => expect(requests.filter((request) => request.method === "tools/list")).toHaveLength(2));
+    proc.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: "server-form", method: "elicitation/create", params: { message: "Choose", requestedSchema: { type: "object", properties: {} } } }) + "\n");
+    await vi.waitFor(() => expect(requests.at(-1)).toMatchObject({ id: "server-form", result: { action: "decline" } }));
+  });
+
   it("does not launch queued connections after manager disposal", async () => {
     const manager = new McpManager();
     const before = vi.mocked(spawn).mock.calls.length;

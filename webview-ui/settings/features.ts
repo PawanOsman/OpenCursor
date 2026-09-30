@@ -9,11 +9,13 @@
 
 export interface McpServerConfig {
   name: string;
-  transport: "stdio" | "sse";
+  transport: "stdio" | "sse" | "http";
   command?: string;
   args?: string[];
   env?: Record<string, string>;
   url?: string;
+  headers?: Record<string, string>;
+  oauth?: { clientId?: string; scopes?: string[] };
   enabled: boolean;
 }
 
@@ -85,7 +87,17 @@ export interface Persona {
   builtin?: boolean;
 }
 
-export type ProviderKind = "openai" | "anthropic" | "google" | "openrouter" | "ollama" | "llamacpp" | "mimo" | "atlascloud" | "astraflow";
+import { PROVIDER_PRESETS, type ProviderKind } from "../../src/shared/providerCatalog";
+import { OAUTH_PROVIDER_DEFINITIONS, type OAuthProviderKind } from "../../src/shared/oauthProviders";
+export { PROVIDER_PRESETS, POPULAR_KINDS, FREE_KINDS } from "../../src/shared/providerCatalog";
+export type { ProviderKind } from "../../src/shared/providerCatalog";
+
+export interface ProviderApiKey {
+  id: string;
+  label: string;
+  enabled?: boolean;
+  hasKey?: boolean;
+}
 
 export interface ProviderConfig {
   id: string;
@@ -93,35 +105,27 @@ export interface ProviderConfig {
   kind: ProviderKind;
   baseUrl: string;
   hasKey?: boolean;
+  apiKeys?: ProviderApiKey[];
+  apiKeyBalance?: "first" | "round-robin";
   model?: string;
   /** Undefined = enabled. Multiple providers can be enabled at once. */
   enabled?: boolean;
 }
 
-export const PROVIDER_PRESETS: Record<ProviderKind, { label: string; baseUrl: string; needsKey: boolean }> = {
-  openai: { label: "OpenAI-compatible", baseUrl: "https://api.openai.com/v1", needsKey: true },
-  anthropic: { label: "Anthropic", baseUrl: "https://api.anthropic.com/v1", needsKey: true },
-  google: { label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", needsKey: true },
-  openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", needsKey: true },
-  ollama: { label: "Ollama", baseUrl: "http://localhost:11434/v1", needsKey: false },
-  llamacpp: { label: "llama.cpp", baseUrl: "http://localhost:8080/v1", needsKey: false },
-  mimo: { label: "Xiaomi MIMO", baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1", needsKey: true },
-  atlascloud: { label: "Atlas Cloud", baseUrl: "https://api.atlascloud.ai/v1", needsKey: true },
-  astraflow: { label: "Astraflow", baseUrl: "https://api-us-ca.umodelverse.ai/v1", needsKey: true },
-};
 
 /** Built-in "popular" providers shown as connect-by-key cards. */
-export const POPULAR_KINDS: ProviderKind[] = ["anthropic", "openai", "google", "openrouter", "mimo", "atlascloud", "astraflow"];
+
 
 export interface ModelOption {
   key: string;
   label: string;
+  description?: string;
   type: "select" | "toggle";
   values?: string[];
   value: string;
 }
 
-export type ModelKind = ProviderKind | "claude-code" | "codex" | "antigravity";
+export type ModelKind = ProviderKind | OAuthProviderKind;
 
 export interface ModelDef {
   id: string;
@@ -173,6 +177,8 @@ export interface LlamacppModel {
 
 export interface LlamacppStatus {
   installed: boolean;
+  states?: Record<string, string>;
+  endpoints?: Record<string, string>;
   running: Record<string, boolean>;
   loading: Record<string, boolean>;
   errors: Record<string, string>;
@@ -185,6 +191,7 @@ export interface HfGgufResult {
   sizeBytes?: number;
   downloads?: number;
   likes?: number;
+  sha256?: string;
 }
 
 export interface OllamaModel {
@@ -197,6 +204,13 @@ export interface OllamaModel {
 
 export interface OllamaStatus {
   installed: boolean;
+  reachable?: boolean;
+  endpoint?: string;
+  version?: string;
+  states?: Record<string, string>;
+  progress?: Record<string, string>;
+  capabilities?: Record<string, string[]>;
+  loaded?: Record<string, { sizeBytes?: number; vramBytes?: number; contextLength?: number; expiresAt?: string }>;
   pulling: Record<string, number>;
   errors: Record<string, string>;
 }
@@ -207,7 +221,7 @@ export interface OllamaLibraryModel {
   pulls?: string;
 }
 
-export type OAuthKind = "claude-code" | "codex" | "antigravity";
+export type OAuthKind = OAuthProviderKind;
 
 export interface OAuthAccountInfo {
   id: string;
@@ -220,7 +234,7 @@ export interface OAuthAccountInfo {
 export type OAuthBalanceStrategy = "first" | "round-robin" | "highest-limit" | "nearest-reset";
 
 export const BALANCE_OPTIONS: { value: OAuthBalanceStrategy; label: string; desc: string }[] = [
-  { value: "first", label: "First account", desc: "Always use the first enabled account" },
+  { value: "first", label: "First account", desc: "Prefer the first enabled account, then fail over" },
   { value: "round-robin", label: "Round robin", desc: "Rotate between enabled accounts per request" },
   { value: "highest-limit", label: "Highest remaining limit", desc: "Pick the account with the most quota left" },
   { value: "nearest-reset", label: "Nearest reset time", desc: "Pick the account whose quota resets soonest" },
@@ -239,17 +253,18 @@ export interface OAuthStatus {
   pending?: OAuthKind;
   /** Authorization URL for the current pending login; contains no tokens or verifier. */
   authorizationUrl?: string;
+  loginMethod?: "browser" | "device-code" | "import-token";
+  userCode?: string;
+  verificationUri?: string;
+  expiresAt?: number;
   errors: Partial<Record<OAuthKind, string>>;
   balanceStrategy?: OAuthBalanceStrategy;
+  balanceStrategies?: Partial<Record<OAuthKind, OAuthBalanceStrategy>>;
 }
 
-export const OAUTH_LABEL: Record<OAuthKind, string> = { "claude-code": "Claude Code", codex: "OpenAI Codex", antigravity: "Google Antigravity" };
+export const OAUTH_LABEL = Object.fromEntries(OAUTH_PROVIDER_DEFINITIONS.map(provider => [provider.kind, provider.label])) as Record<OAuthKind, string>;
 
-export const OAUTH_PROVIDERS: { kind: OAuthKind; label: string; sub: string }[] = [
-  { kind: "claude-code", label: "Claude Code", sub: "Sign in with your Claude (Anthropic) account" },
-  { kind: "codex", label: "OpenAI Codex", sub: "Sign in with your ChatGPT account" },
-  { kind: "antigravity", label: "Google Antigravity", sub: "Sign in with your Google account" },
-];
+export const OAUTH_PROVIDERS: { kind: OAuthKind; label: string; sub: string }[] = OAUTH_PROVIDER_DEFINITIONS.map(provider => ({ ...provider }));
 
 export interface FeatureConfig {
   providers: ProviderConfig[];
@@ -276,6 +291,7 @@ export interface FeatureConfig {
   autoGenerateTitles: boolean;
   trackUsage: boolean;
   chatTextSize: "compact" | "default" | "large";
+  motion: "full" | "system" | "reduced";
   submitWithCtrlEnter: boolean;
   maxTabCount: number;
   perTabDrafts: boolean;
@@ -330,6 +346,7 @@ export interface McpStatus {
   toolCount: number;
   tools?: string[];
   error?: string;
+  authState?: "none" | "required" | "authorizing" | "authenticated";
 }
 
 export interface RuleInfo {
@@ -344,6 +361,7 @@ export interface SkillInfo {
   name: string;
   description: string;
   path: string;
+  pluginId?: string;
 }
 
 export const EMPTY_FEATURES: FeatureConfig = {
@@ -371,6 +389,7 @@ export const EMPTY_FEATURES: FeatureConfig = {
   autoGenerateTitles: true,
   trackUsage: true,
   chatTextSize: "default",
+  motion: "full",
   submitWithCtrlEnter: false,
   maxTabCount: 0,
   perTabDrafts: false,

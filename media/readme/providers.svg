@@ -1,36 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="260" viewBox="0 0 900 260" font-family="Segoe UI, Ubuntu, Helvetica, Arial, sans-serif">
-  <rect width="900" height="260" rx="14" fill="#0d1117" stroke="#30363d"/>
-  <text x="450" y="40" text-anchor="middle" font-size="20" font-weight="700" fill="#e6edf3">One extension, every provider</text>
-  <text x="450" y="62" text-anchor="middle" font-size="13" fill="#8b949e">Sign in with your existing accounts, bring API keys, or go fully local</text>
+<!--
+Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
 
-  <!-- row 1: OAuth accounts -->
-  <text x="60" y="105" font-size="13" font-weight="700" fill="#a371f7">OAUTH SIGN-IN</text>
-  <g font-size="13" font-weight="600">
-    <rect x="60" y="118" width="150" height="34" rx="17" fill="#161b22" stroke="#a371f7"/>
-    <text x="135" y="140" text-anchor="middle" fill="#e6edf3">Claude Code</text>
-    <rect x="222" y="118" width="150" height="34" rx="17" fill="#161b22" stroke="#a371f7"/>
-    <text x="297" y="140" text-anchor="middle" fill="#e6edf3">OpenAI Codex</text>
-    <rect x="384" y="118" width="180" height="34" rx="17" fill="#161b22" stroke="#a371f7"/>
-    <text x="474" y="140" text-anchor="middle" fill="#e6edf3">Google Antigravity</text>
-  </g>
-  <text x="590" y="140" font-size="12" fill="#8b949e">-> your subscription, inside VS Code</text>
+This file is part of OpenCursor, AI coding agent chat inside VS Code.
+https://github.com/PawanOsman/OpenCursor
 
-  <!-- row 2: API + local -->
-  <text x="60" y="190" font-size="13" font-weight="700" fill="#2f81f7">API &amp; LOCAL</text>
-  <g font-size="13" font-weight="600">
-    <rect x="60" y="203" width="90" height="34" rx="17" fill="#161b22" stroke="#2f81f7"/>
-    <text x="105" y="225" text-anchor="middle" fill="#e6edf3">OpenAI</text>
-    <rect x="160" y="203" width="105" height="34" rx="17" fill="#161b22" stroke="#2f81f7"/>
-    <text x="212" y="225" text-anchor="middle" fill="#e6edf3">Anthropic</text>
-    <rect x="275" y="203" width="90" height="34" rx="17" fill="#161b22" stroke="#2f81f7"/>
-    <text x="320" y="225" text-anchor="middle" fill="#e6edf3">Gemini</text>
-    <rect x="375" y="203" width="120" height="34" rx="17" fill="#161b22" stroke="#2f81f7"/>
-    <text x="435" y="225" text-anchor="middle" fill="#e6edf3">OpenRouter</text>
-    <rect x="505" y="203" width="95" height="34" rx="17" fill="#161b22" stroke="#3fb950"/>
-    <text x="552" y="225" text-anchor="middle" fill="#3fb950">Ollama</text>
-    <rect x="610" y="203" width="110" height="34" rx="17" fill="#161b22" stroke="#3fb950"/>
-    <text x="665" y="225" text-anchor="middle" fill="#3fb950">llama.cpp</text>
-    <rect x="730" y="203" width="120" height="34" rx="17" fill="#161b22" stroke="#d29922" stroke-dasharray="5 3"/>
-    <text x="790" y="225" text-anchor="middle" fill="#d29922">+ Custom...</text>
-  </g>
+Licensed under the MIT License. See LICENSE file in the project root.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="650" viewBox="0 0 1440 650" role="img" aria-labelledby="title description" font-family="Segoe UI, Inter, Arial, sans-serif">
+<title id="title">Model connections in OpenCursor</title><desc id="description">Accounts, API keys, local models, and no-auth endpoints become configured provider connections. Account and API providers can optionally use multiple credentials with failover or load balancing. Enabled connections make models available to chat.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="m1 1 5 3-5 3" fill="none" stroke="#8b7cf8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect x="1" y="1" width="1438" height="648" rx="26" fill="#17181d" stroke="#3b3c47"/>
+<text x="48" y="49" font-size="15" fill="#8b7cf8" font-weight="600" letter-spacing="2.2">PROVIDERS</text><text x="48" y="102" font-size="42" fill="#f5f5f8" font-weight="650" >One place for your model connections.</text><text x="48" y="144" font-size="23" fill="#adaebc" font-weight="400" >Sign in, add API keys, or connect a local model. Choose what powers each chat.</text><text x="48" y="199" font-size="14" fill="#adaebc" font-weight="600" letter-spacing="1.6">ADD A CONNECTION</text><rect x="48" y="222" width="252" height="124" rx="18" fill="#22232b" stroke="#3b3c47"/><g transform="translate(68 242) scale(1.1666666666666667)" fill="none" stroke="#8b7cf8" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></g><text x="68" y="292" font-size="23" fill="#f5f5f8" font-weight="600" >Accounts</text><text x="68" y="322" font-size="17" fill="#adaebc" font-weight="400" >Connect your account</text><rect x="320" y="222" width="252" height="124" rx="18" fill="#22232b" stroke="#3b3c47"/><g transform="translate(340 242) scale(1.1666666666666667)" fill="none" stroke="#8b7cf8" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="9" r="5"/><path d="m12 13 9 9m-5-5 3-3m-6 0 3-3"/></g><text x="340" y="292" font-size="23" fill="#f5f5f8" font-weight="600" >API keys</text><text x="340" y="322" font-size="17" fill="#adaebc" font-weight="400" >Bring your credentials</text><rect x="48" y="370" width="252" height="124" rx="18" fill="#22232b" stroke="#3b3c47"/><g transform="translate(68 390) scale(1.1666666666666667)" fill="none" stroke="#8b7cf8" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01M11 6h7M11 18h7"/></g><text x="68" y="440" font-size="23" fill="#f5f5f8" font-weight="600" >Local models</text><text x="68" y="470" font-size="17" fill="#adaebc" font-weight="400" >Connect your runtime</text><rect x="320" y="370" width="252" height="124" rx="18" fill="#22232b" stroke="#3b3c47"/><g transform="translate(340 390) scale(1.1666666666666667)" fill="none" stroke="#8b7cf8" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2c-6 6-6 14 0 20 6-6 6-14 0-20Z"/></g><text x="340" y="440" font-size="23" fill="#f5f5f8" font-weight="600" >No-auth endpoints</text><text x="340" y="470" font-size="17" fill="#adaebc" font-weight="400" >Use supported services</text><path d="M572 284H610V432" fill="none" stroke="#3b3c47" stroke-width="2" /><path d="M572 432H610V432" fill="none" stroke="#3b3c47" stroke-width="2" /><path d="M610 358H658V358" fill="none" stroke="#8b7cf8" stroke-width="2" marker-end="url(#arrow)"/><rect x="670" y="222" width="302" height="272" rx="18" fill="#f5f5f8" stroke="#f5f5f8"/><text x="694" y="263" font-size="25" fill="#17181d" font-weight="600" >Your providers</text><text x="694" y="294" font-size="18" fill="#686977" font-weight="400" >Configured connections</text><rect x="694" y="312" width="254" height="34" rx="9" fill="#eaeaf0" stroke="#e0e0e8"/><text x="708" y="335" font-size="17" fill="#17181d" font-weight="400" >Account connections</text><circle cx="925" cy="329" r="4" fill="#3c8d64"/><rect x="694" y="356" width="254" height="34" rx="9" fill="#eaeaf0" stroke="#e0e0e8"/><text x="708" y="379" font-size="17" fill="#17181d" font-weight="400" >API connections</text><circle cx="925" cy="373" r="4" fill="#3c8d64"/><rect x="694" y="400" width="254" height="34" rx="9" fill="#eaeaf0" stroke="#e0e0e8"/><text x="708" y="423" font-size="17" fill="#17181d" font-weight="400" >Local / no-auth</text><circle cx="925" cy="417" r="4" fill="#3c8d64"/><text x="694" y="477" font-size="18" fill="#686977" font-weight="400" >Per-provider routing</text><path d="M972 284H1040V284" fill="none" stroke="#8b7cf8" stroke-width="2" marker-end="url(#arrow)"/><rect x="1054" y="222" width="338" height="124" rx="18" fill="#2b273f" stroke="#5b527f"/><g transform="translate(1076 245) scale(1.1666666666666667)" fill="none" stroke="#b3a9ff" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 6-10 6L2 8Zm-10 11 10 6 10-6M2 18l10 6 10-6"/></g><text x="1123" y="269" font-size="25" fill="#f5f5f8" font-weight="600" >Available models</text><text x="1076" y="319" font-size="20" fill="#c7c0df" font-weight="400" >From enabled connections</text><path d="M1223 346H1223V359" fill="none" stroke="#8b7cf8" stroke-width="2" marker-end="url(#arrow)"/><rect x="1054" y="370" width="338" height="124" rx="18" fill="#22232b" stroke="#3b3c47"/><g transform="translate(1076 392) scale(1.1666666666666667)" fill="none" stroke="#9cddbe" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M20 3H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h3v4l6-4h7a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Z"/><path d="M7 8h10M7 13h6"/></g><text x="1123" y="416" font-size="25" fill="#f5f5f8" font-weight="600" >Chat + tools</text><text x="1076" y="467" font-size="20" fill="#adaebc" font-weight="400" >Pick a model and get to work</text><path d="M48 548H1392V548" fill="none" stroke="#3b3c47" stroke-width="2" /><g transform="translate(48 579) scale(0.9583333333333334)" fill="none" stroke="#9cddbe" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="m3 12 6 6L21 6"/></g><text x="84" y="598" font-size="23" fill="#adaebc" font-weight="400" >Keep multiple credentials. Configure routing separately for each provider.</text>
 </svg>

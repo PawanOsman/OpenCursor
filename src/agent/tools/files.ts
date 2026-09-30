@@ -17,6 +17,7 @@ import { defineTool, type Tool, type ToolResult, type ToolContext } from "./type
 import { IGNORE, makeDiff, firstDiffLine } from "./shared";
 import { scanFilesCached, compileGlob, normalizeGlobPattern, scorePath } from "./fileScan";
 import { readTextPage } from "./textRead";
+import { assertExecutionPath } from "../execution";
 
 // Image extensions the Read tool returns as base64 blocks to the model.
 const IMAGE_MIME: Record<string, string> = {
@@ -109,6 +110,7 @@ export const readFileTool = defineTool("Read", false, async (input, abortSignal)
 		try {
 			// safePath strips quotes, keeps spaces in folder names.
 			p = safePath(pathHint);
+			assertExecutionPath(p);
 		} catch (e) {
 			return { output: `error: invalid path: ${e instanceof Error ? e.message : String(e)}` };
 		}
@@ -156,6 +158,9 @@ export const readFileTool = defineTool("Read", false, async (input, abortSignal)
 			}
 			// keep original p; read below will surface errors
 		}
+		// The asynchronous resolution above may observe a different destination
+		// than the dispatcher did. Recheck the actual resolved path before reading.
+		assertExecutionPath(p);
 		const ext = path.extname(p).toLowerCase();
 		if (st.size > READ_MAX_BYTES && (IMAGE_MIME[ext] || ext === ".pdf")) {
 			return { output: `error: image/PDF too large (${st.size} bytes, max ${READ_MAX_BYTES}). Resize the image or extract the PDF text to a local text file before reading.` };

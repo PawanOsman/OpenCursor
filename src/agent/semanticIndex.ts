@@ -26,6 +26,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { scanFiles, isPathExcluded } from "./tools/fileScan";
 import { importRuntimeDep } from "../runtimeDeps";
+import type { ApiKeyPool } from "./provider/apiKeyPool";
 
 // Selectable local embedding models. Add entries here to offer more choices.
 export interface EmbedModel {
@@ -47,6 +48,7 @@ export interface RemoteEmbedConfig {
   id: string;
   baseUrl: string;
   apiKey: string;
+  apiKeyPool?: ApiKeyPool;
 }
 let remoteCfg: RemoteEmbedConfig | null = null;
 
@@ -69,9 +71,8 @@ export function setEmbedModel(id: string): void {
   const changed = remoteCfg !== null || m.id !== activeModel.id;
   remoteCfg = null;
   if (m.id !== activeModel.id) {
+    void releaseEmbedder();
     activeModel = m;
-    extractorP = null; // force reload with new repo/dtype
-    embedDevice = null;
   }
   if (changed) {
     memIndex = null; // index built with old model is stale
@@ -86,6 +87,7 @@ export function setRemoteEmbedModel(cfg: RemoteEmbedConfig): void {
     return;
   }
   remoteCfg = cfg;
+  void releaseEmbedder();
   memIndex = null;
   memRoot = null;
 }
@@ -105,6 +107,11 @@ const SAVE_THROTTLE_MS = 8_000;
 const YIELD_EVERY_MS = 40;
 /** Snippet length hydrated per search hit. */
 const SNIPPET_MAX_CHARS = 2000;
+/** Bound the resident matrix independently of workspace size or remote dimensions. */
+const MAX_VECTOR_BYTES = 64 * 1024 * 1024;
+const MAX_INDEX_CHUNKS = 50_000;
+const MAX_METADATA_BYTES = 16 * 1024 * 1024;
+const EMBED_IDLE_MS = 60_000;
 /** Source / doc extensions worth embedding. No binaries, lockfiles, or assets. */
 const EMBED_EXTS = new Set([
   ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs",
@@ -158,7 +165,7 @@ interface IndexData {
   fingerprint: string;
   model: string;
   dim: number;
-  files: Record<string, string>; // relPath -> mtime+size hash
+  files: Record<string, string>; // relPath -> mtime:size:content SHA-256
   metas: Chunk[];
   vecs: Float32Array; // capacity may exceed count * dim
   count: number; // rows in use
@@ -210,6 +217,26 @@ function cpuThreadBudget(): number {
 
 let extractorP: Promise<any> | null = null;
 let embedDevice: string | null = null;
+let localOperation: Promise<unknown> = Promise.resolve();
+let embedIdleTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Native sessions are shared by background indexing, documentation and chat search. */
+function withLocalOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = localOperation.then(operation);
+  localOperation = result.catch(() => {});
+  return result;
+}
+
+function clearEmbedIdleTimer(): void {
+  if (embedIdleTimer) clearTimeout(embedIdleTimer);
+  embedIdleTimer = null;
+}
+
+function scheduleEmbedRelease(): void {
+  clearEmbedIdleTimer();
+  embedIdleTimer = setTimeout(() => { void releaseEmbedder(); }, EMBED_IDLE_MS);
+  embedIdleTimer.unref?.();
+}
 
 /** Device the live embedder is using (null until first load). */
 export function getEmbedDevice(): string | null {
@@ -260,53 +287,84 @@ async function getExtractor(): Promise<any | null> {
   return extractorP;
 }
 
-/** Free the embedder + its ONNX session. Called when indexing is turned off. */
+/** Free an idle/replaced ONNX session after its in-flight inference finishes. */
 export async function releaseEmbedder(): Promise<void> {
-  const p = extractorP;
-  extractorP = null;
-  embedDevice = null;
-  if (!p) return;
-  try {
-    const ex = await p;
-    await ex?.dispose?.();
-  } catch {}
+  clearEmbedIdleTimer();
+  await withLocalOperation(async () => {
+    clearEmbedIdleTimer();
+    const p = extractorP;
+    extractorP = null;
+    embedDevice = null;
+    if (!p) return;
+    try {
+      const ex = await p;
+      await ex?.dispose?.();
+    } catch {}
+    if (memRoot) emitStatus(memRoot);
+  });
 }
 
 /** Embed via a provider's OpenAI-compatible /embeddings endpoint. */
-async function embedRemote(texts: string[]): Promise<number[][] | null> {
-  if (!remoteCfg) return null;
+async function embedRemote(texts: string[], parentSignal?: AbortSignal): Promise<number[][] | null> {
+  const cfg = remoteCfg;
+  if (!cfg) return null;
+  const deadline = AbortSignal.timeout(30_000);
+  const signal = parentSignal ? AbortSignal.any([parentSignal, deadline]) : deadline;
   try {
-    const res = await fetch(`${remoteCfg.baseUrl.replace(/\/$/, "")}/embeddings`, {
-      method: "POST",
-      signal: AbortSignal.timeout(30_000),
-      headers: { "content-type": "application/json", authorization: `Bearer ${remoteCfg.apiKey}` },
-      body: JSON.stringify({ model: remoteCfg.id, input: texts }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const json: any = await res.json();
-    const vecs: number[][] = json.data.sort((a: any, b: any) => a.index - b.index).map((d: any) => d.embedding);
-    // Normalize (cosine expects unit vectors; some APIs don't normalize).
-    return vecs.map((v) => {
-      let n = 0;
-      for (const x of v) n += x * x;
-      n = Math.sqrt(n) || 1;
-      return v.map((x) => x / n);
-    });
+    const request = async (apiKey: string): Promise<number[][]> => {
+      const res = await fetch(`${cfg.baseUrl.replace(/\/$/, "")}/embeddings`, {
+        method: "POST",
+        signal,
+        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model: cfg.id, input: texts }),
+      });
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        const retryAfter = res.headers.get("retry-after");
+        const retryAfterMs = retryAfter ? (/^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now()) : undefined;
+        throw Object.assign(new Error(`Embedding request failed (HTTP ${res.status}).`), { status: res.status, retryAfterMs });
+      }
+      const json: any = await res.json();
+      const vecs: number[][] = json.data.sort((a: any, b: any) => a.index - b.index).map((d: any) => d.embedding);
+      // Normalize (cosine expects unit vectors; some APIs don't normalize).
+      return vecs.map((v) => {
+        let n = 0;
+        for (const x of v) n += x * x;
+        n = Math.sqrt(n) || 1;
+        return v.map((x) => x / n);
+      });
+    };
+    return cfg.apiKeyPool
+      ? await cfg.apiKeyPool.request(credential => request(credential.apiKey), { apiBaseUrl: cfg.baseUrl, signal })
+      : await request(cfg.apiKey);
   } catch (e) {
+    parentSignal?.throwIfAborted();
     console.error("[semanticIndex] remote embed failed:", e);
     return null;
   }
 }
 
-async function embed(texts: string[]): Promise<number[][] | null> {
-  if (remoteCfg) return embedRemote(texts);
-  const ex = await getExtractor();
-  if (!ex) return null;
-  const out = await ex(texts, { pooling: activeModel.pooling, normalize: true });
-  const data = out.tolist ? out.tolist() : out;
-  // Release the backing tensor buffer promptly instead of waiting for GC.
-  try { out?.dispose?.(); } catch {}
-  return data as number[][];
+async function embed(texts: string[], signal?: AbortSignal): Promise<number[][] | null> {
+  signal?.throwIfAborted();
+  if (remoteCfg) return embedRemote(texts, signal);
+  const fingerprint = getEmbedFingerprint();
+  return withLocalOperation(async () => {
+    signal?.throwIfAborted();
+    if (fingerprint !== getEmbedFingerprint()) return null;
+    clearEmbedIdleTimer();
+    let out: any;
+    try {
+      const ex = await getExtractor();
+      signal?.throwIfAborted();
+      if (!ex || fingerprint !== getEmbedFingerprint()) return null;
+      out = await ex(texts, { pooling: activeModel.pooling, normalize: true });
+      signal?.throwIfAborted();
+      return (out.tolist ? out.tolist() : out) as number[][];
+    } finally {
+      try { out?.dispose?.(); } catch {}
+      if (extractorP) scheduleEmbedRelease();
+    }
+  });
 }
 
 export async function embedQuery(q: string): Promise<number[] | null> {
@@ -315,8 +373,8 @@ export async function embedQuery(q: string): Promise<number[] | null> {
 }
 
 /** Batch-embed arbitrary texts with the active local model (docs index reuses this). */
-export async function embedTexts(texts: string[]): Promise<number[][] | null> {
-  return embed(texts);
+export async function embedTexts(texts: string[], signal?: AbortSignal): Promise<number[][] | null> {
+  return embed(texts, signal);
 }
 
 // ---- Index lifecycle ----
@@ -349,6 +407,8 @@ export function setIndexingEnabled(on: boolean): void {
     void releaseEmbedder();
     memIndex = null;
     memRoot = null;
+    pendingUpserts.clear();
+    pendingDeletes.clear();
   }
 }
 
@@ -369,7 +429,9 @@ function reserve(idx: IndexData, rows: number): void {
   if (!idx.dim) return;
   const need = rows * idx.dim;
   if (idx.vecs.length >= need) return;
-  const next = new Float32Array(Math.max(need, Math.max(idx.vecs.length * 2, 4096 * idx.dim)));
+  const maxValues = Math.floor(MAX_VECTOR_BYTES / 4);
+  if (rows > MAX_INDEX_CHUNKS || need > maxValues) throw new Error("Semantic index memory limit reached.");
+  const next = new Float32Array(Math.min(maxValues, Math.max(need, Math.max(idx.vecs.length * 2, 256 * idx.dim))));
   next.set(idx.vecs.subarray(0, idx.count * idx.dim));
   idx.vecs = next;
 }
@@ -404,7 +466,7 @@ function retainChunks(idx: IndexData, keep: (rel: string) => boolean): void {
 }
 
 function dropPath(idx: IndexData, rel: string): void {
-  if (!idx.files[rel] && !idx.metas.some((m) => m.path === rel)) return;
+  if (!idx.files[rel]) return;
   retainChunks(idx, (p) => p !== rel);
 }
 
@@ -412,6 +474,7 @@ async function readLegacyIndex(root: string): Promise<IndexData | null> {
   // v1 stored everything (including per-chunk text and number[] vectors) in the
   // JSON file. Convert once, then persist in the v2 packed format.
   try {
+    if ((await fs.stat(metaPath(root))).size > MAX_METADATA_BYTES) return null;
     const raw = await fs.readFile(metaPath(root), "utf8");
     const parsed: any = JSON.parse(raw);
     if (!parsed || !Array.isArray(parsed.chunks)) return null;
@@ -434,12 +497,15 @@ async function load(root: string): Promise<IndexData> {
   if (memIndex && memRoot === key && memIndex.fingerprint === getEmbedFingerprint()) return memIndex;
   memRoot = key;
   try {
+    if ((await fs.stat(metaPath(root))).size > MAX_METADATA_BYTES) throw new Error("Index metadata exceeds its memory budget.");
     const raw = await fs.readFile(metaPath(root), "utf8");
     const meta = JSON.parse(raw) as MetaFile;
     if (meta?.v === 3 && meta.fingerprint === getEmbedFingerprint() && Array.isArray(meta.metas)) {
+      if (meta.metas.length > MAX_INDEX_CHUNKS || (await fs.stat(vecPath(root))).size > MAX_VECTOR_BYTES) throw new Error("Index exceeds its memory budget.");
       const buf = await fs.readFile(vecPath(root));
       if (crypto.createHash("sha256").update(buf).digest("hex") !== meta.checksum) throw new Error("Incomplete index snapshot");
       const dim = meta.dim || activeDim();
+      if (!Number.isSafeInteger(dim) || dim < 1 || dim > 8192) throw new Error("Invalid index dimensions.");
       const rows = dim ? Math.min(meta.metas.length, Math.floor(buf.byteLength / (dim * 4))) : 0;
       const vecs = new Float32Array(rows * dim);
       // Copy out of the Buffer: its byteOffset may be unaligned for Float32.
@@ -487,12 +553,12 @@ async function save(root: string, idx: IndexData): Promise<void> {
   } finally {
     await Promise.all([fs.rm(vectorDestination + suffix, { force: true }), fs.rm(metadataDestination + suffix, { force: true })]);
   }
-  if (idx.fingerprint === getEmbedFingerprint()) { memIndex = idx; memRoot = normRoot(root); }
+  if (indexingEnabled && idx.fingerprint === getEmbedFingerprint()) { memIndex = idx; memRoot = normRoot(root); }
 }
 
 /** Load persisted index into memory (no embed work). Call on activate so status/UI show prior work. */
 export async function warmIndex(root: string): Promise<IndexStatus> {
-  if (!storageDir || !root) return getStatus(root);
+  if (!storageDir || !root || !indexingEnabled) return getStatus(root);
   await load(root);
   emitStatus(root);
   return getStatus(root);
@@ -546,8 +612,11 @@ export interface IndexStatus {
   remoteBaseUrl?: string;
   runtime: string;
   platform: string;
+  vectorBytes: number;
+  limitReason?: string;
 }
 let progress = { done: 0, total: 0 };
+let indexLimitReason: string | undefined;
 const statusSubs = new Set<(s: IndexStatus) => void>();
 export function onIndexStatus(fn: (s: IndexStatus) => void): () => void {
   statusSubs.add(fn);
@@ -601,6 +670,8 @@ export function getStatus(root: string): IndexStatus {
     remoteBaseUrl: remoteCfg?.baseUrl,
     runtime: backend === "local" ? "onnxruntime-node + @huggingface/transformers" : "OpenAI-compatible /embeddings",
     platform: `${process.platform}-${process.arch}`,
+    vectorBytes: idx?.vecs.byteLength ?? 0,
+    limitReason: indexLimitReason,
   };
 }
 
@@ -702,6 +773,13 @@ class BatchEmbedder {
       if (!valid) file.failed = true;
       else file.chunks.push({ meta, vec: vecs![i] });
       if (file.received === file.total && !file.failed) {
+        const previousRows = this.idx.files[file.rel]
+          ? this.idx.metas.reduce((count, chunk) => count + Number(chunk.path === file.rel), 0) : 0;
+        const nextRows = this.idx.count - previousRows + file.chunks.length;
+        if (nextRows > MAX_INDEX_CHUNKS || nextRows * dim * 4 > MAX_VECTOR_BYTES) {
+          indexLimitReason = "Semantic index memory limit reached; remaining files are available through text search.";
+          continue;
+        }
         // A file's old vectors and hash stay valid until every replacement chunk succeeds.
         dropPath(this.idx, file.rel);
         for (const chunk of file.chunks) pushChunk(this.idx, chunk.meta, chunk.vec);
@@ -713,9 +791,10 @@ class BatchEmbedder {
 
 async function embedFileInto(embedder: BatchEmbedder, idx: IndexData, root: string, rel: string): Promise<boolean> {
   if (!isIndexableRel(rel) || await isPathExcluded(root, rel)) {
+    const removed = !!idx.files[rel];
     dropPath(idx, rel);
     delete idx.files[rel];
-    return false;
+    return removed;
   }
   if (idx.fingerprint !== getEmbedFingerprint()) return false;
   const abs = path.join(root, rel);
@@ -724,8 +803,22 @@ async function embedFileInto(embedder: BatchEmbedder, idx: IndexData, root: stri
   if (st.size > MAX_FILE_BYTES) return false;
   let text: string;
   try { text = await fs.readFile(abs, "utf8"); } catch { return false; }
-  await embedder.addFile(rel, `${Math.round(st.mtimeMs)}:${st.size}`, chunkFile(text));
+  const after = await fs.stat(abs).catch(() => null);
+  if (!after || after.mtimeMs !== st.mtimeMs || after.size !== st.size) return false;
+  const version = `${Math.round(st.mtimeMs)}:${st.size}:${contentDigest(text)}`;
+  if (idx.files[rel] === version) return false;
+  await embedder.addFile(rel, version, chunkFile(text));
   return true;
+}
+
+function contentDigest(text: string): string {
+  return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+function sameFileMetadata(version: string | undefined, mtimeMs: number, size: number): boolean {
+  // Old snapshots without a content hash must be rebuilt before serving hits.
+  return !!version && /^\d+(?:\.\d+)?:\d+:[a-f0-9]{64}$/.test(version)
+    && (version.startsWith(`${Math.round(mtimeMs)}:${size}:`) || version.startsWith(`${mtimeMs}:${size}:`));
 }
 
 /** Pending single-file updates while a full build runs (or coalesced watcher queue). */
@@ -735,6 +828,23 @@ let drainRunning = false;
 
 function queueKey(root: string): string {
   return normRoot(root);
+}
+
+/** A watcher burst shares embedding batches and persists one snapshot. */
+export async function applyFileChanges(root: string, changes: ReadonlyMap<string, "up" | "del">): Promise<void> {
+  if (!storageDir || !indexingEnabled || !root) return;
+  const key = queueKey(root);
+  if (!pendingUpserts.has(key)) pendingUpserts.set(key, new Set());
+  if (!pendingDeletes.has(key)) pendingDeletes.set(key, new Set());
+  const upserts = pendingUpserts.get(key)!, deletes = pendingDeletes.get(key)!;
+  for (const [absOrRel, action] of changes) {
+    const abs = path.isAbsolute(absOrRel) ? absOrRel : path.join(root, absOrRel);
+    const rel = path.relative(root, abs).split(path.sep).join("/");
+    if (!rel || rel.startsWith("..") || !isIndexableRel(rel)) continue;
+    if (action === "del") { deletes.add(rel); upserts.delete(rel); }
+    else { upserts.add(rel); deletes.delete(rel); }
+  }
+  await drainPending(root);
 }
 
 /** Index/update one file immediately (or queue if full build busy). */
@@ -757,8 +867,10 @@ export async function upsertFile(root: string, absOrRel: string): Promise<void> 
     await removeFile(root, abs);
     return;
   }
-  const hash = `${Math.round(st.mtimeMs)}:${st.size}`;
-  if (idx.files[rel] === hash || idx.files[rel] === `${st.mtimeMs}:${st.size}`) return;
+  if (sameFileMetadata(idx.files[rel], st.mtimeMs, st.size)) {
+    const raw = await fs.readFile(abs, "utf8").catch(() => null);
+    if (raw !== null && idx.files[rel].endsWith(`:${contentDigest(raw)}`)) return;
+  }
   const embedder = new BatchEmbedder(idx);
   await embedFileInto(embedder, idx, root, rel);
   await embedder.flush();
@@ -794,10 +906,13 @@ async function drainPending(root: string): Promise<void> {
   const dels = pendingDeletes.get(key);
   if ((!ups || !ups.size) && (!dels || !dels.size)) return;
   drainRunning = true;
+  indexLimitReason = undefined;
   try {
     const idx = await load(root);
+    let changed = false;
     if (dels?.size) {
       const gone = new Set(dels);
+      changed = [...gone].some(rel => !!idx.files[rel]);
       retainChunks(idx, (p) => !gone.has(p));
       for (const rel of gone) delete idx.files[rel];
       dels.clear();
@@ -811,7 +926,9 @@ async function drainPending(root: string): Promise<void> {
       const embedder = new BatchEmbedder(idx);
       let done = 0;
       for (const rel of list) {
-        await embedFileInto(embedder, idx, root, rel);
+        if (!indexingEnabled || idx.fingerprint !== getEmbedFingerprint()) break;
+        changed = await embedFileInto(embedder, idx, root, rel) || changed;
+        if (indexLimitReason) break;
         done++;
         progress = { done, total: list.length };
         emitStatusThrottled(root);
@@ -819,14 +936,14 @@ async function drainPending(root: string): Promise<void> {
       await embedder.flush();
       indexing = false;
     }
-    await save(root, idx);
+    if (changed && indexingEnabled) await save(root, idx);
     emitStatus(root);
   } finally {
     drainRunning = false;
     indexing = false;
     // More events may have arrived.
     if ((pendingUpserts.get(key)?.size || 0) + (pendingDeletes.get(key)?.size || 0) > 0) {
-      void drainPending(root);
+      void drainPending(root).catch(error => console.error("[semanticIndex] queued update failed:", error));
     }
   }
 }
@@ -836,6 +953,7 @@ export async function buildIndex(root: string, onProgress?: (done: number, total
   if (!storageDir || !root || indexing || !indexingEnabled) return;
   indexing = true;
   progress = { done: 0, total: 0 };
+  indexLimitReason = undefined;
   emitStatus(root);
   try {
     const idx = await load(root);
@@ -847,38 +965,37 @@ export async function buildIndex(root: string, onProgress?: (done: number, total
     });
     const targets: string[] = [];
     const seen = new Set<string>();
+    let removedFiles = false;
     for (const f of scanned) {
       const rel = f.rel;
       if (!isIndexableRel(rel)) continue;
       if (f.size > MAX_FILE_BYTES) continue;
       seen.add(rel);
-      const hash = `${Math.round(f.mtimeMs)}:${f.size}`;
       const prev = idx.files[rel];
-      // Accept either rounded or raw mtime strings from older indexes.
-      if (prev !== hash && prev !== `${f.mtimeMs}:${f.size}`) targets.push(rel);
+      if (!sameFileMetadata(prev, f.mtimeMs, f.size)) targets.push(rel);
     }
     // A bounded/partial scan cannot prove that an unseen file was deleted.
     if (!truncated) {
       retainChunks(idx, (p) => seen.has(p));
-      for (const rel of Object.keys(idx.files)) if (!seen.has(rel)) delete idx.files[rel];
+      for (const rel of Object.keys(idx.files)) if (!seen.has(rel)) { delete idx.files[rel]; removedFiles = true; }
     }
 
     // Nothing to do — still save cleaned deletions if any, emit status.
     if (!targets.length) {
-      await save(root, idx);
+      if (removedFiles) await save(root, idx);
       return;
     }
 
     let done = 0;
     progress = { done: 0, total: targets.length };
     emitStatus(root);
-    reserve(idx, idx.count + targets.length * 4); // ~4 chunks/file, one allocation
     const embedder = new BatchEmbedder(idx);
     let lastSave = Date.now();
     let lastYield = Date.now();
     for (const rel of targets) {
       if (!indexingEnabled || idx.fingerprint !== getEmbedFingerprint()) break;
       await embedFileInto(embedder, idx, root, rel);
+      if (indexLimitReason) break;
       done++;
       progress = { done, total: targets.length };
       onProgress?.(done, targets.length);
@@ -900,14 +1017,14 @@ export async function buildIndex(root: string, onProgress?: (done: number, total
   } finally {
     indexing = false;
     emitStatus(root);
-    void drainPending(root);
+    void drainPending(root).catch(error => console.error("[semanticIndex] queued update failed:", error));
   }
 }
 
 /** Read the line range for each hit straight from disk (chunk text isn't cached). */
 async function hydrate(
   root: string,
-  hits: { meta: Chunk; score: number }[]
+  hits: { meta: Chunk; score: number; version: string }[]
 ): Promise<{ path: string; start: number; end: number; text: string; score: number }[]> {
   const byFile = new Map<string, string[] | null>();
   const out: { path: string; start: number; end: number; text: string; score: number }[] = [];
@@ -916,6 +1033,9 @@ async function hydrate(
       try {
         if (await isPathExcluded(root, h.meta.path)) { byFile.set(h.meta.path, null); continue; }
         const raw = await fs.readFile(path.join(root, h.meta.path), "utf8");
+        // A score and its locations describe one exact indexed file version.
+        // Changed files are handled by current-text search until re-indexed.
+        if (!h.version?.endsWith(`:${contentDigest(raw)}`)) { byFile.set(h.meta.path, null); continue; }
         byFile.set(h.meta.path, raw.split("\n"));
       } catch {
         byFile.set(h.meta.path, null);
@@ -942,16 +1062,18 @@ export async function search(
   k = 12,
   filter?: (rel: string) => boolean
 ): Promise<{ path: string; start: number; end: number; text: string; score: number }[]> {
+  if (!indexingEnabled || !storageDir || !root) return [];
+  const idx = await load(root);
+  if (!idx.count || !idx.dim) return [];
   const fingerprint = getEmbedFingerprint();
   const qv = await embedQuery(query);
   if (!qv || fingerprint !== getEmbedFingerprint()) return [];
-  const idx = await load(root);
   if (!idx.count || !idx.dim || qv.length !== idx.dim) return [];
   const dim = idx.dim;
   const q = Float32Array.from(qv);
   const vecs = idx.vecs;
   // Bounded top-k instead of scoring every chunk into an array and sorting it.
-  const top: { meta: Chunk; score: number }[] = [];
+  const top: { meta: Chunk; score: number; version: string }[] = [];
   let floor = -Infinity;
   for (let r = 0; r < idx.count; r++) {
     const meta = idx.metas[r];
@@ -962,7 +1084,7 @@ export async function search(
     if (top.length === k && dot <= floor) continue;
     let pos = top.length;
     while (pos > 0 && top[pos - 1].score < dot) pos--;
-    top.splice(pos, 0, { meta, score: dot });
+    top.splice(pos, 0, { meta, score: dot, version: idx.files[meta.path] });
     if (top.length > k) top.pop();
     if (top.length === k) floor = top[k - 1].score;
   }

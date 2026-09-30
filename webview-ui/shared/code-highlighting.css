@@ -1,0 +1,25 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+.code-token-comment { color: #6a7e64; }
+.code-token-string, .code-token-inserted { color: #3c7624; }
+.code-token-keyword, .code-token-tag { color: #8851b8; }
+.code-token-number { color: #a16320; }
+.code-token-function { color: #3568ae; }
+.code-token-deleted { color: #b04444; }
+body.vscode-dark .code-token-comment { color: #82967a; }
+body.vscode-dark .code-token-string, body.vscode-dark .code-token-inserted { color: #a4c77b; }
+body.vscode-dark .code-token-keyword, body.vscode-dark .code-token-tag { color: #c299e4; }
+body.vscode-dark .code-token-number { color: #d6a366; }
+body.vscode-dark .code-token-function { color: #87b7ec; }
+body.vscode-dark .code-token-deleted { color: #ed9393; }
+
+@media (forced-colors: active) {
+  [class*="code-token-"] { color: CanvasText; }
+}

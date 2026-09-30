@@ -136,10 +136,9 @@ describe("INTEGRATION: mixed valid/invalid items", () => {
     expect(ctx.todos[0].content).toBe("Task A");
   });
 
-  it("array with objects missing content → fills 'unnamed'", () => {
+  it("array with objects missing content does not invent work", () => {
     const { ctx } = simulateFullFlow({ todos: [{ id: "1", status: "pending" }], merge: false });
-    expect(ctx.todos.length).toBe(1);
-    expect(ctx.todos[0].content).toBe("unnamed");
+    expect(ctx.todos.length).toBe(0);
   });
 
   it("array with objects missing status → defaults to 'pending'", () => {
@@ -159,7 +158,8 @@ describe("INTEGRATION: mixed valid/invalid items", () => {
 
   it("array with all nulls → no invented todos (nothing survives filter)", () => {
     const { handlerOutput } = simulateFullFlow({ todos: [null, null, null], merge: false });
-    expect(handlerOutput).toBe("(no todos)");
+    expect(handlerOutput).toContain("(no todos)");
+    expect(handlerOutput).toContain("Skipped 3 invalid task entries");
   });
 });
 

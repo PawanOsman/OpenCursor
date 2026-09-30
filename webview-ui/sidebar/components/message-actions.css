@@ -1,0 +1,56 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  margin-top: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms ease;
+}
+.message-actions-user { justify-content: flex-end; }
+.message-actions-assistant { justify-content: flex-start; }
+.message-shell:hover > .message-actions,
+.message-shell:focus-within > .message-actions,
+.message-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+.message-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--control-radius-sm, 6px);
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.message-action:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--hover); color: var(--fg); }
+.message-action:focus-visible { outline: 1px solid var(--control-ring, var(--fg-dim)); outline-offset: 1px; }
+.message-action:disabled,
+.message-action[aria-disabled="true"] { opacity: var(--control-disabled-opacity, .5); cursor: default; }
+.message-actions-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

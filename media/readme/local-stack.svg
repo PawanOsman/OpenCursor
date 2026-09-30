@@ -1,62 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="330" viewBox="0 0 900 330" font-family="Segoe UI, Ubuntu, Helvetica, Arial, sans-serif">
-  <defs>
-    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#0d1117"/>
-      <stop offset="100%" stop-color="#10182a"/>
-    </linearGradient>
-    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-      <path d="M0 0 L8 4 L0 8 Z" fill="#2f81f7"/>
-    </marker>
-  </defs>
-  <rect width="900" height="330" rx="14" fill="url(#bg2)" stroke="#30363d"/>
-  <text x="450" y="38" text-anchor="middle" font-size="20" font-weight="700" fill="#e6edf3">Everything runs on your machine</text>
-  <text x="450" y="60" text-anchor="middle" font-size="13" fill="#8b949e">No cloud required. Unplug the internet - keep coding.</text>
+<!--
+Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
 
-  <!-- VS Code box -->
-  <g transform="translate(50,95)">
-    <rect width="230" height="185" rx="10" fill="#161b22" stroke="#2f81f7"/>
-    <text x="115" y="30" text-anchor="middle" font-size="15" font-weight="700" fill="#2f81f7">VS Code + OpenCursor</text>
-    <g font-size="12" fill="#8b949e">
-      <text x="20" y="65">- Agent chat sidebar</text>
-      <text x="20" y="95">- Semantic search</text>
-      <text x="20" y="125">- 25 agent tools</text>
-      <text x="20" y="155">- Keep / Undo review</text>
-    </g>
-  </g>
+This file is part of OpenCursor, AI coding agent chat inside VS Code.
+https://github.com/PawanOsman/OpenCursor
 
-  <!-- arrows -->
-  <line x1="285" y1="140" x2="365" y2="122" stroke="#2f81f7" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="285" y1="190" x2="365" y2="190" stroke="#2f81f7" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="285" y1="240" x2="365" y2="258" stroke="#2f81f7" stroke-width="2" marker-end="url(#arrow)"/>
-
-  <!-- llama.cpp -->
-  <g transform="translate(370,90)">
-    <rect width="240" height="64" rx="10" fill="#161b22" stroke="#a371f7"/>
-    <text x="16" y="27" font-size="14" font-weight="700" fill="#a371f7">llama.cpp</text>
-    <text x="16" y="48" font-size="11.5" fill="#8b949e">GGUF models, auto server spawn</text>
-  </g>
-
-  <!-- ollama -->
-  <g transform="translate(370,163)">
-    <rect width="240" height="64" rx="10" fill="#161b22" stroke="#3fb950"/>
-    <text x="16" y="27" font-size="14" font-weight="700" fill="#3fb950">Ollama</text>
-    <text x="16" y="48" font-size="11.5" fill="#8b949e">Pull, manage &amp; chat with local models</text>
-  </g>
-
-  <!-- embeddings -->
-  <g transform="translate(370,236)">
-    <rect width="240" height="64" rx="10" fill="#161b22" stroke="#d29922"/>
-    <text x="16" y="27" font-size="14" font-weight="700" fill="#d29922">Local embeddings</text>
-    <text x="16" y="48" font-size="11.5" fill="#8b949e">MiniLM ONNX | 100% on-device index</text>
-  </g>
-
-  <!-- offline badge -->
-  <g transform="translate(650,120)">
-    <rect width="200" height="145" rx="10" fill="#161b22" stroke="#30363d"/>
-    <circle cx="100" cy="55" r="32" fill="none" stroke="#3fb950" stroke-width="3"/>
-    <path d="M85 55 l10 10 l22 -22" fill="none" stroke="#3fb950" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="100" y="115" text-anchor="middle" font-size="14" font-weight="700" fill="#3fb950">Works offline</text>
-    <text x="100" y="133" text-anchor="middle" font-size="11" fill="#8b949e">zero data leaves your PC</text>
-  </g>
-  <line x1="615" y1="192" x2="645" y2="192" stroke="#3fb950" stroke-width="2" marker-end="url(#arrow)"/>
+Licensed under the MIT License. See LICENSE file in the project root.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="674" viewBox="0 0 1440 674" role="img" aria-labelledby="title description" font-family="Segoe UI, Inter, Arial, sans-serif">
+<title id="title">Local models and retrieval in OpenCursor</title><desc id="description">llama.cpp supports GGUF models, Ollama connects a local model server, and local embeddings provide semantic retrieval. Workspace, settings, and conversation history are stored locally. Initial downloads require internet access, and chat requests go to the configured provider.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="m1 1 5 3-5 3" fill="none" stroke="#8b7cf8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect x="1" y="1" width="1438" height="672" rx="26" fill="#17181d" stroke="#3b3c47"/>
+<text x="48" y="49" font-size="15" fill="#8b7cf8" font-weight="600" letter-spacing="2.2">LOCAL MODELS + RETRIEVAL</text><text x="48" y="102" font-size="42" fill="#f5f5f8" font-weight="650" >Run the pieces you want locally.</text><text x="48" y="144" font-size="23" fill="#adaebc" font-weight="400" >Choose a local runtime for chat. Build a local index for relevant workspace context.</text><rect x="48" y="206" width="432" height="312" rx="18" fill="#22232b" stroke="#3b3c47"/><rect x="72" y="230" width="54" height="54" rx="14" fill="#302b44" stroke="#49405f"/><g transform="translate(85 243) scale(1.1666666666666667)" fill="none" stroke="#b3a9ff" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01M11 6h7M11 18h7"/></g><text x="72" y="329" font-size="29" fill="#f5f5f8" font-weight="600" >llama.cpp</text><text x="72" y="364" font-size="21" fill="#9cddbe" font-weight="500" >GGUF models</text><text x="72" y="411" font-size="21" fill="#adaebc" font-weight="400" >Load a model and run inference</text><text x="72" y="443" font-size="21" fill="#adaebc" font-weight="400" >through a local server.</text><rect x="72" y="463" width="76" height="30" rx="15" fill="#17181d" stroke="#3b3c47"/><text x="110" y="483" font-size="15" fill="#adaebc" font-weight="500" text-anchor="middle">.gguf</text><rect x="504" y="206" width="432" height="312" rx="18" fill="#22232b" stroke="#3b3c47"/><rect x="528" y="230" width="54" height="54" rx="14" fill="#302b44" stroke="#49405f"/><g transform="translate(541 243) scale(1.1666666666666667)" fill="none" stroke="#b3a9ff" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 6-10 6L2 8Zm-10 11 10 6 10-6M2 18l10 6 10-6"/></g><text x="528" y="329" font-size="29" fill="#f5f5f8" font-weight="600" >Ollama</text><text x="528" y="364" font-size="21" fill="#9cddbe" font-weight="500" >Local model server</text><text x="528" y="411" font-size="21" fill="#adaebc" font-weight="400" >Connect a running instance and</text><text x="528" y="443" font-size="21" fill="#adaebc" font-weight="400" >choose its available models.</text><rect x="528" y="463" width="118" height="30" rx="15" fill="#17181d" stroke="#3b3c47"/><text x="587" y="483" font-size="15" fill="#adaebc" font-weight="500" text-anchor="middle">localhost</text><rect x="960" y="206" width="432" height="312" rx="18" fill="#22232b" stroke="#3b3c47"/><rect x="984" y="230" width="54" height="54" rx="14" fill="#302b44" stroke="#49405f"/><g transform="translate(997 243) scale(1.1666666666666667)" fill="none" stroke="#b3a9ff" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="2"/><rect x="14" y="2" width="8" height="8" rx="2"/><rect x="2" y="14" width="8" height="8" rx="2"/><rect x="14" y="14" width="8" height="8" rx="2"/></g><text x="984" y="329" font-size="29" fill="#f5f5f8" font-weight="600" >Local embeddings</text><text x="984" y="364" font-size="21" fill="#9cddbe" font-weight="500" >Semantic retrieval</text><text x="984" y="411" font-size="21" fill="#adaebc" font-weight="400" >Index workspace content for</text><text x="984" y="443" font-size="21" fill="#adaebc" font-weight="400" >meaning-based code search.</text><rect x="984" y="463" width="156" height="30" rx="15" fill="#17181d" stroke="#3b3c47"/><text x="1062" y="483" font-size="15" fill="#adaebc" font-weight="500" text-anchor="middle">on-device index</text><rect x="48" y="552" width="1344" height="54" rx="14" fill="#242d2a" stroke="#3d5147"/><g transform="translate(68 566) scale(1.0416666666666667)" fill="none" stroke="#9cddbe" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6a2 2 0 0 1 2-2h6l3 3h7a2 2 0 0 1 2 2v11H2Z"/></g><text x="108" y="587" font-size="23" fill="#cae8d9" font-weight="400" >Workspace, settings, and conversation history stay on your machine.</text><text x="48" y="639" font-size="19" fill="#adaebc" font-weight="400" >Initial runtime and model downloads need internet access. Your selected chat provider determines where requests go.</text>
 </svg>

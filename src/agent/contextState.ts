@@ -13,6 +13,7 @@ import type { TodoItem } from "./tools/types";
 
 /** Saved working context, separate from the lossless chat transcript. */
 export interface ContextState {
+  agents?: import("./collaborationState").Collaborator[];
   checkpoint?: {
     version: 1;
     throughStep: number;

@@ -15,7 +15,9 @@ export const runtimeManifest = {
     "@huggingface/hub": "@huggingface/hub@2.13.2",
     "onnxruntime-node": "onnxruntime-node@1.27.0",
     "sharp": "sharp@0.35.2",
-    "pdf-parse": "pdf-parse@2.4.5"
+    "pdf-parse": "pdf-parse@2.4.5",
+    "@lydell/node-pty": "@lydell/node-pty@1.2.0-beta.15",
+    "playwright-core": "playwright-core@1.63.0"
   },
   "packages": {
     "@emnapi/runtime@1.11.1": {
@@ -935,6 +937,105 @@ export const runtimeManifest = {
       "dependencies": {},
       "optionalDependencies": {}
     },
+    "@lydell/node-pty-darwin-arm64@1.2.0-beta.15": {
+      "name": "@lydell/node-pty-darwin-arm64",
+      "version": "1.2.0-beta.15",
+      "integrity": "sha512-6TSBbzdcLiNTHl1mTuzflqXrkmcC36USVGvERoDgvHk2ItEDaMaFZuAJ1CqPmwYj0DyhCS16TVS8OGK9xZnjyQ==",
+      "tarball": "https://registry.npmjs.org/@lydell/node-pty-darwin-arm64/-/node-pty-darwin-arm64-1.2.0-beta.15.tgz",
+      "os": [
+        "darwin"
+      ],
+      "cpu": [
+        "arm64"
+      ],
+      "dependencies": {},
+      "optionalDependencies": {}
+    },
+    "@lydell/node-pty-darwin-x64@1.2.0-beta.15": {
+      "name": "@lydell/node-pty-darwin-x64",
+      "version": "1.2.0-beta.15",
+      "integrity": "sha512-yDT2oqPqYMBScyuk1U9Rg5VKcrbMOD9o9jWYYamDADA3NSbUISroPChrqYRQ74Y7BQtNH4gqYAiWOZRi5uQZ0Q==",
+      "tarball": "https://registry.npmjs.org/@lydell/node-pty-darwin-x64/-/node-pty-darwin-x64-1.2.0-beta.15.tgz",
+      "os": [
+        "darwin"
+      ],
+      "cpu": [
+        "x64"
+      ],
+      "dependencies": {},
+      "optionalDependencies": {}
+    },
+    "@lydell/node-pty-linux-arm64@1.2.0-beta.15": {
+      "name": "@lydell/node-pty-linux-arm64",
+      "version": "1.2.0-beta.15",
+      "integrity": "sha512-wkbNF7dYAmtJv+o2+iztVlNwnUB4B0uX0wh/UD+mwMcmE2gNMnW9GChXO7fEE5XJokD0vB5idiHpGegaN+G/sg==",
+      "tarball": "https://registry.npmjs.org/@lydell/node-pty-linux-arm64/-/node-pty-linux-arm64-1.2.0-beta.15.tgz",
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "arm64"
+      ],
+      "dependencies": {},
+      "optionalDependencies": {}
+    },
+    "@lydell/node-pty-linux-x64@1.2.0-beta.15": {
+      "name": "@lydell/node-pty-linux-x64",
+      "version": "1.2.0-beta.15",
+      "integrity": "sha512-+U/5AVvHT6W+8OCYcnJgN0Qgc0ycO3TfD6aaFJHK+WHij797f8gsi5dV1HEO9l6YQmWCD+VL5gaLDhx3mxHwCA==",
+      "tarball": "https://registry.npmjs.org/@lydell/node-pty-linux-x64/-/node-pty-linux-x64-1.2.0-beta.15.tgz",
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "x64"
+      ],
+      "dependencies": {},
+      "optionalDependencies": {}
+    },
+    "@lydell/node-pty-win32-arm64@1.2.0-beta.15": {
+      "name": "@lydell/node-pty-win32-arm64",
+      "version": "1.2.0-beta.15",
+      "integrity": "sha512-pyAk91w7wnnKrD4mrHXtIXRfmzSWV5bEzvRhurXcMCtCc2TJ424ciUskIgWMhAPP6y3KyUnqElj+U6kY3iOt0A==",
+      "tarball": "https://registry.npmjs.org/@lydell/node-pty-win32-arm64/-/node-pty-win32-arm64-1.2.0-beta.15.tgz",
+      "os": [
+        "win32"
+      ],
+      "cpu": [
+        "arm64"
+      ],
+      "dependencies": {},
+      "optionalDependencies": {}
+    },
+    "@lydell/node-pty-win32-x64@1.2.0-beta.15": {
+      "name": "@lydell/node-pty-win32-x64",
+      "version": "1.2.0-beta.15",
+      "integrity": "sha512-2f8twEmDVxZ7drchAXjtevpmSPhFok0avAnzXro4t5gmz0xsPNKkoZvymwtuIS3xo7PzQqZOPQ/YzwEMb7oIzQ==",
+      "tarball": "https://registry.npmjs.org/@lydell/node-pty-win32-x64/-/node-pty-win32-x64-1.2.0-beta.15.tgz",
+      "os": [
+        "win32"
+      ],
+      "cpu": [
+        "x64"
+      ],
+      "dependencies": {},
+      "optionalDependencies": {}
+    },
+    "@lydell/node-pty@1.2.0-beta.15": {
+      "name": "@lydell/node-pty",
+      "version": "1.2.0-beta.15",
+      "integrity": "sha512-Br8wBxzbxFwdWgk9uQ+rdzE0xfoxOK4QuGH54swhRwc5IxP6H9Y1/bcyazRGvNUs6XkB5qNVkezuKSRxUwZe7A==",
+      "tarball": "https://registry.npmjs.org/@lydell/node-pty/-/node-pty-1.2.0-beta.15.tgz",
+      "dependencies": {},
+      "optionalDependencies": {
+        "@lydell/node-pty-darwin-arm64": "@lydell/node-pty-darwin-arm64@1.2.0-beta.15",
+        "@lydell/node-pty-darwin-x64": "@lydell/node-pty-darwin-x64@1.2.0-beta.15",
+        "@lydell/node-pty-linux-arm64": "@lydell/node-pty-linux-arm64@1.2.0-beta.15",
+        "@lydell/node-pty-linux-x64": "@lydell/node-pty-linux-x64@1.2.0-beta.15",
+        "@lydell/node-pty-win32-arm64": "@lydell/node-pty-win32-arm64@1.2.0-beta.15",
+        "@lydell/node-pty-win32-x64": "@lydell/node-pty-win32-x64@1.2.0-beta.15"
+      }
+    },
     "@napi-rs/canvas-android-arm64@0.1.80": {
       "name": "@napi-rs/canvas-android-arm64",
       "version": "0.1.80",
@@ -1225,6 +1326,14 @@ export const runtimeManifest = {
       "optionalDependencies": {
         "@napi-rs/canvas": "@napi-rs/canvas@0.1.80"
       }
+    },
+    "playwright-core@1.63.0": {
+      "name": "playwright-core",
+      "version": "1.63.0",
+      "integrity": "sha512-rYCsBF/M5HjUch52bbtVONEFjv6Xu8sm8h72dNlR5bzIE1fvC/bxgspzkjSfU+MweEMmPM8KJebG6nnyxo5mCg==",
+      "tarball": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.63.0.tgz",
+      "dependencies": {},
+      "optionalDependencies": {}
     },
     "semver@7.8.5": {
       "name": "semver",

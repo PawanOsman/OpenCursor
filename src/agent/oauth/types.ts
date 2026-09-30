@@ -10,7 +10,7 @@
 /** Public, token-free OAuth types shared across the OAuth subsystem and UI. */
 
 /** OAuth provider kinds we support (login with an account, not an API key). */
-export type OAuthKind = "claude-code" | "codex" | "antigravity";
+export type OAuthKind = import("../../shared/oauthProviders").OAuthProviderKind;
 
 export interface OAuthAccount {
   /** Unique id for this account (allows multiple accounts per kind). */
@@ -27,6 +27,8 @@ export interface OAuthAccount {
   idToken?: string;
   /** Google Cloud project id (Antigravity only). */
   projectId?: string;
+  /** Provider-specific session/region metadata, kept only in secret storage. */
+  providerSpecificData?: Record<string, unknown>;
   /** Disabled accounts are skipped by routing/load balancing. */
   disabled?: boolean;
 }
@@ -67,8 +69,13 @@ export interface OAuthStatus {
   pending?: OAuthKind;
   /** Current sign-in link; contains a PKCE challenge, never the verifier or account tokens. */
   authorizationUrl?: string;
+  loginMethod?: "browser" | "device-code" | "import-token";
+  userCode?: string;
+  verificationUri?: string;
+  expiresAt?: number;
   /** Login errors keyed by kind. */
   errors: Partial<Record<OAuthKind, string>>;
   /** Load-balancing strategy for kinds with multiple accounts. */
   balanceStrategy: OAuthBalanceStrategy;
+  balanceStrategies?: Partial<Record<OAuthKind, OAuthBalanceStrategy>>;
 }

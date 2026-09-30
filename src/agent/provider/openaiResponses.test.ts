@@ -8,6 +8,10 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import type { ProviderEvent, ResponsesReasoning, WireMessage } from "../types";
 import type { StreamChatOpts } from "./types";
 import { OpenAIResponsesError, createOpenAIResponsesRequest, parseOpenAIResponses, shouldUseOpenAIResponses } from "./openaiResponses";
@@ -29,10 +33,29 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("official OpenAI Responses routing and request contract", () => {
   it.each([
+    ["fast", "priority"], ["standard", "default"], [undefined, undefined],
+  ] as const)("maps explicit speed %s to service tier %s without changing reasoning", (speed, tier) => {
+    const body = JSON.parse(String(createOpenAIResponsesRequest(options({
+      modelParams: { speed, reasoningEffort: "high" },
+    })).init.body));
+    expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
+    if (tier) expect(body.service_tier).toBe(tier);
+    else expect(body).not.toHaveProperty("service_tier");
+  });
+
+  it.each(["fast", "standard"] as const)("omits speed %s for unsupported Pro models", (speed) => {
+    const body = JSON.parse(String(createOpenAIResponsesRequest(options({
+      model: "gpt-5.5-pro", modelParams: { speed },
+    })).init.body));
+    expect(body.model).toBe("gpt-5.5-pro");
+    expect(body).not.toHaveProperty("service_tier");
+  });
+
+  it.each([
     ["openai", "gpt-6-astra", true], ["codex", "gpt-6-astra", false], ["openai", "gpt-5.5-pro", false],
   ] as const)("scopes encrypted %s/%s replay to the original model and transport", (provider, model, included) => {
     const item: ResponsesReasoning["items"][number] = { type: "reasoning", id: "rs_fixture", summary: [], encrypted_content: "opaque-api-fixture" };
-    const messages: WireMessage[] = [{ role: "assistant", content: "Earlier answer", responsesReasoning: { provider, model, items: [item] } }];
+    const messages: WireMessage[] = [{ role: "assistant", content: "Earlier answer", responsesReasoning: { provider, model, credential: createHash("sha256").update("fixture-key").digest("hex"), items: [item] } }];
     const original = structuredClone(messages);
     const body = JSON.parse(String(createOpenAIResponsesRequest(options({ messages })).init.body));
     expect(body.input.filter((input: any) => input.type === "reasoning")).toEqual(included ? [item] : []);
@@ -40,7 +63,7 @@ describe("official OpenAI Responses routing and request contract", () => {
     expect(messages).toEqual(original);
   });
 
-  it.each(["gpt-6-astra", "gpt-6-astra-2026-09-01", "gpt-5.5-pro", "gpt-5.5-pro-2026-04-23", "gpt-5.3-codex", "gpt-5.3-codex-2026-02-05"])("routes %s on the official API", (model) => {
+  it.each(["gpt-6-astra", "gpt-6-astra-2026-09-01", "gpt-6-sol", "gpt-6-luna", "gpt-5.5-pro", "gpt-5.5-pro-2026-04-23", "gpt-5.3-codex", "gpt-5.3-codex-2026-02-05"])("routes %s on the official API", (model) => {
     expect(shouldUseOpenAIResponses(options({ model }))).toBe(true);
     expect(shouldUseOpenAIResponses(options({ model, apiBaseUrl: "https://api.openai.com/v1/" }))).toBe(true);
     expect(shouldUseOpenAIResponses(options({ model, apiBaseUrl: "https://api.openai.com" }))).toBe(true);
@@ -53,6 +76,48 @@ describe("official OpenAI Responses routing and request contract", () => {
     { oauthKind: "codex" as const }, { anthropic: true },
   ])("leaves other transports unchanged: %j", (patch) => {
     expect(shouldUseOpenAIResponses(options(patch))).toBe(false);
+  });
+
+  it.each(["gpt-6-sol", "gpt-6-luna"])("keeps %s's compatible endpoints and OAuth transport independent", (model) => {
+    for (const patch of [
+      { apiBaseUrl: "http://localhost:8080/v1" }, { apiBaseUrl: "https://openrouter.ai/api/v1" },
+      { apiBaseUrl: "https://api.openai.com.proxy.example/v1" }, { apiBaseUrl: "https://api.openai.com/proxy/v1" },
+      { apiBaseUrl: "https://api.openai.com/v1?route=custom" }, { apiBaseUrl: "https://api.openai.com/v1#custom" },
+      { oauthKind: "codex" as const }, { anthropic: true },
+    ]) expect(shouldUseOpenAIResponses(options({ model, ...patch }))).toBe(false);
+    for (const alias of [`${model}-custom`, `${model}-pro`, `${model}-2026-09-22`]) {
+      expect(shouldUseOpenAIResponses(options({ model: alias }))).toBe(false);
+    }
+  });
+
+  describe.each(["gpt-6-sol", "gpt-6-luna"])("%s reasoning and sampling", (model) => {
+    it.each(["none", "low", "medium", "high", "xhigh", "max"])("retains documented effort %s for streaming tool calls", (effort) => {
+      const request = createOpenAIResponsesRequest(options({ model, modelParams: { reasoningEffort: effort },
+        tools: [{ type: "function", function: { name: "Read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }],
+        temperature: 0, sampling: { topP: 0.5, topK: 20, frequencyPenalty: 1, presencePenalty: 1, seed: 42, stopSequences: ["STOP"] },
+      }));
+      const body = JSON.parse(String(request.init.body));
+      expect(request.url).toBe("https://api.openai.com/v1/responses");
+      expect(request.init.headers).toMatchObject({ accept: "text/event-stream" });
+      expect(body).toMatchObject({ model, stream: true, store: false, reasoning: { effort }, tools: [{ type: "function", name: "Read", strict: false }], tool_choice: "auto" });
+      expect(body.temperature).toBe(effort === "none" ? 0 : undefined);
+      expect(body.top_p).toBe(effort === "none" ? 0.5 : undefined);
+      for (const key of ["top_k", "frequency_penalty", "presence_penalty", "seed", "stop", "logprobs", "top_logprobs"]) expect(body).not.toHaveProperty(key);
+    });
+
+    it.each([undefined, "", "unknown", "   "])("uses the model default for unspecified/invalid effort %s without sampling", (effort) => {
+      const body = JSON.parse(String(createOpenAIResponsesRequest(options({ model, modelParams: { reasoningEffort: effort }, temperature: 0.2, sampling: { topP: 0.4 } })).init.body));
+      expect(body.reasoning).not.toHaveProperty("effort");
+      expect(body).not.toHaveProperty("temperature");
+      expect(body).not.toHaveProperty("top_p");
+    });
+
+    it("omits absent sampling settings at none", () => {
+      const body = JSON.parse(String(createOpenAIResponsesRequest(options({ model, modelParams: { reasoningEffort: "none" }, sampling: { topP: null } })).init.body));
+      expect(body.reasoning.effort).toBe("none");
+      expect(body).not.toHaveProperty("temperature");
+      expect(body).not.toHaveProperty("top_p");
+    });
   });
 
   it("sends a stateless Responses request with optional tool fields and no OAuth identity", async () => {
@@ -88,6 +153,8 @@ describe("official OpenAI Responses routing and request contract", () => {
 
   it.each([
     ["gpt-6-astra", "none", "low"], ["gpt-6-astra", "minimal", "low"], ["gpt-6-astra", "ultra", "max"],
+    ["gpt-6-sol", "minimal", "low"], ["gpt-6-sol", "ultra", "max"], ["gpt-6-sol", " NONE ", "none"],
+    ["gpt-6-luna", "minimal", "low"], ["gpt-6-luna", "ultra", "max"], ["gpt-6-luna", " MAX ", "max"],
     ["gpt-5.5-pro", "none", "medium"], ["gpt-5.5-pro", "max", "xhigh"],
     ["gpt-5.3-codex", "none", "low"], ["gpt-5.3-codex", "max", "xhigh"],
   ])("normalizes inherited %s effort %s to %s", (model, supplied, expected) => {
@@ -117,6 +184,62 @@ describe("official OpenAI Responses routing and request contract", () => {
 });
 
 describe("OpenAI Responses decoding", () => {
+  it.each(["gpt-6-sol", "gpt-6-luna"])("replays %s's completed loopback tool call with its original reasoning identity", async (model) => {
+    const bodies: Record<string, any>[] = [];
+    const opaque = { type: "reasoning", id: "rs_local", summary: [], encrypted_content: "opaque-local-fixture" };
+    const server = createServer(async (request, response) => {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      bodies.push(JSON.parse(body));
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(frame({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 20, output_tokens: 5 }, output: bodies.length === 1
+        ? [opaque, { type: "function_call", id: "fc_local", call_id: "call_local", name: "Read", arguments: '{"path":"file.ts"}' }]
+        : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Verified the file." }] }],
+      } }));
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}/responses`;
+      const opts = options({ model, modelParams: { reasoningEffort: "high" } });
+      const first = createOpenAIResponsesRequest(opts);
+      // Exercise real HTTP/stream decoding locally; never contact a paid API.
+      const events: ProviderEvent[] = [];
+      for await (const event of parseOpenAIResponses(await fetch(endpoint, first.init), opts.signal, model, opts.apiKey)) events.push(event);
+      const reasoning = events.find(event => event.type === "responses-reasoning")!;
+      expect(reasoning).toMatchObject({ reasoning: { provider: "openai", model, items: [opaque] } });
+      expect(events).toContainEqual({ type: "tool-call", call: { id: "call_local", name: "Read", arguments: '{"path":"file.ts"}' } });
+      expect(events.at(-1)).toEqual({ type: "done", finishReason: "tool_calls" });
+      const followup = createOpenAIResponsesRequest(options({ ...opts, messages: [...opts.messages,
+        { role: "assistant", content: null, responsesReasoning: reasoning.reasoning, tool_calls: [{ id: "call_local", type: "function", function: { name: "Read", arguments: '{"path":"file.ts"}' } }] },
+        { role: "tool", tool_call_id: "call_local", content: "File contents" },
+      ] }));
+      expect(await collect(await fetch(endpoint, followup.init), opts.signal)).toContainEqual({ type: "text-delta", text: "Verified the file." });
+      expect(bodies[0]).toMatchObject({ model, reasoning: { effort: "high" }, stream: true });
+      expect(bodies[1].input).toContainEqual(opaque);
+      expect(bodies[1].input).toContainEqual({ type: "function_call_output", call_id: "call_local", output: "File contents" });
+      expect(reasoning.reasoning.credential).toMatch(/^[a-f0-9]{64}$/);
+      expect(JSON.stringify(reasoning)).not.toContain(opts.apiKey);
+      const rotated = createOpenAIResponsesRequest(options({ ...opts, apiKey: "another-account-key", messages: [
+        { role: "assistant", content: "Prior answer", responsesReasoning: reasoning.reasoning, tool_calls: [{ id: "call_local", type: "function", function: { name: "Read", arguments: "{}" } }] },
+        { role: "tool", tool_call_id: "call_local", content: "File contents" },
+      ] }));
+      const rotatedInput = JSON.parse(String(rotated.init.body)).input;
+      expect(rotatedInput.some((item: any) => item.type === "reasoning")).toBe(false);
+      expect(rotatedInput).toContainEqual({ role: "assistant", content: [{ type: "output_text", text: "Prior answer" }] });
+      expect(rotatedInput).toContainEqual({ type: "function_call", call_id: "call_local", name: "Read", arguments: "{}" });
+      expect(rotatedInput).toContainEqual({ type: "function_call_output", call_id: "call_local", output: "File contents" });
+      const legacy = JSON.parse(String(createOpenAIResponsesRequest(options({ ...opts, messages: [{ role: "assistant", content: "Legacy answer", responsesReasoning: { ...reasoning.reasoning, credential: undefined } }] })).init.body));
+      expect(legacy.input.some((item: any) => item.type === "reasoning")).toBe(false);
+      const otherModel = model === "gpt-6-sol" ? "gpt-6-luna" : "gpt-6-sol";
+      const switched = JSON.parse(String(createOpenAIResponsesRequest(options({ model: otherModel, messages: [{ role: "assistant", content: "Prior answer", responsesReasoning: reasoning.reasoning }] })).init.body));
+      expect(switched.input.some((item: any) => item.type === "reasoning")).toBe(false);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
   it("decodes streaming calls and cumulative cached reads/writes without double billing", async () => {
     const usage = { input_tokens: 100, output_tokens: 5, input_tokens_details: { cached_tokens: 40, cache_write_tokens: 60 } };
     const events = await collect(sse(

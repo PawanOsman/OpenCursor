@@ -1,0 +1,89 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+.oc-select-trigger {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--control-height, 32px);
+  padding: 6px var(--control-gutter, 10px);
+  border: 1px solid var(--input-border, var(--line));
+  border-radius: var(--control-radius, 8px);
+  background: var(--control-bg, var(--input-bg, var(--bg)));
+  color: var(--input-fg, var(--fg));
+  font: inherit;
+  font-size: 13px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-1, 100ms), border-color var(--dur-1, 100ms);
+}
+.oc-select-trigger:hover:not(:disabled), .oc-select-trigger[aria-expanded="true"] {
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+}
+.oc-select-trigger:focus-visible {
+  outline: 2px solid var(--line-strong);
+  outline-offset: 2px;
+}
+.oc-select-trigger:disabled { opacity: .5; cursor: default; }
+.oc-select-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-select-chevron, .oc-select-check {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.oc-select-chevron { color: var(--fg-dim); }
+.oc-select-popup {
+  box-sizing: border-box;
+  position: fixed;
+  z-index: 12000;
+  margin: 0;
+  padding: 5px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line-soft, var(--line));
+  border-radius: 12px;
+  background: var(--vscode-menu-background, var(--dropdown-bg, var(--bg)));
+  color: var(--fg);
+  box-shadow: var(--el-3, 0 8px 24px #0002);
+  font: 13px/18px var(--font-ui, sans-serif);
+  text-align: left;
+}
+.oc-select-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 30px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  user-select: none;
+}
+.oc-select-option-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.oc-select-option[data-active="true"] { background: var(--surface-3); }
+.oc-select-option[aria-disabled="true"] { opacity: .4; cursor: default; }
+.oc-select-group { padding: 7px 8px 4px; color: var(--fg-dim); font-size: 11px; font-weight: 500; }
+.oc-select-popup [role="group"] + [role="group"] { border-top: 1px solid var(--line-soft); margin-top: 4px; padding-top: 2px; }
+.oc-select-empty { padding: 8px; color: var(--fg-dim); }
+@media (forced-colors: active) {
+  .oc-select-trigger, .oc-select-popup { border-color: ButtonText; }
+  .oc-select-trigger:focus-visible { outline-color: Highlight; }
+  .oc-select-option[data-active="true"] { outline: 1px solid Highlight; outline-offset: -1px; }
+  .oc-select-option[aria-disabled="true"] { color: GrayText; opacity: 1; }
+}

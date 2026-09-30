@@ -12,7 +12,7 @@ import type { OAuthAccount, OAuthKind } from "./oauth/types";
 
 vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} } }));
 vi.mock("../stores/featureStore", () => ({ MODEL_CATALOG: [] }));
-import { disconnect, getAccountLimits, initOAuth, isConnected, listAccounts, setAccountEnabled, streamOAuthChat } from "./oauth";
+import { disconnect, getAccountLimits, initOAuth, isConnected, listAccounts, listOAuthModels, setAccountEnabled, streamOAuthChat } from "./oauth";
 import { buildMessages } from "./messages";
 
 const saved = new Map<string, string>();
@@ -24,11 +24,12 @@ const jwt = (claims: object) => `fixture.${Buffer.from(JSON.stringify(claims)).t
 const headers = (init?: RequestInit) => new Headers(init?.headers);
 const body = (init?: RequestInit) => JSON.parse(String(init?.body));
 
-async function seed(kind: OAuthKind = "codex", extra: Partial<OAuthAccount> = {}) {
+async function seed(kind: OAuthKind = "codex", extra: Partial<OAuthAccount> = {}, additional: OAuthAccount[] = []) {
   const account: OAuthAccount = { id: `transport-${kind}`, kind, accessToken: "old-access", refreshToken: "old-refresh",
     expiresAt: Date.now() + 3_600_000, accountId: "workspace-one", projectId: "project-one", ...extra };
-  saved.set(`ocursor.oauth.acct.${account.id}`, JSON.stringify(account));
-  initOAuth({ globalState: { get: (_key: string, fallback: unknown) => Array.isArray(fallback) ? [account.id] : fallback, update: vi.fn() },
+  const fixtures = [account, ...additional];
+  for (const fixture of fixtures) saved.set(`ocursor.oauth.acct.${fixture.id}`, JSON.stringify(fixture));
+  initOAuth({ globalState: { get: (_key: string, fallback: unknown) => Array.isArray(fallback) ? fixtures.map(fixture => fixture.id) : fallback, update: vi.fn() },
     secrets: { get: async (key: string) => saved.get(key), store: async (key: string, value: string) => { saved.set(key, value); },
       delete: async (key: string) => { saved.delete(key); } } } as unknown as Parameters<typeof initOAuth>[0]);
   await vi.waitFor(() => expect(isConnected(kind)).toBe(true));
@@ -42,6 +43,10 @@ async function chat(kind: OAuthKind = "codex", signal = new AbortController().si
   return events;
 }
 
+async function antigravityChat(model: string) {
+  for await (const _event of streamOAuthChat("antigravity", { model, messages: [{ role: "user", content: "Hello" }], signal: new AbortController().signal })) { /* consume */ }
+}
+
 beforeEach(async () => {
   for (const account of listAccounts()) await disconnect(account.id);
   saved.clear();
@@ -49,6 +54,176 @@ beforeEach(async () => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("OAuth account transport", () => {
+  it("discovers real Antigravity models without quota fields, keeps only supported aliases, and sends clean IDs", async () => {
+    await seed("antigravity");
+    const sent: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("fetchAvailableModels")) return Response.json({ models: {
+        "gemini-3.8-flash-high": {}, "gemini-3.8-flash-medium": { quotaInfo: {} },
+        "gemini-3.8-flash-low": { isInternal: true },
+      } });
+      sent.push(body(init));
+      return sse("antigravity");
+    }));
+    const models = await listOAuthModels("antigravity");
+    expect(models).toEqual(["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash"]);
+    await antigravityChat("gemini-3.8-flash-high");
+    await antigravityChat("gemini-3.8-flash");
+    expect(sent.map(request => request.model)).toEqual(["gemini-3.8-flash-high", "gemini-3.8-flash-medium"]);
+    expect(sent.map(request => request.request.generationConfig.thinkingConfig.thinkingLevel)).toEqual(["high", "medium"]);
+  });
+
+  it("keeps a valid empty Antigravity catalog empty, including a later temporary discovery failure", async () => {
+    await seed("antigravity");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json({ models: {} })).mockResolvedValueOnce(new Response("unavailable", { status: 503 })));
+    expect(await listOAuthModels("antigravity")).toEqual([]);
+    expect(await listOAuthModels("antigravity")).toEqual([]);
+  });
+
+  it("binds advertised raw IDs to their account, never another account's alias cache", async () => {
+    const second: OAuthAccount = { id: "antigravity-second", kind: "antigravity", accessToken: "second-access", refreshToken: "second-refresh", expiresAt: Date.now() + 3_600_000, projectId: "project-two" };
+    const first = await seed("antigravity", {}, [second]);
+    const sent: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("fetchAvailableModels")) return Response.json({ models: body(init).project === "project-one" ? { "gemini-3.7-flash-high": {} } : { "gemini-3.7-flash-tiered": {} } });
+      sent.push(body(init));
+      return sse("antigravity");
+    }));
+    expect(await listOAuthModels("antigravity")).toContain("gemini-3.7-flash-high");
+    await setAccountEnabled(first.id, false);
+    expect(await listOAuthModels("antigravity")).toContain("gemini-3.7-flash-low");
+    await antigravityChat("gemini-3.7-flash-high");
+    await setAccountEnabled(first.id, true);
+    await setAccountEnabled(second.id, false);
+    await antigravityChat("gemini-3.7-flash-high");
+    expect(sent.map(request => [request.project, request.model])).toEqual([
+      ["project-two", "gemini-3.7-flash-tiered"], ["project-one", "gemini-3.7-flash-high"],
+    ]);
+  });
+
+  it("invalidates the old catalog when404 recovery changes the account project", async () => {
+    await seed("antigravity");
+    const sent: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("fetchAvailableModels")) return Response.json({ models: body(init).project === "project-one" ? { "gemini-3.7-flash-high": {} } : { "gemini-3.7-flash-tiered": {} } });
+      if (url.includes("loadCodeAssist")) return Response.json({ cloudaicompanionProject: "project-two" });
+      sent.push(body(init));
+      return sent.length === 1 ? new Response("missing", { status: 404 }) : sse("antigravity");
+    }));
+    await listOAuthModels("antigravity");
+    await antigravityChat("gemini-3.7-flash-high");
+    expect(sent.map(request => [request.project, request.model])).toEqual([
+      ["project-one", "gemini-3.7-flash-high"], ["project-two", "gemini-3.7-flash-tiered"],
+    ]);
+  });
+
+  it("invalidates a credential's catalog after token rotation", async () => {
+    await seed("antigravity");
+    const sent: any[] = [];
+    let catalogCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("fetchAvailableModels")) { catalogCalls++; return Response.json({ models: { "gemini-3.7-flash-high": {} } }); }
+      if (url.includes("/token")) return Response.json({ access_token: "rotated-access", refresh_token: "rotated-refresh", expires_in: 3600 });
+      sent.push(body(init));
+      return sent.length === 1 ? new Response("expired", { status: 401 }) : sse("antigravity");
+    }));
+    await listOAuthModels("antigravity");
+    await antigravityChat("gemini-3.7-flash-high");
+    await antigravityChat("gemini-3.7-flash-high");
+    expect(sent.map(request => request.model)).toEqual(["gemini-3.7-flash-high", "gemini-3.7-flash-high", "gemini-3.7-flash-high"]);
+    expect(catalogCalls).toBe(2);
+  });
+
+  it("expires the catalog after five minutes and clears it on context reinitialization", async () => {
+    await seed("antigravity");
+    const sent: any[] = [];
+    let catalogCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("fetchAvailableModels")) { catalogCalls++; return Response.json({ models: { "gemini-3.7-flash-high": {} } }); }
+      sent.push(body(init));
+      return sse("antigravity");
+    }));
+    await listOAuthModels("antigravity");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 5 * 60_000 + 1);
+    try { await antigravityChat("gemini-3.7-flash-high"); } finally { clock.mockRestore(); }
+    await listOAuthModels("antigravity");
+    await seed("antigravity");
+    await antigravityChat("gemini-3.7-flash-high");
+    expect(sent.map(request => request.model)).toEqual(["gemini-3.7-flash-high", "gemini-3.7-flash-high"]);
+    expect(catalogCalls).toBe(4);
+  });
+
+  it("binds discovery to the refreshed credential when its first catalog request returned401", async () => {
+    await seed("antigravity");
+    const sent: any[] = [];
+    let catalogCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("fetchAvailableModels")) return ++catalogCalls === 1 ? new Response("expired", { status: 401 }) : Response.json({ models: { "gemini-3.7-flash-high": {} } });
+      if (url.includes("/token")) return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+      sent.push(body(init));
+      return sse("antigravity");
+    }));
+    expect(await listOAuthModels("antigravity")).toEqual(["gemini-3.7-flash-high"]);
+    await antigravityChat("gemini-3.7-flash-high");
+    expect(sent[0].model).toBe("gemini-3.7-flash-high");
+    expect(catalogCalls).toBe(2);
+  });
+
+  it("falls back from failed ambiguous-alias discovery without an extra generation retry", async () => {
+    await seed("antigravity");
+    const sent: any[] = [];
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("fetchAvailableModels")) return new Response("unavailable", { status: 503 });
+      sent.push(body(init));
+      return sse("antigravity");
+    });
+    vi.stubGlobal("fetch", fetch);
+    await antigravityChat("gemini-3.7-flash-high");
+    expect(sent[0].model).toBe("gemini-3.7-flash-tiered");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes the full404 catalog and identifies the selected unavailable model", async () => {
+    await seed("antigravity");
+    let generations = 0;
+    const ids = Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`available-${index}`, {}]));
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("loadCodeAssist")) return Response.json({ cloudaicompanionProject: "project-one" });
+      if (url.includes("fetchAvailableModels")) return Response.json({ models: { ...ids, "gemini-3.7-flash-high": {}, internal: { isInternal: true } } });
+      return ++generations === 1 ? new Response("missing", { status: 404 }) : sse("antigravity");
+    }));
+    await expect(antigravityChat("selected-unavailable")).rejects.toMatchObject({ status: 404, message: expect.stringContaining('model "selected-unavailable"') });
+    // The raw ID beyond the old 12-entry diagnostic truncation is cached too.
+    const sent: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => { sent.push(body(init)); return sse("antigravity"); }));
+    await antigravityChat("gemini-3.7-flash-high");
+    expect(sent[0].model).toBe("gemini-3.7-flash-high");
+  });
+
+  it("refreshes a stale Antigravity project once after404 and retries only the newly resolved project", async () => {
+    const account = await seed("antigravity");
+    const projects: string[] = [];
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("loadCodeAssist")) return Response.json({ cloudaicompanionProject: "current-project" });
+      projects.push(body(init).project);
+      return projects.length === 1 ? new Response("not found", { status: 404 }) : sse("antigravity");
+    });
+    vi.stubGlobal("fetch", fetch);
+    await chat("antigravity");
+    expect(projects).toEqual(["project-one", "current-project"]);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(saved.get(`ocursor.oauth.acct.${account.id}`)!)).toMatchObject({ projectId: "current-project" });
+  });
+
+  it("does not retry an unavailable Antigravity model when the authoritative project is unchanged", async () => {
+    await seed("antigravity");
+    const fetch = vi.fn(async (url: string) => url.includes("loadCodeAssist") ? Response.json({ cloudaicompanionProject: "project-one" })
+      : url.includes("fetchAvailableModels") ? Response.json({ models: { "actual-model": {} } }) : new Response("model missing", { status: 404 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(chat("antigravity")).rejects.toMatchObject({ status: 404, message: expect.stringContaining("actual-model") });
+    expect(fetch.mock.calls.filter(([url]) => url.includes("streamGenerateContent"))).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
   it("preserves a real Gemini call signature through the agent history and next request", async () => {
     await seed("antigravity");
     const sent: any[] = [];

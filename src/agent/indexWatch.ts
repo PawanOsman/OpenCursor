@@ -11,7 +11,7 @@
 
 import * as vscode from "vscode";
 import * as path from "path";
-import { upsertFile, removeFile, buildIndex, setIndexingEnabled, warmIndex, isIndexingEnabled, getStatus } from "./semanticIndex";
+import { applyFileChanges, buildIndex, setIndexingEnabled, warmIndex, isIndexingEnabled, getStatus } from "./semanticIndex";
 import { getWorkspaceRoot } from "../context/workspaceUtils";
 import { invalidateScanCache, IGNORE_POLICY_FILES } from "./tools/fileScan";
 import type { FeatureStore } from "../stores/featureStore";
@@ -60,20 +60,16 @@ async function flush(): Promise<void> {
   try {
     const batch = new Map(pending);
     pending.clear();
-    for (const [abs, action] of batch) {
-      try {
-        if (IGNORE_POLICY_FILES.includes(path.basename(abs))) {
-          invalidateScanCache();
-          if (getStatus(root).indexing) pending.set(abs, action);
-          else await buildIndex(root);
-          continue;
-        }
-        if (action === "del") await removeFile(root, abs);
-        else await upsertFile(root, abs);
-      } catch (error) {
-        logError("index.file", error, { action, path: abs });
-      }
+    const policies = [...batch].filter(([abs]) => IGNORE_POLICY_FILES.includes(path.basename(abs)));
+    if (policies.length) {
+      invalidateScanCache();
+      if (getStatus(root).indexing) for (const [abs, action] of policies) pending.set(abs, action);
+      else await buildIndex(root);
     }
+    for (const [abs] of policies) batch.delete(abs);
+    await applyFileChanges(root, batch);
+  } catch (error) {
+    logError("index.files", error, { root });
   } finally {
     flushing = false;
     if (pending.size) scheduleFlush();

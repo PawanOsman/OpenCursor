@@ -11,6 +11,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { withToolTimeout } from "./shared";
 
+vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} }, workspace: { getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }) } }));
+
 describe("production tool timeout and cancellation", () => {
   it("rejects an already-aborted signal even without a wall-clock limit", async () => {
     const controller = new AbortController(); controller.abort();

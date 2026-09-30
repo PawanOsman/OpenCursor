@@ -8,15 +8,23 @@
  */
 
 import * as fs from "fs/promises";
+import * as syncFs from "node:fs";
+import { assertExecutionPath } from "../agent/execution";
 import * as path from "path";
 import * as os from "os";
 import * as vscode from "vscode";
 import { randomUUID } from "node:crypto";
 import { safePath } from "../context/workspaceUtils";
 import { pendingChanges, fileDigest, type ChangeOwner } from "./pendingChanges";
+import { syncDirectory } from "./durableFiles";
 
 const locks = new Map<string, Promise<void>>();
 let backupDirectory: Promise<string> | undefined;
+export async function configureFileMutationStorage(directory: string): Promise<void> {
+  const backups = path.join(directory, "edit-backups");
+  await fs.mkdir(backups, { recursive: true, mode: 0o700 });
+  backupDirectory = Promise.resolve(backups);
+}
 export function assertNotAborted(signal?: AbortSignal): void {
   if (signal?.aborted) { const error = new Error("aborted: file mutation cancelled"); error.name = "AbortError"; throw error; }
 }
@@ -50,9 +58,25 @@ export async function canonicalFilePath(input: string): Promise<string> {
     }
   }
 }
+/** Synchronous identity lookup for the pending-edit store's synchronous API. */
+export function canonicalFilePathSync(input: string): string {
+  let candidate = safePath(input);
+  const suffix: string[] = [];
+  for (;;) {
+    // Match fs.promises.realpath's native resolution, including Windows 8.3 aliases.
+    try { return path.join(syncFs.realpathSync.native(candidate), ...suffix); }
+    catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+      const parent = path.dirname(candidate);
+      if (parent === candidate) throw error;
+      suffix.unshift(path.basename(candidate)); candidate = parent;
+    }
+  }
+}
 export async function withPathLock<T>(input: string, signal: AbortSignal | undefined, work: (canonical: string) => Promise<T>): Promise<T> {
   assertNotAborted(signal);
   const canonical = await canonicalFilePath(input);
+  assertExecutionPath(canonical);
   const key = process.platform === "win32" ? canonical.toLowerCase() : canonical;
   const previous = locks.get(key) ?? Promise.resolve();
   let release!: () => void;
@@ -105,14 +129,16 @@ export async function assertCurrentFile(snapshot: FileSnapshot): Promise<void> {
 export async function atomicReplace(file: string, data: Buffer | null, mode?: number, signal?: AbortSignal, beforeCommit?: () => Promise<void>): Promise<void> {
   assertNotAborted(signal);
   if (data === null) {
-    await beforeCommit?.(); assertNotAborted(signal); await fs.unlink(file); return;
+    await beforeCommit?.(); assertNotAborted(signal); await fs.unlink(file); await syncDirectory(path.dirname(file)); return;
   }
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temporary = path.join(path.dirname(file), `.ocursor-${randomUUID()}.tmp`);
   try {
-    await fs.writeFile(temporary, data, { mode: mode === undefined ? 0o666 : mode & 0o777, flag: "wx", signal });
+    const handle = await fs.open(temporary, "wx", mode === undefined ? 0o666 : mode & 0o777);
+    try { await handle.writeFile(data, { signal }); await handle.sync(); } finally { await handle.close(); }
     await beforeCommit?.(); assertNotAborted(signal);
     await fs.rename(temporary, file);
+    await syncDirectory(path.dirname(file));
   } finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
 }
 export interface MutationOptions { signal?: AbortSignal; owner?: ChangeOwner }
@@ -133,14 +159,28 @@ export async function mutateFile<T>(input: string, options: MutationOptions, upd
       if (snapshot.data !== null) {
         backupDirectory ??= fs.mkdtemp(path.join(os.tmpdir(), "ocursor-edit-backups-"));
         backupPath = path.join(await backupDirectory, randomUUID());
-        await fs.writeFile(backupPath, snapshot.data, { flag: "wx", mode: 0o600, signal: options.signal });
+        const backup = await fs.open(backupPath, "wx", 0o600);
+        try { await backup.writeFile(snapshot.data, { signal: options.signal }); await backup.sync(); } finally { await backup.close(); }
+        await syncDirectory(path.dirname(backupPath));
       }
-      await atomicReplace(canonical, next.data, snapshot.mode, options.signal, async () => {
+      // Write-ahead ownership: even a host crash between replacement and UI
+      // delivery retains the original bytes and exact expected new digest.
+      const prepared = pendingChanges.recordCanonicalBytes(canonical, snapshot.data, next.data, options.owner, backupPath, snapshot.mode, true);
+      try { await atomicReplace(canonical, next.data, snapshot.mode, options.signal, async () => {
         if (await canonicalFilePath(input) !== canonical) throw new Error("File destination changed before mutation; newer path was preserved.");
+        assertExecutionPath(canonical);
         await assertCurrentFile(snapshot);
-      });
-      pendingChanges.recordBytes(canonical, snapshot.data, next.data, options.owner, backupPath, snapshot.mode);
+      }); } catch (error) {
+        // A directory-sync error can arrive after replacement. Preserve the
+        // write-ahead record and its backup whenever the new bytes are present.
+        let committed = false;
+        try { committed = fileDigest((await readSnapshot(canonical)).data) === fileDigest(next.data); } catch { committed = true; }
+        if (committed) backupPath = undefined;
+        else pendingChanges.cancelPrepared(prepared);
+        throw error;
+      }
       backupPath = undefined; // owned by pendingChanges until accept/reject
+      pendingChanges.publishPrepared(prepared);
       return next.result;
     } finally { if (backupPath) await fs.rm(backupPath, { force: true }).catch(() => {}); }
   });

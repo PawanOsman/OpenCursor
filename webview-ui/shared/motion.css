@@ -1,0 +1,138 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+:root {
+  --motion-fast: 120ms;
+  --motion-normal: 180ms;
+  --motion-enter: 220ms;
+  --motion-exit: 120ms;
+  --motion-ease: cubic-bezier(.2, .8, .2, 1);
+  --motion-ease-out: cubic-bezier(.16, 1, .3, 1);
+  --motion-ease-in: cubic-bezier(.4, 0, 1, 1);
+}
+
+/* Animate feedback without changing the control's layout or hit target. */
+:is(.hicon, .attach-btn, .message-action, .icon-btn, .btn-primary, .btn-secondary,
+    .btn-ghost, .btn-save, .q-btn, .msel-trigger, .msel-chip, .msel-item,
+    .nav-item, .oc-select-trigger, .oc-select-option, .oc-date-day,
+    .oc-date-trigger, .oc-date-nav, .tab, .mode-item, .model-item,
+    .approval-menu-option, .composer-approval-trigger, .provider-choice) {
+  transition: background-color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease),
+    opacity var(--motion-fast) var(--motion-ease),
+    scale var(--motion-fast) var(--motion-ease);
+}
+:is(.hicon, .attach-btn, .message-action, .icon-btn, .btn-primary, .btn-secondary,
+    .btn-ghost, .btn-save, .q-btn, .oc-date-trigger, .oc-date-nav):active:not(:disabled):not([aria-disabled="true"]) {
+  scale: .96;
+}
+.message-actions { transition: opacity var(--motion-fast) var(--motion-ease); }
+.composer {
+  transition: border-color var(--motion-normal) var(--motion-ease),
+    background-color var(--motion-normal) var(--motion-ease),
+    box-shadow var(--motion-normal) var(--motion-ease);
+}
+.ctx-ring circle[stroke-dashoffset] { transition: stroke-dashoffset var(--motion-enter) var(--motion-ease); }
+.index-bar-fill { transition: width var(--motion-enter) var(--motion-ease); }
+
+.switch .track {
+  transition: background-color var(--motion-normal) var(--motion-ease), border-color var(--motion-normal) var(--motion-ease);
+}
+.switch .thumb {
+  transition: transform var(--motion-normal) var(--motion-ease-out), background-color var(--motion-normal) var(--motion-ease);
+}
+.mo-switch { transition: background-color var(--motion-normal) var(--motion-ease); }
+.mo-knob { transition: left var(--motion-normal) var(--motion-ease-out), background-color var(--motion-normal) var(--motion-ease); }
+input:is([type="checkbox"], [type="radio"]):not(.switch input)::before {
+  scale: .65;
+  transition: opacity var(--motion-fast) var(--motion-ease), scale var(--motion-normal) var(--motion-ease-out);
+}
+input:is([type="checkbox"], [type="radio"]):not(.switch input):is(:checked, :indeterminate)::before { scale: 1; }
+.oc-select-chevron { transition: rotate var(--motion-normal) var(--motion-ease); }
+.oc-select-trigger[aria-expanded="true"] .oc-select-chevron { rotate: 180deg; }
+:is(.tchev, .thinking-chev, .rv-chev) { transition: transform var(--motion-normal) var(--motion-ease); }
+
+/* A small movement toward the trigger gives menus a clear point of origin. */
+:is(.model-picker, .mode-dropdown, .approval-menu, .mention-popup,
+    .more-menu, .oc-select-popup, .oc-date-calendar, .model-dropdown) {
+  transform-origin: var(--motion-origin, top center);
+  animation: motion-menu-in var(--motion-enter) var(--motion-ease-out) backwards;
+}
+:is(.model-picker, .mode-dropdown, .approval-menu, .mention-popup) { --motion-origin: bottom center; --motion-offset: 4px; }
+:is(.model-picker, .mode-dropdown, .approval-menu, .oc-select-popup, .oc-date-calendar)[data-side="top"] { --motion-origin: bottom center; --motion-offset: 4px; }
+:is(.model-picker, .mode-dropdown, .approval-menu, .oc-select-popup, .oc-date-calendar)[data-side="bottom"] { --motion-origin: top center; --motion-offset: -4px; }
+:is(.model-picker, .mode-dropdown, .approval-menu, .oc-select-popup, .oc-date-calendar)[data-state="closing"] {
+  pointer-events: none;
+  animation: motion-menu-out var(--motion-exit) var(--motion-ease-in) forwards;
+}
+@keyframes motion-menu-in {
+  from { opacity: 0; translate: 0 var(--motion-offset, -4px); scale: .98; }
+  to { opacity: 1; translate: 0 0; scale: 1; }
+}
+@keyframes motion-menu-out {
+  from { opacity: 1; translate: 0 0; scale: 1; }
+  to { opacity: 0; translate: 0 var(--motion-offset, -4px); scale: .98; }
+}
+
+:is(.modal-overlay, .history-overlay, .msel-overlay) {
+  animation: motion-fade-in var(--motion-normal) var(--motion-ease) backwards;
+}
+:is(.modal-card, .modal, .history-popup, .msel-dialog) {
+  animation: motion-dialog-in var(--motion-enter) var(--motion-ease-out) backwards;
+}
+.msel-overlay[data-state="closing"] {
+  pointer-events: none;
+  animation: motion-fade-out var(--motion-exit) var(--motion-ease-in) forwards;
+}
+.msel-overlay[data-state="closing"] .msel-dialog {
+  animation: motion-dialog-out var(--motion-exit) var(--motion-ease-in) forwards;
+}
+@keyframes motion-dialog-in {
+  from { opacity: 0; translate: 0 8px; scale: .98; }
+  to { opacity: 1; translate: 0 0; scale: 1; }
+}
+@keyframes motion-dialog-out {
+  from { opacity: 1; translate: 0 0; scale: 1; }
+  to { opacity: 0; translate: 0 4px; scale: .99; }
+}
+@keyframes motion-fade-out { from { opacity: 1; } to { opacity: 0; } }
+
+/* Streaming updates reuse these nodes, so only opening a section animates it. */
+:is(.explore-body, .thinking-body, .compaction-body, .tool-card-body, .plan-body,
+    .review-list, .queue-item, .verification-card, .approval-card) {
+  animation: motion-fade-in var(--motion-normal) var(--motion-ease) backwards;
+}
+.settings-page > .content-inner { animation: motion-fade-in var(--motion-normal) var(--motion-ease) backwards; }
+.context-tooltip { animation: motion-fade-in var(--motion-fast) var(--motion-ease) backwards; }
+.ok-icon { animation: motion-success-in var(--motion-normal) var(--motion-ease-out) backwards; }
+@keyframes motion-success-in { from { opacity: 0; scale: .7; } to { opacity: 1; scale: 1; } }
+@keyframes motion-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Animate persistent surfaces, not markdown descendants replaced on each delta.
+   Keep the sticky prompt and transcript containers out of transformed layers. */
+.chat-messages :is(.tool-card, .read-line, .subagent-card, .thinking-card,
+    .explore-section, .question-card, .plan-card, .error-card, .compaction-card,
+    .approval-card, .verification-card, .phase-row, .sub-summary, .sub-empty),
+.chat-messages .msg.user > :is(.bubble, .subagent-prompt),
+.chat-messages .block-group > .markdown-content {
+  animation: chat-content-in var(--motion-enter) var(--motion-ease-out) backwards;
+}
+
+/* New rows can arrive inside an already visible panel. Their keys preserve
+   completed rows while the trailing tool receives progress updates. */
+.chat-messages :is(.subagent-step, .todo-item, .msg-attach-img, .msg-attach-file,
+    .shell-footer, .qc-answered) {
+  animation: motion-fade-in var(--motion-normal) var(--motion-ease) backwards;
+}
+
+@keyframes chat-content-in {
+  from { opacity: 0; translate: 0 4px; }
+  to { opacity: 1; translate: 0 0; }
+}

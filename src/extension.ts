@@ -16,6 +16,7 @@ import { SettingsPanel } from './ui/settingsPanel';
 import { FeatureStore } from './stores/featureStore';
 import { setToolTimeoutOverrides } from './agent/tools/shared';
 import { mcpManager } from './integrations/mcpClient';
+import { configureMcpAuthentication } from './integrations/mcpHost';
 import { setIndexStorageDir } from './agent/semanticIndex';
 import { setDocsStorageDir, setDocSourcesProvider } from './agent/docsIndex';
 import { initIndexWatch } from './agent/indexWatch';
@@ -25,14 +26,27 @@ import { initUsage } from './stores/usageStore';
 import { initModelRegistry, applyEmbedModel } from './stores/modelRegistry';
 import { initRuntimeDeps } from './runtimeDeps';
 import { initLog, logError } from './logging';
+import { setOllamaHost } from './agent/ollama';
+import { pendingChanges } from './stores/pendingChanges';
+import { configureFileMutationStorage } from './stores/fileMutations';
+import { workspaceStorageDirectory } from './ui/sidebar/storage';
+import * as path from 'node:path';
+import { registerPluginManagement } from './ui/pluginCommands';
+import { registerRemoteJobs } from './ui/remoteCommands';
 
-export function activate(context: vscode.ExtensionContext) {
+let activeSidebar: SidebarProvider | undefined;
+
+export async function activate(context: vscode.ExtensionContext) {
+  registerRemoteJobs(context);
   const log = initLog(context);
   log.appendLine(`[${new Date().toISOString()}] OpenCursor activated`);
 
   // Heavy native deps (onnxruntime, sharp, transformers) are not shipped in the
   // VSIX; they are downloaded to globalStorage on first use.
   initRuntimeDeps(context.globalStorageUri.fsPath);
+  const durableStorage = workspaceStorageDirectory(context)!;
+  await configureFileMutationStorage(path.join(durableStorage, 'mutations'));
+  await pendingChanges.initialize(path.join(durableStorage, 'mutations'));
 
   const settingsManager = new SettingsManager(context);
   const featureStore = new FeatureStore(context);
@@ -41,6 +55,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(featureStore.onDidChange(syncToolTimeouts));
   initOAuth(context);
   initUsage(context);
+  setOllamaHost(context.globalState.get<string>('ocursor.ollamaEndpoint', 'http://localhost:11434'));
   // Prefetch the provider-grouped model list so every UI (settings, pickers)
   // renders instantly from the backend cache.
   initModelRegistry(featureStore, settingsManager);
@@ -54,6 +69,8 @@ export function activate(context: vscode.ExtensionContext) {
     .finally(() => initIndexWatch(context, featureStore));
 
   // Connect any enabled MCP servers in the background.
+  configureMcpAuthentication(context);
+  await registerPluginManagement(context, featureStore).catch((error) => logError("startup.plugins", error));
   void mcpManager.sync(featureStore.get().mcpServers).catch((error) => logError("startup.mcp", error));
 
   // llama.cpp local models: detect install, then auto-load flagged models.
@@ -66,6 +83,7 @@ export function activate(context: vscode.ExtensionContext) {
   }).catch((error) => logError("startup.llamacpp-check", error));
 
   const sidebarProvider = new SidebarProvider(context, settingsManager, featureStore);
+  activeSidebar = sidebarProvider;
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebarProvider, {
       // Keep the chat webview (and any in-flight agent run's UI state) alive when
@@ -89,14 +107,31 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Ctrl+L: add the current selection (or file) to chat as a mention.
   context.subscriptions.push(
-    vscode.commands.registerCommand('ocursor.addToChat', () => sidebarProvider.addSelectionToChat())
+    vscode.commands.registerCommand('ocursor.addToChat', () => sidebarProvider.addSelectionToChat()),
+    vscode.commands.registerCommand('ocursor.newChat', () => sidebarProvider.newChat()),
+    vscode.commands.registerCommand('ocursor.reviewChanges', () => sidebarProvider.startReview()),
+    vscode.commands.registerCommand('ocursor.implementTodo', (uri: vscode.Uri, line: number) => sidebarProvider.implementTodo(uri, line)),
+    vscode.languages.registerCodeLensProvider({ scheme: 'file' }, {
+      provideCodeLenses(document, token) {
+        if (!vscode.workspace.getConfiguration('ocursor').get<boolean>('todoCodeLensEnabled', true)) return [];
+        const lenses: vscode.CodeLens[] = [];
+        for (let line = 0; line < Math.min(document.lineCount, 20_000) && !token.isCancellationRequested; line++) {
+          if (!/(?:\/\/|#|\/\*|\*|<!--)\s*TODO\b/.test(document.lineAt(line).text)) continue;
+          lenses.push(new vscode.CodeLens(new vscode.Range(line, 0, line, 0), { title: 'Implement with OpenCursor', command: 'ocursor.implementTodo', arguments: [document.uri, line] }));
+        }
+        return lenses;
+      },
+    })
   );
 
   context.subscriptions.push({ dispose: () => mcpManager.disposeAll() });
   context.subscriptions.push({ dispose: () => disposeLlamacpp() });
 }
 
-export function deactivate() {
+export async function deactivate() {
+  await activeSidebar?.dispose();
+  activeSidebar = undefined;
   mcpManager.disposeAll();
-  disposeLlamacpp();
+  await disposeLlamacpp();
+  await pendingChanges.flush();
 }

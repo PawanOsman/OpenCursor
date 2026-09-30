@@ -10,6 +10,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { spawnShellCommand, killShellProcess, withToolTimeout, waitForShell } from "./shared";
 
+vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} }, workspace: { getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }) } }));
+
 describe("production cancellation boundaries", () => {
   it("does not classify abort as timeout", async () => {
     const ac = new AbortController(); const timeout = vi.fn();

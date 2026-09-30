@@ -406,6 +406,7 @@ export function buildMessages(system: string, steps: Step[], ctx?: CursorContext
       // Opaque Responses state survives UI-thinking removal and context fitting.
       // Each provider serializer decides whether the originating identity matches.
       if (s.responsesReasoning) msg.responsesReasoning = s.responsesReasoning;
+      if (s.chatReasoning) msg.chatReasoning = s.chatReasoning;
       if (s.calls && s.calls.length) {
         msg.tool_calls = s.calls.map((c) => ({
           id: c.id,

@@ -1,0 +1,73 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+.composer .send-btn {
+	position: relative;
+	transition:
+		background-color var(--motion-fast, 120ms) var(--motion-ease, ease-out),
+		color var(--motion-fast, 120ms) var(--motion-ease, ease-out),
+		opacity var(--motion-fast, 120ms) var(--motion-ease, ease-out);
+}
+
+/* Both glyphs keep their nodes and geometry when the action changes. */
+.composer-send-glyph,
+.composer-stop-glyph {
+	position: absolute;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	pointer-events: none;
+	transition:
+		opacity var(--motion-normal, 180ms) var(--motion-ease, ease-out),
+		transform var(--motion-normal, 180ms) var(--motion-ease, ease-out);
+}
+
+.composer-send-glyph {
+	opacity: 1;
+	transform: scale(1) rotate(0deg);
+}
+.composer-stop-glyph {
+	opacity: 0;
+	transform: scale(.65);
+}
+.send-btn.stop .composer-send-glyph {
+	opacity: 0;
+	transform: scale(.65) rotate(-25deg);
+}
+.send-btn.stop .composer-stop-glyph {
+	opacity: 1;
+	transform: scale(1);
+}
+
+.composer .send-btn .composer-send-glyph svg {
+	width: 20px;
+	height: 20px;
+}
+.composer .send-btn .composer-stop-square {
+	width: 16px;
+	height: 16px;
+}
+.composer-stop-ring {
+	position: absolute;
+	width: 22px;
+	height: 22px;
+	border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent);
+	border-top-color: currentColor;
+	border-right-color: currentColor;
+	border-radius: 50%;
+	animation: composer-stop-rotate 900ms linear infinite;
+	animation-play-state: paused;
+}
+.send-btn.stop .composer-stop-ring {
+	animation-play-state: running;
+}
+
+@keyframes composer-stop-rotate {
+	to { transform: rotate(360deg); }
+}

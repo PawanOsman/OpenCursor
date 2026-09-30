@@ -1,31 +1,30 @@
-.vscode/**
-.vscode-test/**
-out/**
-node_modules/**
-src/**
-webview-ui/**
-recipe/**
-plan/**
-*.md
+# Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+#
+# This file is part of OpenCursor — AI coding agent chat inside VS Code.
+# https://github.com/PawanOsman/OpenCursor
+#
+# Licensed under the MIT License. See LICENSE file in the project root.
+
+# Ship only release artifacts and the images referenced by the packaged README.
+# Audits, logs, browser profiles, local credentials and future build leftovers
+# remain excluded even when their names or directories change.
+**
+!package.json
 !README.md
 !CHANGELOG.md
-pnpm-workspace.yaml
-pnpm-lock.yaml
-tsconfig.webview.json
-scripts/**
-*.vsix
-.gitignore
-.yarnrc
-esbuild.js
-vsc-extension-quickstart.md
-**/tsconfig.json
-**/eslint.config.mjs
-**/*.map
-**/*.ts
-**/.vscode-test.*
-media/readme/**/*.svg
-.env
-
-.github/**
-docs/**
-esbuild-options.cjs
+!LICENSE
+!docs/upgrade-0.2.md
+!docs/worker-and-evaluations.md
+!docs/model-catalog.md
+!media/icon.png
+!media/icon.svg
+!media/readme/hero.png
+!media/readme/providers.png
+!media/readme/local-stack.png
+!media/readme/semantic-search.png
+!dist/extension.js
+!dist/worker.cjs
+!dist/webview/sidebar.js
+!dist/webview/sidebar.css
+!dist/webview/settings.js
+!dist/webview/settings.css

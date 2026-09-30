@@ -12,7 +12,7 @@ import { readFileSync, existsSync } from "node:fs";
 
 const files = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean);
 // Match a credential body, not a bare prefix in documentation or a regex.
-const credential = /\b(?:sk-|tp-|vbk_)[A-Za-z0-9_-]{20,}|\bBearer\s+[A-Za-z0-9._~+/-]{20,}/;
+const credential = /\b(?:sk-|tp-|vbk_)[A-Za-z0-9_-]{20,}|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|\bAIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])/;
 let failed = false;
 for (const file of new Set(files)) {
   // Working-tree deletions still appear in the index until staged.
@@ -22,6 +22,8 @@ for (const file of new Set(files)) {
     failed = true;
   }
   if (!/^(?:src|webview-ui)\/.*\.tsx?$/.test(file)) continue;
+  // Test fixtures may deliberately contain credential-shaped sample values.
+  if (/(?:^|\/)(?:__tests__|tests?)\//.test(file) || /\.(?:test|spec)\.tsx?$/.test(file)) continue;
   const lines = readFileSync(file, "utf8").split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     if (!credential.test(lines[i])) continue;

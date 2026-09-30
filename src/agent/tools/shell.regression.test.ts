@@ -20,6 +20,8 @@ import {
 } from "./shared";
 import { awaitShellTool, runTerminalTool } from "./shell";
 
+vi.mock("vscode", () => ({ workspace: { getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }) } }));
+
 vi.mock("../../context/workspaceUtils", () => ({
   getWorkspaceRoot: () => process.cwd(),
   safePath: (value: string) => path.resolve(process.cwd(), value),
@@ -58,7 +60,7 @@ afterEach(async () => {
     await closeJob(sh);
     sh.done = true;
     sh.endedAt ??= Date.now();
-    if (sh.sessionKey) disposeShellSession(sh.sessionKey);
+    if (sh.sessionKey) await disposeShellSession(sh.sessionKey);
   }
   await pruneShellJobs(Date.now() + SHELL_OUTPUT_LIMITS.retentionMs + 1);
 });

@@ -106,3 +106,23 @@ it("renders committed usage pushes while the page stays open", () => {
   expect(container.textContent).toContain("new-model");
   expect(posted("getUsage")).toHaveLength(0);
 });
+
+it("preserves model options changed elsewhere when saving an unrelated setting", () => {
+  const speed = { key: "speed", label: "Speed", type: "select", values: ["standard", "fast"], value: "standard" };
+  receive({ type: "features", features: { trackUsage: true, modelOptions: { "openai:gpt-6-sol": [speed] } } });
+  // The sidebar has since saved Fast, without reloading this settings view.
+  let hostFeatures = { trackUsage: true, modelOptions: { "openai:gpt-6-sol": [{ ...speed, value: "fast" }] } };
+  const savePatch = (message: any) => {
+    if (message.type === "saveFeatures") hostFeatures = { ...hostFeatures, ...message.features };
+  };
+  vi.mocked(vscode.postMessage).mockImplementationOnce(savePatch).mockImplementationOnce(savePatch);
+  const trackUsage = container.querySelector<HTMLInputElement>('[aria-label="Track Usage"]')!;
+  act(() => trackUsage.click());
+  expect(trackUsage.checked).toBe(false);
+  expect(latest("saveFeatures").features).toEqual({ trackUsage: false });
+  expect(hostFeatures.modelOptions["openai:gpt-6-sol"][0].value).toBe("fast");
+  act(() => trackUsage.click());
+  expect(trackUsage.checked).toBe(true);
+  expect(hostFeatures.trackUsage).toBe(true);
+  expect(hostFeatures.modelOptions["openai:gpt-6-sol"][0].value).toBe("fast");
+});

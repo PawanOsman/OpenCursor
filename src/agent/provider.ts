@@ -7,20 +7,27 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-import { ProviderEvent, ToolCall, ToolSchema, WireMessage, WireContentPart } from "./types";
+import { ChatReasoning, ProviderEvent, ToolCall, ToolSchema, WireMessage, WireContentPart } from "./types";
 import { streamOAuthChat, type OAuthKind } from "./oauth";
 import type { ModelInfo, ModelParams, SamplingParams, StreamChatOpts } from "./provider/types";
 import { MODEL_CATALOG } from "../stores/featureStore";
 import { defaultAnthropicMaxTokens } from "./providerLimits";
 import { applyAnthropicReasoning, needsContext1mBeta } from "./provider/anthropicReasoning";
+import { applyAnthropicSpeed } from "./provider/anthropicSpeed";
+import { applyChatSpeed } from "../shared/modelSpeed";
 import { AnthropicUsageTracker } from "./anthropicUsage";
 import { toAnthropic } from "./provider/anthropicMessages";
 import { sseData } from "./provider/sse";
+import { withStreamDeadline, fetchWithConnectionTimeout } from "./provider/deadlines";
 import { UsageTracker } from "./provider/usage";
 import { applyGoogleOpenAIOptions, googleThoughtSignature, googleToolCall, isGoogleOpenAIEndpoint, prepareGoogleMessages } from "./provider/google";
 import { createOpenAIResponsesRequest, OpenAIResponsesError, parseOpenAIResponses, shouldUseOpenAIResponses } from "./provider/openaiResponses";
 import { applyOpenAIChatOptions } from "./provider/openaiChat";
+import { applyCompatibleOptions, compatibleProviderFor } from "./provider/compatibleOptions";
 import { randomUUID } from "crypto";
+import type { ApiKeyPool } from "./provider/apiKeyPool";
+import { PROVIDER_PRESETS, type ProviderKind } from "../shared/providerCatalog";
+import { PROVIDER_MODELS } from "../shared/providerModels";
 
 export type { ModelInfo, ModelParams, SamplingParams, StreamChatOpts } from "./provider/types";
 export { defaultAnthropicMaxTokens } from "./providerLimits";
@@ -28,6 +35,22 @@ export { defaultAnthropicMaxTokens } from "./providerLimits";
 /** Strip trailing slashes from a base URL to avoid double-slash in constructed paths. */
 function normalizeBaseUrl(url: string): string {
   return url.replace(/\/+$/, "");
+}
+
+function safeProviderDetail(text: string, apiKey: string, limit = 500): string {
+  return (apiKey ? text.split(apiKey).join("[redacted]") : text).slice(0, limit);
+}
+
+function providerErrorStatus(error: { status?: unknown; code?: unknown; type?: unknown }): number {
+  const status = Number(error.status ?? error.code);
+  if (Number.isInteger(status) && status >= 400 && status <= 599) return status;
+  const type = String(error.type ?? error.code ?? "").toLowerCase();
+  if (/invalid_request|bad_request|invalid_argument|context_length|unsupported/.test(type)) return 400;
+  if (/authentication|invalid_api_key|unauthorized/.test(type)) return 401;
+  if (/permission|forbidden/.test(type)) return 403;
+  if (/not_found|model_not_found/.test(type)) return 404;
+  if (/rate_limit|quota|resource_exhausted/.test(type)) return 429;
+  return 502;
 }
 
 function applyOpenAISampling(body: Record<string, unknown>, s?: SamplingParams) {
@@ -55,7 +78,27 @@ function applyAnthropicSampling(body: Record<string, unknown>, model: string, s?
   // Anthropic has no frequency/presence penalty or seed.
 }
 
-export async function listModels(apiBaseUrl: string, apiKey: string, anthropic?: boolean): Promise<ModelInfo[]> {
+function adapterForPool(pool?: ApiKeyPool, model?: string): string | undefined {
+  if (!pool?.providerId.startsWith("popular:")) return undefined;
+  const kind = pool.providerId.slice("popular:".length);
+  const preset = Object.prototype.hasOwnProperty.call(PROVIDER_PRESETS, kind) ? PROVIDER_PRESETS[kind as ProviderKind] : undefined;
+  const alias = model && PROVIDER_MODELS.find(item => item.kind === kind && item.id === model);
+  return preset?.protocol === "adapter" || alias && (alias.upstreamModelId || alias.targetFormat)
+    ? preset?.adapterId : undefined;
+}
+
+export async function listModels(apiBaseUrl: string, apiKey: string, anthropic?: boolean, options?: { apiKeyPool?: ApiKeyPool; signal?: AbortSignal; providerAdapterId?: string; onVerification?: (verified: boolean) => void }): Promise<ModelInfo[]> {
+  if (options?.apiKeyPool) {
+    const signal = options.signal ?? AbortSignal.timeout(30_000);
+    return options.apiKeyPool.request(credential => listModels(apiBaseUrl, credential.apiKey, anthropic, { ...options, apiKeyPool: undefined,
+      providerAdapterId: adapterForPool(options.apiKeyPool), signal }), { apiBaseUrl, signal });
+  }
+  if (options?.providerAdapterId) {
+    const { listProviderAdapterModels } = await import("./oauth/providerTransport.js");
+    const result = await listProviderAdapterModels(options.providerAdapterId, { apiKey }, { baseUrl: apiBaseUrl, signal: options.signal ?? AbortSignal.timeout(30_000) });
+    options.onVerification?.(result.verified);
+    return result.models.map(id => ({ id }));
+  }
   const useAnthropic = anthropic ?? isAnthropic(apiBaseUrl);
   if (useAnthropic && !apiKey) {
     throw new Error("API Key not set");
@@ -65,12 +108,13 @@ export async function listModels(apiBaseUrl: string, apiKey: string, anthropic?:
     : apiKey
     ? { authorization: `Bearer ${apiKey}` }
     : {};
-  const r = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/models`, { headers });
+  const r = await fetchWithConnectionTimeout(`${normalizeBaseUrl(apiBaseUrl)}/models`, { headers, signal: options?.signal });
   if (!r.ok) {
     // Anthropic's official API does not expose a /models endpoint (404 expected).
     // MIMO (xiaomimimo.com) may also 404 on /models depending on the plan/region.
     // Fall back to the hardcoded catalog so these providers still work.
-    if (useAnthropic || /xiaomimimo\.com/i.test(apiBaseUrl)) {
+    if ([404, 405].includes(r.status) && (useAnthropic || /xiaomimimo\.com/i.test(apiBaseUrl))) {
+      options?.onVerification?.(false);
       const kind = useAnthropic ? "anthropic" : "mimo";
       return MODEL_CATALOG
         .filter((m) => {
@@ -80,7 +124,7 @@ export async function listModels(apiBaseUrl: string, apiKey: string, anthropic?:
         .map((m) => ({ id: m.id }))
         .sort((a, b) => a.id.localeCompare(b.id));
     }
-    throw new Error(`models ${r.status}: ${await r.text()}`);
+    throw new ChatHTTPError(r.status, `models ${r.status}: ${safeProviderDetail(await r.text(), apiKey)}`, retryAfterMs(r));
   }
   const d = (await r.json()) as { data?: { id: string }[] };
   return (d.data ?? []).map((m) => ({ id: m.id })).sort((a, b) => a.id.localeCompare(b.id));
@@ -92,14 +136,23 @@ function isAnthropic(apiBaseUrl: string): boolean {
 
 /** Error carrying the HTTP status of a failed chat request (for retry decisions). */
 export class ChatHTTPError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public retryAfterMs?: number) {
     super(message);
     this.name = "ChatHTTPError";
   }
 }
 
+function retryAfterMs(response: Response): number | undefined {
+  const value = response.headers.get("retry-after");
+  if (!value) return undefined;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, Math.min(300_000, delay)) : undefined;
+}
+
 /** Transient if: no status (network/DNS/timeout), 408/425/429/499, or any 5xx. */
 export function isRetryableError(e: unknown): boolean {
+  if ((e as { retryable?: boolean } | undefined)?.retryable === false) return false;
   if (e instanceof DOMException && e.name === "AbortError") return false;
   if (e instanceof ChatHTTPError) {
     return e.status === 408 || e.status === 425 || e.status === 429 || e.status === 499 || e.status >= 500;
@@ -110,11 +163,15 @@ export function isRetryableError(e: unknown): boolean {
 
 export const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
+    const done = () => { signal?.removeEventListener("abort", abort); resolve(); };
+    const t = setTimeout(done, ms);
+    const abort = () => {
       clearTimeout(t);
+      signal?.removeEventListener("abort", abort);
       reject(new DOMException("Aborted", "AbortError"));
-    }, { once: true });
+    };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
   });
 
 /**
@@ -138,7 +195,7 @@ async function* streamWithRetry(
     try {
       for await (const ev of make()) {
         if (ev.type !== "usage") emitted = true;
-        yield ev.type === "usage" ? { ...ev, requestId, model } : ev;
+        yield ev.type === "usage" ? { ...ev, requestId: ev.requestId ?? requestId, model: ev.model ?? model } : ev;
       }
       return;
     } catch (e) {
@@ -178,20 +235,60 @@ function openAIContent(content: string | WireContentPart[] | null | undefined): 
   return parts;
 }
 
-/**
- * OpenAI chat shape: string tool content, no Anthropic cache_control, no null/empty
- * content blocks. xAI/Grok rejects those with `Empty content block`.
- * Tool images → tool text + trailing user image message.
- * Returns plain objects (not only WireMessage) so tool-only assistant can omit `content`.
- */
-function normalizeOpenAIMessages(messages: WireMessage[], googleModel?: string): Record<string, unknown>[] {
+/** Scope preserved Chat reasoning to the documented endpoint and model.
+ * https://api-docs.deepseek.com/guides/thinking_mode/
+ * https://platform.kimi.ai/docs/api/models-overview
+ * https://docs.z.ai/guides/capabilities/thinking-mode
+ * https://docs.qwencloud.com/api-reference/chat/openai-chat */
+function chatReasoningIdentity(apiBaseUrl: string, model: string): Omit<ChatReasoning, "content"> | undefined {
+  const provider = compatibleProviderFor(apiBaseUrl, model);
+  if (provider !== "deepseek" && provider !== "moonshot" && provider !== "z-ai" && provider !== "qwen") return undefined;
+  // The provider helper only accepts documented official endpoint/model pairs.
+  // Preserve the exact API path so reasoning never crosses regions or routes.
+  return { endpoint: new URL(normalizeBaseUrl(apiBaseUrl)).href.replace(/\/+$/, ""), model };
+}
+
+function matchingChatReasoning(message: Extract<WireMessage, { role: "assistant" }>, identity?: Omit<ChatReasoning, "content">): boolean {
+  return !!identity && message.chatReasoning?.endpoint === identity.endpoint && message.chatReasoning.model === identity.model
+    && typeof message.chatReasoning.content === "string";
+}
+
+/** DeepSeek thinking+tools rejects assistant turns without original reasoning,
+ * including ordinary answers. Keep older observations as labeled history, not
+ * forged assistant reasoning or outstanding calls that could run again.
+ * https://api-docs.deepseek.com/guides/thinking_mode/#tool-calls */
+function prepareReasoningHistory(messages: WireMessage[], identity: Omit<ChatReasoning, "content">): WireMessage[] {
+  const calls = new Map<string, { name: string; historical: boolean }>();
+  return messages.map((message): WireMessage => {
+    if (message.role === "assistant") {
+      const historical = !matchingChatReasoning(message, identity);
+      for (const call of message.tool_calls ?? []) calls.set(call.id, { name: call.function.name, historical });
+      if (!historical) return message;
+      const observations = (message.tool_calls ?? []).map(call =>
+        `[Previously executed tool ${call.function.name}, call ${call.id}]\nArguments: ${call.function.arguments}`);
+      return { role: "user", content: ["[Historical assistant message; context from an earlier turn]", message.content, ...observations].filter(Boolean).join("\n\n") };
+    }
+    if (message.role === "tool" && calls.get(message.tool_call_id)?.historical !== false) {
+      const header = `[Previous tool result ${calls.get(message.tool_call_id)?.name ?? "unknown"}, call ${message.tool_call_id}]`;
+      return { role: "user", content: typeof message.content === "string" ? `${header}\n${message.content}`
+        : [{ type: "text", text: header }, ...message.content] };
+    }
+    return message;
+  });
+}
+
+/** OpenAI chat shape: plain tool content, no cache metadata or empty blocks.
+ * Tool images become a trailing user message. Provider state is opt-in only. */
+function normalizeOpenAIMessages(messages: WireMessage[], googleModel?: string, identity?: Omit<ChatReasoning, "content">, requireReasoning = false): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
   let toolImages: WireContentPart[] = [];
   const flushImages = () => {
     if (toolImages.length) out.push({ role: "user", content: stripOpenAIParts(toolImages) });
     toolImages = [];
   };
-  for (const m of googleModel ? prepareGoogleMessages(messages, googleModel) : messages) {
+  const prepared = googleModel ? prepareGoogleMessages(messages, googleModel)
+    : requireReasoning && identity ? prepareReasoningHistory(messages, identity) : messages;
+  for (const m of prepared) {
     if (m.role !== "tool") flushImages();
     if (m.role === "tool") {
       if (Array.isArray(m.content)) {
@@ -218,6 +315,9 @@ function normalizeOpenAIMessages(messages: WireMessage[], googleModel?: string):
       else if (!m.tool_calls?.length) msg.content = "(empty)";
       if (m.tool_calls?.length) msg.tool_calls = googleModel ? m.tool_calls.map(googleToolCall)
         : m.tool_calls.map(({ id, type, function: fn }) => ({ id, type, function: fn }));
+      if (matchingChatReasoning(m, identity)) {
+        msg.reasoning_content = m.chatReasoning!.content;
+      }
       out.push(msg);
       continue;
     }
@@ -235,6 +335,7 @@ function normalizeOpenAIMessages(messages: WireMessage[], googleModel?: string):
 
 export interface AuxiliaryRequestOptions {
   signal?: AbortSignal;
+  apiKeyPool?: ApiKeyPool;
   onUsage?: (event: Extract<ProviderEvent, { type: "usage" }>) => void;
 }
 
@@ -243,8 +344,17 @@ function auxiliarySignal(options?: AuxiliaryRequestOptions): AbortSignal {
   return options?.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
 }
 
+/** Internal calls need answer room when the model cannot turn thinking off. */
+function compatibleAuxiliaryLimit(apiBaseUrl: string, model: string, fallback: number): number {
+  const provider = compatibleProviderFor(apiBaseUrl, model);
+  const alwaysThinking = provider === "xai" || provider === "z-ai"
+    || (provider === "moonshot" && model !== "kimi-k2.6")
+    || (provider === "minimax" && model !== "MiniMax-M3");
+  return alwaysThinking ? 4096 : fallback;
+}
+
 /** Account a completed or rejected HTTP response before interpreting its answer. */
-async function auxiliaryResponse(r: Response, model: string, anthropic: boolean, label: string, options?: AuxiliaryRequestOptions): Promise<any> {
+async function auxiliaryResponse(r: Response, model: string, anthropic: boolean, label: string, options?: AuxiliaryRequestOptions, apiKey = ""): Promise<any> {
   const text = await r.text();
   let data: any;
   try { data = parseMaybeSSE(text); } catch { /* preserve the HTTP error when the body is not JSON */ }
@@ -252,8 +362,8 @@ async function auxiliaryResponse(r: Response, model: string, anthropic: boolean,
     ? new AnthropicUsageTracker().update(data?.usage)
     : new UsageTracker().update(data?.usage?.prompt_tokens, data?.usage?.completion_tokens, data?.usage?.prompt_tokens_details?.cached_tokens);
   if (usage) options?.onUsage?.({ ...usage, model, requestId: randomUUID() });
-  if (!r.ok) throw new ChatHTTPError(r.status, `${label} ${r.status}: ${text.slice(0, 200)}`);
-  if (data?.error) throw new ChatHTTPError(Number(data.error.status ?? data.error.code) || 502, `${label}: ${data.error.message || "provider returned an error"}`);
+  if (!r.ok) throw new ChatHTTPError(r.status, `${label} ${r.status}: ${safeProviderDetail(text, apiKey, 200)}`, retryAfterMs(r));
+  if (data?.error) throw new ChatHTTPError(providerErrorStatus(data.error), `${label}: ${safeProviderDetail(data.error.message || "provider returned an error", apiKey)}`);
   if (!data) throw new Error(`${label}: invalid provider response`);
   return data;
 }
@@ -267,15 +377,19 @@ export async function generateTitle(apiBaseUrl: string, apiKey: string, model: s
   const responses = shouldUseOpenAIResponses({ apiBaseUrl, model, anthropic, oauthKind });
   const claude = oauthKind === "claude-code" || (!oauthKind && (anthropic ?? isAnthropic(apiBaseUrl)) && ANTHROPIC_DEFAULT_THINKING.test(model));
   const google = !oauthKind && isGoogleOpenAIEndpoint(apiBaseUrl) && /^gemini-/i.test(model);
-  if (oauthKind || responses || claude || google) {
+  const reference = adapterForPool(options?.apiKeyPool, model);
+  if (options?.apiKeyPool && !oauthKind && !responses && !claude && !google && !reference) {
+    return options.apiKeyPool.request(credential => generateTitle(apiBaseUrl, credential.apiKey, model, userText, anthropic, undefined, { ...options, signal, apiKeyPool: undefined }), { apiBaseUrl, signal });
+  }
+  if (oauthKind || responses || claude || google || reference) {
     // Use the provider's transport, with room for required reasoning tokens.
     // Fable's always-on thinking rejects forced tool calls, including set_title.
     let text = "";
     const gen = streamChat({
-      apiBaseUrl, apiKey, anthropic, oauthKind, maxRetries: 1,
+      apiBaseUrl, apiKey, apiKeyPool: options?.apiKeyPool, anthropic, oauthKind, maxRetries: options?.apiKeyPool ? 5 : 1,
       model,
       messages: [{ role: "system", content: sys }, { role: "user", content: prompt }],
-      maxTokens: responses || claude || google ? 4096 : 200,
+      maxTokens: responses || claude || google || reference ? 4096 : 200,
       ...(responses || claude || google ? { modelParams: { reasoningEffort: google ? "none" : "low", ...(claude ? { thinking: "disabled" } : {}) } } : {}),
       signal,
     });
@@ -287,7 +401,7 @@ export async function generateTitle(apiBaseUrl: string, apiKey: string, model: s
   }
   if (anthropic ?? isAnthropic(apiBaseUrl)) {
     // Force a tool call so the model returns a structured { title } object.
-    const r = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/messages`, {
+    const r = await fetchWithConnectionTimeout(`${normalizeBaseUrl(apiBaseUrl)}/messages`, {
       method: "POST",
       signal,
       headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
@@ -301,21 +415,23 @@ export async function generateTitle(apiBaseUrl: string, apiKey: string, model: s
         tool_choice: { type: "tool", name: "set_title" },
       }),
     });
-    const d = await auxiliaryResponse(r, model, true, "title", options);
+    const d = await auxiliaryResponse(r, model, true, "title", options, apiKey);
     const use = (d?.content ?? []).find((b: any) => b?.type === "tool_use");
     return cleanTitle(use?.input?.title ?? "");
   }
   const msgs = [{ role: "system", content: sys }, { role: "user", content: prompt }];
   const call = async (body: Record<string, unknown>) => {
+    body.max_tokens = compatibleAuxiliaryLimit(apiBaseUrl, model, 200);
     applyOpenAIChatOptions(body, apiBaseUrl, model, { auxiliary: true });
+    applyCompatibleOptions(body, apiBaseUrl, model, undefined, { auxiliary: true });
     if (isGoogleOpenAIEndpoint(apiBaseUrl)) applyGoogleOpenAIOptions(body, model);
-    const r = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/chat/completions`, {
+    const r = await fetchWithConnectionTimeout(`${normalizeBaseUrl(apiBaseUrl)}/chat/completions`, {
       method: "POST",
       signal,
       headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
       body: JSON.stringify({ ...body, stream: false }),
     });
-    const d = await auxiliaryResponse(r, model, false, "title", options);
+    const d = await auxiliaryResponse(r, model, false, "title", options, apiKey);
     return d?.choices?.[0]?.message?.content ?? d?.choices?.[0]?.delta?.content ?? "";
   };
   // Retry plain output only when the optional structured format is unsupported.
@@ -394,14 +510,18 @@ export async function pickModel(apiBaseUrl: string, apiKey: string, judge: strin
   const responses = shouldUseOpenAIResponses({ apiBaseUrl, model: judge, anthropic, oauthKind });
   const claude = oauthKind === "claude-code" || (!oauthKind && useAnthropic && ANTHROPIC_DEFAULT_THINKING.test(judge));
   const google = !oauthKind && isGoogleOpenAIEndpoint(apiBaseUrl) && /^gemini-/i.test(judge);
-  if (oauthKind || responses || claude || google) {
+  const reference = adapterForPool(options?.apiKeyPool, judge);
+  if (options?.apiKeyPool && !oauthKind && !responses && !claude && !google && !reference) {
+    return options.apiKeyPool.request(credential => pickModel(apiBaseUrl, credential.apiKey, judge, candidates, task, anthropic, undefined, { ...options, signal, apiKeyPool: undefined }), { apiBaseUrl, signal });
+  }
+  if (oauthKind || responses || claude || google || reference) {
     // Use the provider's transport, with room for required reasoning tokens.
     let text = "";
     const gen = streamChat({
-      apiBaseUrl, apiKey, anthropic, oauthKind, maxRetries: 1,
+      apiBaseUrl, apiKey, apiKeyPool: options?.apiKeyPool, anthropic, oauthKind, maxRetries: options?.apiKeyPool ? 5 : 1,
       model: judge,
       messages: [{ role: "system", content: sys }, { role: "user", content: prompt }],
-      maxTokens: responses || claude || google ? 4096 : 64,
+      maxTokens: responses || claude || google || reference ? 4096 : 64,
       ...(responses || claude || google ? { modelParams: { reasoningEffort: google ? "none" : "low", ...(claude ? { thinking: "disabled" } : {}) } } : {}),
       signal,
     });
@@ -409,31 +529,39 @@ export async function pickModel(apiBaseUrl: string, apiKey: string, judge: strin
       if (ev.type === "text-delta") text += ev.text;
       if (ev.type === "usage") options?.onUsage?.(ev);
     }
-    // Reasoning models may emit <think> blocks; last non-empty line is the answer.
-    const lines = text.replace(/<think>[\s\S]*?<\/think>/gi, "").split("\n").map((l) => l.trim()).filter(Boolean);
-    return lines.length ? lines[lines.length - 1] : text.trim();
+    return cleanModelSelection(text);
   }
   if (useAnthropic) {
-    const r = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/messages`, {
+    const r = await fetchWithConnectionTimeout(`${normalizeBaseUrl(apiBaseUrl)}/messages`, {
       method: "POST",
       signal,
       headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
       body: JSON.stringify({ model: judge, system: sys, messages: [{ role: "user", content: prompt }], max_tokens: 24 }),
     });
-    const d = await auxiliaryResponse(r, judge, true, "judge", options);
+    const d = await auxiliaryResponse(r, judge, true, "judge", options, apiKey);
     return (d?.content ?? []).filter((block: any) => block?.type === "text").map((block: any) => block.text ?? "").join("").trim();
   }
   const body: Record<string, unknown> = { model: judge, messages: [{ role: "system", content: sys }, { role: "user", content: prompt }], max_tokens: 24, temperature: 0 };
+  body.max_tokens = compatibleAuxiliaryLimit(apiBaseUrl, judge, 24);
   applyOpenAIChatOptions(body, apiBaseUrl, judge, { auxiliary: true });
+  applyCompatibleOptions(body, apiBaseUrl, judge, undefined, { auxiliary: true });
   if (isGoogleOpenAIEndpoint(apiBaseUrl)) applyGoogleOpenAIOptions(body, judge);
-  const r = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/chat/completions`, {
+  const r = await fetchWithConnectionTimeout(`${normalizeBaseUrl(apiBaseUrl)}/chat/completions`, {
     method: "POST",
     signal,
     headers: { ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}), "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  const d = await auxiliaryResponse(r, judge, false, "judge", options);
-  return String(d?.choices?.[0]?.message?.content ?? "").trim();
+  const d = await auxiliaryResponse(r, judge, false, "judge", options, apiKey);
+  return cleanModelSelection(String(d?.choices?.[0]?.message?.content ?? ""));
+}
+
+/** Native MiniMax chat keeps reasoning in content. Route from the actual final
+ * answer, using the same cleanup for streaming and non-streaming judges. */
+function cleanModelSelection(text: string): string {
+  const answer = text.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "").trim();
+  const lines = answer.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.at(-1) ?? "";
 }
 
 function cleanTitle(s: string): string {
@@ -448,8 +576,35 @@ function cleanTitle(s: string): string {
 
 /** Public entry: streams a chat completion with transient-error retry. */
 export function streamChat(opts: StreamChatOpts): AsyncGenerator<ProviderEvent> {
+  return withStreamDeadline(signal => streamChatWithRetry({ ...opts, signal }), opts.signal, opts.connectionTimeoutMs, opts.idleTimeoutMs);
+}
+
+function streamChatWithRetry(opts: StreamChatOpts): AsyncGenerator<ProviderEvent> {
   if (opts.oauthKind) {
     const make = () => streamOAuthChat(opts.oauthKind!, { model: opts.model, messages: opts.messages, tools: opts.tools, maxTokens: opts.maxTokens, modelParams: opts.modelParams, sampling: opts.sampling, temperature: opts.temperature, promptCacheKey: opts.promptCacheKey, signal: opts.signal });
+    return streamWithRetry(make, opts.signal, opts.onRetry, opts.maxRetries ?? 3, opts.model);
+  }
+  if (opts.apiKeyPool) {
+    return opts.apiKeyPool.stream(credential => streamChatWithRetry({ ...opts, apiKeyPool: undefined, apiKey: credential.apiKey,
+      providerAdapterId: adapterForPool(opts.apiKeyPool, opts.model),
+      maxRetries: credential.legacy ? opts.maxRetries ?? 10 : 1,
+      onRetry: (attempt, max, delay, error) => opts.onRetry?.(attempt, max, delay, credential.apiKey ? error.split(credential.apiKey).join("[redacted]") : error),
+    }), { apiBaseUrl: opts.apiBaseUrl, signal: opts.signal, maxAttempts: opts.maxRetries ?? 5, onRetry: opts.onRetry, visible: event => event.type !== "usage" });
+  }
+  if (opts.providerAdapterId) {
+    const make = async function* () {
+      const { streamProviderAdapter, ProviderTransportError } = await import("./oauth/providerTransport.js");
+      try {
+        yield* streamProviderAdapter({ ...opts, providerId: opts.providerAdapterId!, baseUrl: opts.apiBaseUrl, credentials: { apiKey: opts.apiKey } });
+      } catch (error) {
+        if (error instanceof ProviderTransportError) {
+          const mapped = new ChatHTTPError(error.status, safeProviderDetail(error.message, opts.apiKey), (error as { retryAfterMs?: number }).retryAfterMs);
+          if ((error as { retryable?: boolean }).retryable === false) Object.assign(mapped, { retryable: false });
+          throw mapped;
+        }
+        throw error;
+      }
+    };
     return streamWithRetry(make, opts.signal, opts.onRetry, opts.maxRetries ?? 3, opts.model);
   }
   const useAnthropic = opts.anthropic ?? isAnthropic(opts.apiBaseUrl);
@@ -463,12 +618,12 @@ export function streamChat(opts: StreamChatOpts): AsyncGenerator<ProviderEvent> 
 async function* streamResponses(opts: StreamChatOpts): AsyncGenerator<ProviderEvent> {
   try {
     const { url, init } = createOpenAIResponsesRequest(opts);
-    const response = await fetch(url, init);
+    const response = await fetchWithConnectionTimeout(url, init);
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
-      throw new ChatHTTPError(response.status, `OpenAI Responses ${response.status}: ${detail.slice(0, 500)}`);
+      throw new ChatHTTPError(response.status, `OpenAI Responses ${response.status}: ${safeProviderDetail(detail, opts.apiKey)}`, retryAfterMs(response));
     }
-    yield* parseOpenAIResponses(response, opts.signal, opts.model);
+    yield* parseOpenAIResponses(response, opts.signal, opts.model, opts.apiKey);
   } catch (error) {
     if (error instanceof OpenAIResponsesError) throw new ChatHTTPError(error.status, error.message);
     throw error;
@@ -480,9 +635,9 @@ const withoutStreamUsage = new Set<string>();
 async function* streamOpenAI(opts: StreamChatOpts): AsyncGenerator<ProviderEvent> {
   const baseUrl = normalizeBaseUrl(opts.apiBaseUrl);
   const google = isGoogleOpenAIEndpoint(baseUrl);
+  const reasoningIdentity = chatReasoningIdentity(opts.apiBaseUrl, opts.model);
   const body: Record<string, unknown> = {
     model: opts.model,
-    messages: normalizeOpenAIMessages(opts.messages, google ? opts.model : undefined),
     stream: true,
     ...(!withoutStreamUsage.has(baseUrl) ? { stream_options: { include_usage: true } } : {}),
   };
@@ -504,7 +659,13 @@ async function* streamOpenAI(opts: StreamChatOpts): AsyncGenerator<ProviderEvent
     body.tool_choice = "auto";
   }
 
-  const request = () => fetch(`${baseUrl}/chat/completions`, {
+  applyCompatibleOptions(body, opts.apiBaseUrl, opts.model, opts.modelParams);
+  if (!google) applyChatSpeed(body, opts.model, opts.modelParams?.speed);
+  const requireReasoning = compatibleProviderFor(opts.apiBaseUrl, opts.model) === "deepseek"
+    && !!opts.tools?.length && (body.thinking as { type?: string } | undefined)?.type === "enabled";
+  body.messages = normalizeOpenAIMessages(opts.messages, google ? opts.model : undefined, reasoningIdentity, requireReasoning);
+
+  const request = () => fetchWithConnectionTimeout(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       ...(opts.apiKey ? { authorization: `Bearer ${opts.apiKey}` } : {}),
@@ -532,12 +693,13 @@ async function* streamOpenAI(opts: StreamChatOpts): AsyncGenerator<ProviderEvent
     const hint = r.status === 404 && /xiaomimimo\.com/i.test(opts.apiBaseUrl)
       ? " (MIMO: verify your Base URL and API Key at https://platform.xiaomimimo.com)"
       : "";
-    throw new ChatHTTPError(r.status, `chat ${r.status}${hint}: ${clean.slice(0, 500)}`);
+    throw new ChatHTTPError(r.status, `chat ${r.status}${hint}: ${safeProviderDetail(clean, opts.apiKey)}`, retryAfterMs(r));
   }
 
   const toolAcc: Record<number, { id: string; name: string; args: string; thoughtSignature?: string }> = {};
   let finishReason = "stop";
   let finished = false;
+  let reasoningContent: string | undefined;
   const usage = new UsageTracker();
 
   const reader = r.body.getReader();
@@ -555,13 +717,18 @@ async function* streamOpenAI(opts: StreamChatOpts): AsyncGenerator<ProviderEvent
         const event = usage.update(chunk.usage.prompt_tokens, chunk.usage.completion_tokens, chunk.usage.prompt_tokens_details?.cached_tokens);
         if (event) yield event;
       }
-      if (chunk.error) throw new ChatHTTPError(Number(chunk.error.status ?? chunk.error.code) || 502, `chat stream error: ${chunk.error.message ?? JSON.stringify(chunk.error)}`);
+      if (chunk.error) throw new ChatHTTPError(providerErrorStatus(chunk.error), `chat stream error: ${safeProviderDetail(chunk.error.message ?? JSON.stringify(chunk.error), opts.apiKey)}`);
       const choice = chunk.choices?.[0];
       if (!choice) continue;
       const delta = choice.delta ?? {};
 
       const reasoning = delta.reasoning_content ?? delta.reasoning;
-      if (reasoning) yield { type: "thinking-delta", text: reasoning };
+      if (typeof reasoning === "string" && reasoning) yield { type: "thinking-delta", text: reasoning };
+      // Capture only the documented wire field. Never synthesize replay state
+      // from visible thoughts, plain text, or another provider's reasoning key.
+      if (reasoningIdentity && typeof delta.reasoning_content === "string") {
+        reasoningContent = (reasoningContent ?? "") + delta.reasoning_content;
+      }
 
       if (delta.content) yield { type: "text-delta", text: delta.content };
 
@@ -591,6 +758,9 @@ async function* streamOpenAI(opts: StreamChatOpts): AsyncGenerator<ProviderEvent
   }
 
   if (!finished) throw new ChatHTTPError(502, "chat stream ended before completion");
+  if (reasoningIdentity && reasoningContent !== undefined) {
+    yield { type: "chat-reasoning", reasoning: { ...reasoningIdentity, content: reasoningContent } };
+  }
   for (const idx of Object.keys(toolAcc).map(Number).sort((a, b) => a - b)) {
     const a = toolAcc[idx];
     if (!a.name) continue;
@@ -643,11 +813,11 @@ async function* streamAnthropic(opts: {
   }
 
   // Current 1M models use that window natively; the legacy beta is retired.
-  const betas: string[] = [...reasoningBetas];
+  const betas: string[] = [...reasoningBetas, ...applyAnthropicSpeed(body, opts.model, opts.modelParams?.speed)];
   if (opts.modelParams?.maxContext === "1m" && needsContext1mBeta(opts.model)) {
     betas.push("context-1m-2025-08-07");
   }
-  const r = await fetch(`${normalizeBaseUrl(opts.apiBaseUrl)}/messages`, {
+  const r = await fetchWithConnectionTimeout(`${normalizeBaseUrl(opts.apiBaseUrl)}/messages`, {
     method: "POST",
     headers: {
       "x-api-key": opts.apiKey,
@@ -660,7 +830,7 @@ async function* streamAnthropic(opts: {
   });
   if (!r.ok || !r.body) {
     const detail = await r.text().catch(() => "");
-    throw new ChatHTTPError(r.status, `anthropic ${r.status}: ${detail.slice(0, 500)}`);
+    throw new ChatHTTPError(r.status, `anthropic ${r.status}: ${safeProviderDetail(detail, opts.apiKey)}`, retryAfterMs(r));
   }
 
   const reader = r.body.getReader();
@@ -683,7 +853,7 @@ async function* streamAnthropic(opts: {
       // model, mid-stream rejection). Surface them instead of ending empty.
       if (chunk.type === "error") {
         const e = chunk.error ?? {};
-        throw new ChatHTTPError(502, `anthropic stream error: ${e.type ?? "error"} — ${e.message ?? data.slice(0, 300)}`);
+        throw new ChatHTTPError(providerErrorStatus(e), `anthropic stream error: ${e.type ?? "error"} — ${safeProviderDetail(e.message ?? data, opts.apiKey)}`);
       }
       if (chunk.type === "content_block_start") {
         const cb = chunk.content_block;

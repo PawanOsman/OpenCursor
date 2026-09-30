@@ -8,111 +8,21 @@
  */
 
 import * as React from "react";
-import {
-  Bot,
-  Brain,
-  Check,
-  ChevronDown,
-  Clock,
-  ChevronRight,
-  Circle,
-  CircleDot,
-  Code2,
-  Database,
-  FileCode,
-  FileSearch,
-  FileText,
-  Folder,
-  GitBranch,
-  GitCommitHorizontal,
-  Globe,
-  BookOpen,
-  Copy,
-  History as HistoryIcon,
-  Image as ImageIcon,
-  Infinity as InfinityIcon,
-  Link as LinkIcon,
-  ListChecks,
-  ListTodo,
-  MessageSquare,
-  MoreHorizontal,
-  Download,
-  Paperclip,
-  Pencil,
-  Play,
-  Plus,
-  RotateCcw,
-  Ruler,
-  Search,
-  Settings,
-  Sparkles,
-  SlidersHorizontal,
-  Terminal,
-  Trash2,
-  Users,
-  Wrench,
-  X,
-  type LucideIcon,
-} from "lucide-react";
+import { ICON_GEOMETRY } from "./iconGeometry";
 
-const MAP = {
-  file: FileText,
-  folder: Folder,
-  search: Search,
-  terminal: Terminal,
-  edit: Pencil,
-  trash: Trash2,
-  reset: RotateCcw,
-  check: Check,
-  close: X,
-  chevD: ChevronDown,
-  chevR: ChevronRight,
-  brain: Brain,
-  history: HistoryIcon,
-  infinity: InfinityIcon,
-  agent: Sparkles,
-  bot: Bot,
-  chat: MessageSquare,
-  list: ListChecks,
-  plus: Plus,
-  settings: Settings,
-  model: SlidersHorizontal,
-  tools: Wrench,
-  code: Code2,
-  fileCode: FileCode,
-  database: Database,
-  fileSearch: FileSearch,
-  globe: Globe,
-  link: LinkIcon,
-  todo: ListTodo,
-  ruler: Ruler,
-  task: Bot,
-  users: Users,
-  image: ImageIcon,
-  paperclip: Paperclip,
-  circle: Circle,
-  circleDot: CircleDot,
-  clock: Clock,
-  play: Play,
-  gitBranch: GitBranch,
-  gitCommit: GitCommitHorizontal,
-  book: BookOpen,
-  more: MoreHorizontal,
-  download: Download,
-  copy: Copy,
-} satisfies Record<string, LucideIcon>;
+export type IconName = keyof typeof ICON_GEOMETRY;
 
-export type IconName = keyof typeof MAP;
+/** Functional glyphs use shared, static paths and viewBoxes. The
+ * surrounding control owns its accessible name; the glyph stays decorative. */
+export function Icon({ name, className, size = 16 }: { name: IconName; className?: string; size?: number }) {
+  const icon = ICON_GEOMETRY[name];
+  return <svg {...icon.attributes} width={size} height={size} className={className} aria-hidden="true" focusable="false" dangerouslySetInnerHTML={{ __html: icon.body }} />;
+}
 
-export function Icon({
-  name,
-  className,
-  size = 16,
-}: {
-  name: IconName;
-  className?: string;
-  size?: number;
-}) {
-  const Cmp = MAP[name];
-  return <Cmp className={className} size={size} strokeWidth={1.75} absoluteStrokeWidth />;
+/** Same static geometry for contenteditable mention pills owned by the DOM.
+ * No external/user HTML can enter this registry. */
+export function iconMarkup(name: IconName): string {
+  const icon = ICON_GEOMETRY[name];
+  const attrs = Object.entries(icon.attributes).map(([key, value]) => `${key === "viewBox" ? key : key.replace(/[A-Z]/g, letter => "-" + letter.toLowerCase())}="${value}"`).join(" ");
+  return `<svg xmlns="http://www.w3.org/2000/svg" ${attrs} aria-hidden="true" focusable="false">${icon.body}</svg>`;
 }

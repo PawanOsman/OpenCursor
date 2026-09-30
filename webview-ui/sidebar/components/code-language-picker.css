@@ -1,0 +1,63 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+.code-language-picker { display: inline-flex; min-width: 0; max-width: 100%; direction: ltr; }
+.code-language-trigger {
+  display: inline-flex; align-items: center; gap: 3px; max-width: 100%; min-width: 0;
+  padding: 3px 5px; border: 0; border-radius: 5px; background: transparent;
+  color: var(--fg-dim); font: 11px/18px var(--font-ui, sans-serif); cursor: pointer;
+  transition: color var(--dur-1, 100ms), background var(--dur-1, 100ms);
+}
+.code-language-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-language-trigger:hover, .code-language-trigger[aria-expanded="true"] { color: var(--fg); background: var(--surface-3); }
+.code-language-trigger:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
+.code-language-trigger:disabled { cursor: default; opacity: .5; }
+.code-language-trigger svg, .code-language-option svg {
+  width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: currentColor;
+  stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round;
+}
+.code-language-menu {
+  position: fixed; z-index: 12020; display: flex; flex-direction: column; box-sizing: border-box;
+  max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: hidden;
+  border: 1px solid var(--line-soft, var(--line)); border-radius: 14px;
+  background: var(--vscode-menu-background, var(--dropdown-bg, var(--bg))); color: var(--fg);
+  box-shadow: var(--el-3, 0 8px 24px #0002); font: 12px/18px var(--font-ui, sans-serif);
+  direction: ltr; text-align: left; animation: code-language-in 150ms ease-out both;
+  transform-origin: left bottom;
+}
+.code-language-menu[data-side="bottom"] { transform-origin: left top; }
+.code-language-menu[data-state="closing"] { animation: code-language-out 120ms ease-in both; }
+.code-language-search-wrap { flex: 0 0 auto; padding: 12px 12px 6px; }
+.code-language-menu .code-language-search {
+  box-sizing: border-box; width: 100%; min-width: 0; height: 28px; padding: 4px 10px;
+  border: 1px solid var(--line-strong, var(--line)); border-radius: 9px; outline: none;
+  background: var(--input-bg, var(--bg)); color: var(--fg); font: inherit; box-shadow: none;
+}
+.code-language-menu .code-language-search:focus { outline: none; border-color: var(--fg-dim); box-shadow: none; }
+.code-language-search::placeholder { color: var(--fg-dim); }
+.code-language-list { position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 8px; }
+.code-language-option {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  min-height: 29px; padding: 4px 9px; box-sizing: border-box; border-radius: 6px;
+  cursor: pointer; user-select: none;
+}
+.code-language-option[data-active="true"] { background: var(--surface-3); }
+.code-language-empty { padding: 8px 9px; color: var(--fg-dim); }
+@keyframes code-language-in { from { opacity: 0; transform: translateY(3px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes code-language-out { to { opacity: 0; transform: scale(.98); } }
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .code-language-menu { animation: none; }
+  html:not([data-motion="full"]) .code-language-trigger { transition: none; }
+}
+html[data-motion="reduced"] .code-language-menu { animation: none; }
+html[data-motion="reduced"] .code-language-trigger { transition: none; }
+@media (forced-colors: active) {
+  .code-language-menu, .code-language-menu .code-language-search { border-color: ButtonText; }
+  .code-language-option[data-active="true"], .code-language-trigger:focus-visible { outline: 1px solid Highlight; outline-offset: -1px; }
+}

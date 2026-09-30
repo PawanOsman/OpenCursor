@@ -8,6 +8,7 @@
  */
 
 import type { ToolContext, ToolResult, TodoItem } from "./types";
+import { todoDescription } from "../../shared/todoPresentation";
 
 /** Production todo state transitions, shared by tools and unit tests. */
 export function writeTodos(input: any, ctx?: Pick<ToolContext, "todos">): ToolResult {
@@ -38,10 +39,12 @@ export function writeTodos(input: any, ctx?: Pick<ToolContext, "todos">): ToolRe
     type TodoUpdate = Partial<TodoItem> & { id: string };
     const incoming: TodoUpdate[] = raw.map((t, i): TodoUpdate | null => {
       if (typeof t === "string") {
-        return { id: idFor(undefined, t, i), content: t, status: "pending" as const };
+        const content = todoDescription(t);
+        return content ? { id: idFor(undefined, content, i), content, status: "pending" as const } : null;
       }
       if (t && typeof t === "object") {
-        const content = t.content ?? t.text ?? t.title ?? t.name;
+        const content = todoDescription(t);
+        if (!content && !t.id) return null;
         return {
           id: idFor(t.id, content, i),
           // Omitted fields must stay absent until merged with the existing item.
@@ -53,34 +56,44 @@ export function writeTodos(input: any, ctx?: Pick<ToolContext, "todos">): ToolRe
       }
       return null;
     }).filter((t): t is TodoUpdate => t !== null);
-    const withDefaults = (t: TodoUpdate): TodoItem => ({ content: "unnamed", status: "pending", ...t });
+    const previous = new Map(ctx.todos.map((t, i) => [t.id || `auto_${i}`, t]));
+    let missing = 0;
+    const resolved = incoming.flatMap((update): TodoItem[] => {
+      const existing = previous.get(update.id);
+      const content = update.content || todoDescription(existing);
+      if (!content) { missing++; return []; }
+      const item: TodoItem = { status: "pending", ...(input?.merge || !update.content ? existing : undefined), ...update, content };
+      previous.set(item.id, item);
+      return [item];
+    });
 
-    if (incoming.length === 0 && ctx.todos.length === 0) {
+    if (raw.length === 0 && ctx.todos.length === 0) {
       // Do not invent work or trigger continuation nudges for an empty payload.
       return { output: "(no todos)" };
     }
 
     if (input?.merge) {
       const byId = new Map(ctx.todos.map((t) => [t.id || `auto_${ctx.todos.indexOf(t)}`, t]));
-      for (const t of incoming) {
-        const key = t.id || `gen_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        byId.set(key, withDefaults({ ...byId.get(key), ...t, id: key }));
+      for (const t of resolved) {
+        byId.set(t.id, t);
       }
       ctx.todos = [...byId.values()];
-    } else if (incoming.length > 0) {
-      ctx.todos = incoming.map(withDefaults);
+    } else if (resolved.length > 0) {
+      ctx.todos = resolved;
     }
 
     const render = ctx.todos
       .map((t) => {
         const mark =
           t.status === "completed" ? "[x]" : t.status === "in_progress" ? "[~]" : t.status === "cancelled" ? "[-]" : "[ ]";
-        return `${mark} ${t.content || "unnamed"}`;
+        return `${mark} ${todoDescription(t) || "Task description unavailable"}`;
       })
       .join("\n");
-    return { output: render || "(no todos)" };
+    const skipped = missing + raw.length - incoming.length;
+    const guidance = skipped ? `\nSkipped ${skipped} invalid task ${skipped === 1 ? "entry" : "entries"}. Provide a non-empty content string for new tasks, or the exact existing id for status-only updates.` : "";
+    return { output: (render || "(no todos)") + guidance };
   } catch (e) {
-    return { output: `(todos: ${ctx?.todos?.length || 0} items)` };
+    return { output: `error: unable to update todos: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -91,5 +104,5 @@ export function readTodos(ctx?: Pick<ToolContext, "todos">): ToolResult {
       output: "(no todos)",
     };
   }
-  return { output: ctx.todos.map((t) => `- [${t.status}] ${t.content}`).join("\n") };
+  return { output: ctx.todos.map((t) => `- [${t.status}] ${todoDescription(t) || "Task description unavailable"}`).join("\n") };
 }

@@ -8,6 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import type { ProviderEvent, ToolSchema } from "../types";
 import type { StreamChatOpts } from "./types";
 
@@ -69,7 +70,7 @@ describe("public OpenAI Responses transport contracts", () => {
     expect(request.headers).toEqual({ authorization: "Bearer fixture-key", "content-type": "application/json", accept: "text/event-stream" });
     expect(events.filter((event) => event.type === "tool-call")).toEqual([{ type: "tool-call", call: { id: "call_fixture", name: "Read", arguments: call.arguments } }]);
     const reasoning = events.find((event) => event.type === "responses-reasoning");
-    expect(reasoning).toEqual({ type: "responses-reasoning", reasoning: { model: "gpt-6-astra", provider: "openai", items: [opaqueReasoning] } });
+    expect(reasoning).toEqual({ type: "responses-reasoning", reasoning: { model: "gpt-6-astra", provider: "openai", credential: createHash("sha256").update("fixture-key").digest("hex"), items: [opaqueReasoning] } });
     expect(events.find((event) => event.type === "usage")).toMatchObject({ model: "gpt-6-astra", requestId: expect.any(String), promptTokens: 100, completionTokens: 8, cachedReadTokens: 40, cachedWriteTokens: 20 });
     expect(events.at(-1)).toEqual({ type: "done", finishReason: "tool_calls" });
 
@@ -91,7 +92,7 @@ describe("public OpenAI Responses transport contracts", () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ stream: false, reasoning: { effort: "medium" } });
     expect(fetchMock.mock.calls[0][1].headers.accept).toBe("application/json");
     expect(events).toContainEqual({ type: "tool-call", call: { id: "call_pro", name: "Read", arguments: "{}" } });
-    expect(events).toContainEqual({ type: "responses-reasoning", reasoning: { provider: "openai", model: "gpt-5.5-pro", items: [opaqueReasoning] } });
+    expect(events).toContainEqual({ type: "responses-reasoning", reasoning: { provider: "openai", model: "gpt-5.5-pro", credential: createHash("sha256").update("fixture-key").digest("hex"), items: [opaqueReasoning] } });
     expect(events.at(-1)).toEqual({ type: "done", finishReason: "tool_calls" });
   });
 

@@ -8,6 +8,7 @@
  */
 
 const { spawn } = require('node:child_process');
+const path = require('node:path');
 (async () => {
   let display;
   try {
@@ -21,7 +22,10 @@ const { spawn } = require('node:child_process');
       });
     }
     await new Promise((resolve, reject) => {
-      const child = spawn(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['exec', 'vscode-test', ...process.argv.slice(2)], { env, stdio: 'inherit' });
+      // Windows cannot directly spawn a .cmd shim without a shell. Forward
+      // argv to the CLI through Node so shell quoting never changes arguments.
+      const cli = path.join(path.dirname(require.resolve('@vscode/test-cli')), 'bin.mjs');
+      const child = spawn(process.execPath, [cli, ...process.argv.slice(2)], { env, windowsHide: true, stdio: 'inherit' });
       child.once('error', reject);
       child.once('close', code => code === 0 ? resolve() : reject(new Error(`Extension host tests exited ${code}`)));
     });

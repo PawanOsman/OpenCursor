@@ -8,12 +8,16 @@
  */
 
 import * as React from "react";
+import { Select } from "../shared/Select";
 import { Icon, IconName } from "../shared/icons";
 import { vscode } from "../shared/vscode";
 import { ApprovalActionType, ApprovalMode, ApprovalPolicy, DEFAULT_APPROVAL, EMPTY_FEATURES, FeatureConfig, LlamacppStatus, McpStatus, ModelDef, ModelUsage, OAUTH_LABEL, OAuthStatus, OllamaModel, OllamaStatus, Persona, RuleInfo, SkillInfo, uid } from "./features";
 import { HooksPanel, LlamacppPanel, McpPanel, ModelsPanel, OAuthAccountCard, OllamaPanel, PersonasPanel, ProvidersPanel, RulesPanel, SubagentsPanel } from "./FeaturePanels";
 import { ModelSelect } from "../shared/ModelSelect";
 import { CacheUsage } from "./CacheUsage";
+import { DocsSection, type DocSourceInfo, type DocsStatus } from "./DocsSection";
+import { ControlLabelContext, Toggle } from "./panels/Toggle";
+import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
 
 interface Settings {
   model: string;
@@ -53,14 +57,14 @@ interface IndexStatus {
   remoteBaseUrl?: string;
   runtime?: string;
   platform?: string;
+  limitReason?: string;
 }
 interface EmbedModel {
   id: string;
   name: string;
 }
 
-// Ordered like Cursor's settings nav: General · Plan & Usage / Agents / Models
-// group · plugins-style group (Rules, MCPs, Hooks, Indexing) · misc.
+// Group connection, agent, and workspace settings in the navigation rail.
 const NAV: { id: Section; label: string; icon: IconName; sep?: boolean }[] = [
   { id: "general", label: "General", icon: "settings" },
   { id: "providers", label: "Providers", icon: "globe", sep: true },
@@ -109,7 +113,7 @@ const TOOL_TIMEOUT_DEFAULTS: { name: string; sec: number }[] = [
 
 /** Search terms per section so the nav filter finds settings inside pages too. */
 const SECTION_KEYWORDS: Partial<Record<Section, string>> = {
-  general: "editor settings keyboard shortcuts notifications privacy chat titles auto judge model completion sound reset",
+  general: "editor settings keyboard shortcuts notifications privacy chat titles auto judge model completion sound reset animations motion reduced system",
   usage: "tokens quota limits plan usage oauth account rate limit",
   agents: "text size submit ctrl enter max tab count web search fetch context conversation tool timeout shell grep",
   models: "enable disable model catalog reasoning effort thinking context",
@@ -125,7 +129,7 @@ const SECTION_KEYWORDS: Partial<Record<Section, string>> = {
   about: "about version license author github repository open source mit pawan osman",
 };
 
-/** Cursor-style rounded group card wrapping settings rows. */
+/** A group of related settings separated by subtle rules. */
 function Group({ children }: { children: React.ReactNode }) {
   return <div className="settings-group">{children}</div>;
 }
@@ -161,16 +165,6 @@ function NumInput({
   );
 }
 
-function Toggle({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
-  return (
-    <label className="switch" style={disabled ? { opacity: 0.45, pointerEvents: "none" } : undefined}>
-      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
-      <span className="track" />
-      <span className="thumb" />
-    </label>
-  );
-}
-
 function Row({
   title,
   desc,
@@ -188,7 +182,9 @@ function Row({
         <div className="row-title">{title}</div>
         <div className="row-desc">{desc}</div>
       </div>
-      {stacked ? children : <div className="row-control">{children}</div>}
+      <ControlLabelContext.Provider value={title}>
+        {stacked ? children : <div className="row-control">{children}</div>}
+      </ControlLabelContext.Provider>
     </div>
   );
 }
@@ -269,7 +265,8 @@ function ApprovalCard({
           <span>{action.label}</span>
           {hasLists && <span className="badge-tag glob">{(r.allowlist?.length ?? 0) + (r.denylist?.length ?? 0)} rules</span>}
         </div>
-        <select
+        <Select
+          aria-label={`${action.label} approval`}
           value={r.mode}
           onClick={(e) => e.stopPropagation()}
           onChange={(e) => patch({ mode: e.target.value as ApprovalMode })}
@@ -278,7 +275,7 @@ function ApprovalCard({
           {APPROVAL_MODES.map((m) => (
             <option key={m.id} value={m.id}>{m.label}</option>
           ))}
-        </select>
+        </Select>
       </div>
       {open && (
         <div className="fc-body">
@@ -426,148 +423,6 @@ function UsagePanel({
   );
 }
 
-interface DocSourceInfo {
-  id: string;
-  name: string;
-  url: string;
-  pages?: number;
-  chunks?: number;
-  indexedAt?: number;
-  maxPages?: number;
-  error?: string;
-}
-interface DocsStatus {
-  indexing?: string;
-  done: number;
-  total: number;
-  error?: string;
-}
-
-function DocRow({ d, status }: { d: DocSourceInfo; status: DocsStatus }) {
-  const [editing, setEditing] = React.useState(false);
-  const [name, setName] = React.useState(d.name);
-  const [url, setUrl] = React.useState(d.url);
-  const [maxPages, setMaxPages] = React.useState(String(d.maxPages || 200));
-  const [showLogs, setShowLogs] = React.useState(false);
-  const [logs, setLogs] = React.useState<string[]>([]);
-  const busy = status.indexing === d.id;
-
-  // Pull this doc's crawl log while the panel is open (poll during indexing).
-  React.useEffect(() => {
-    if (!showLogs) return;
-    const fetchLogs = () => vscode.postMessage({ type: "getDocLogs", id: d.id });
-    const handler = (e: MessageEvent) => {
-      if (e.data?.type === "docLogs" && e.data.id === d.id) setLogs(e.data.lines || []);
-    };
-    window.addEventListener("message", handler);
-    fetchLogs();
-    const t = busy ? window.setInterval(fetchLogs, 1000) : undefined;
-    return () => {
-      window.removeEventListener("message", handler);
-      if (t) window.clearInterval(t);
-    };
-  }, [showLogs, busy, d.id]);
-  const save = () => {
-    if (!name.trim() || !/^https?:\/\//.test(url.trim())) return;
-    vscode.postMessage({ type: "editDoc", id: d.id, name: name.trim(), url: url.trim(), maxPages: parseInt(maxPages, 10) || 200 });
-    setEditing(false);
-  };
-  if (editing) {
-    return (
-      <div className="doc-row editing">
-        <div className="doc-add-row" style={{ flex: 1, margin: 0 }}>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" />
-          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" onKeyDown={(e) => e.key === "Enter" && save()} />
-          <input type="number" min={1} style={{ width: 80 }} title="Max pages" value={maxPages} onChange={(e) => setMaxPages(e.target.value)} />
-          <button className="btn-secondary" onClick={save}><Icon name="check" /></button>
-          <button className="btn-secondary" onClick={() => { setEditing(false); setName(d.name); setUrl(d.url); setMaxPages(String(d.maxPages || 200)); }}><Icon name="close" /></button>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <>
-      <div className="doc-row">
-        <span className={"doc-dot" + (d.error ? " error" : busy ? " busy" : d.indexedAt ? " ok" : "")} />
-        <div className="doc-info">
-          <div className="doc-name">{d.name}</div>
-          <div className={"doc-sub" + (d.error ? " error" : "")}>
-            {busy
-              ? `Indexing ${status.done}/${status.total} pages…`
-              : d.error
-              ? `Failed: ${d.error}`
-              : d.indexedAt
-              ? `Indexed ${new Date(d.indexedAt).toLocaleDateString()}, ${new Date(d.indexedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · ${d.pages ?? 0} pages`
-              : "Not indexed"}
-          </div>
-        </div>
-        <div className="doc-actions">
-          <button className={"icon-btn" + (showLogs ? " active" : "")} title="Logs" onClick={() => setShowLogs((v) => !v)}><Icon name="terminal" /></button>
-          <button className="icon-btn" title="Edit" disabled={busy} onClick={() => setEditing(true)}><Icon name="edit" /></button>
-          <button className="icon-btn" title="Re-index" disabled={!!status.indexing} onClick={() => vscode.postMessage({ type: "reindexDoc", id: d.id })}><Icon name="reset" /></button>
-          <button className="icon-btn" title="Open docs site" onClick={() => vscode.postMessage({ type: "openExternal", url: d.url })}><Icon name="book" /></button>
-          <button className="icon-btn" title="Remove" disabled={busy} onClick={() => vscode.postMessage({ type: "removeDoc", id: d.id })}><Icon name="trash" /></button>
-        </div>
-      </div>
-      {showLogs && (
-        <div className="doc-logs">
-          {logs.length === 0 ? (
-            <div className="doc-logs-empty">No logs yet — logs appear while indexing (kept until the next re-index).</div>
-          ) : (
-            logs.map((l, i) => (
-              <div key={i} className={"doc-log-line" + (/ (SKIP|FAIL|FAILED)/.test(l) ? " err" : "")}>{l}</div>
-            ))
-          )}
-        </div>
-      )}
-    </>
-  );
-}
-
-function DocsSection({ docs, status }: { docs: DocSourceInfo[]; status: DocsStatus }) {
-  const [adding, setAdding] = React.useState(false);
-  const [name, setName] = React.useState("");
-  const [url, setUrl] = React.useState("");
-  const [maxPages, setMaxPages] = React.useState("200");
-  const canAdd = name.trim() && /^https?:\/\//.test(url.trim()) && !status.indexing;
-  const add = () => {
-    if (!canAdd) return;
-    vscode.postMessage({ type: "addDoc", name: name.trim(), url: url.trim(), maxPages: parseInt(maxPages, 10) || 200 });
-    setName("");
-    setUrl("");
-    setMaxPages("200");
-    setAdding(false);
-  };
-  return (
-    <>
-      <div className="docs-head">
-        <div>
-          <div className="section-label" style={{ marginBottom: 2 }}>Docs</div>
-          <div className="row-desc" style={{ margin: 0 }}>Crawl and index custom resources and developer docs</div>
-        </div>
-        <button className="btn-secondary" onClick={() => setAdding((a) => !a)}>
-          <Icon name="plus" /> Add Doc
-        </button>
-      </div>
-      <div className="index-card docs-card">
-        {adding && (
-          <div className="doc-add-row">
-            <input autoFocus placeholder="Name (e.g. React)" value={name} onChange={(e) => setName(e.target.value)} />
-            <input placeholder="https://react.dev/reference" value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
-            <input type="number" min={1} style={{ width: 80 }} title="Max pages to crawl" value={maxPages} onChange={(e) => setMaxPages(e.target.value)} />
-            <button className="btn-secondary" disabled={!canAdd} onClick={add}><Icon name="plus" /> Add</button>
-          </div>
-        )}
-        {docs.length === 0 && !adding ? (
-          <p className="row-desc" style={{ padding: "10px 4px", margin: 0 }}>No docs added yet. Click "Add Doc" to crawl and index documentation from a URL.</p>
-        ) : (
-          docs.map((d) => <DocRow key={d.id} d={d} status={status} />)
-        )}
-      </div>
-    </>
-  );
-}
-
 /** Provider models usable for embeddings (id mentions embed/embedding). */
 const isEmbeddingModel = (id: string) => /embed/i.test(id);
 
@@ -607,7 +462,7 @@ function IndexingPanel({
           restarts; only new or changed files are re-embedded.
         </p>
         <div className="index-divider" />
-        <Row title="Enable Indexing" desc="When off, no embedding work runs (existing index is kept on disk and still searchable).">
+        <Row title="Enable Indexing" desc="When off, background embedding stops. Existing index files stay on disk; text search remains available.">
           <Toggle
             checked={features.indexingEnabled !== false}
             onChange={(v) => setFeatures({ indexingEnabled: v })}
@@ -625,6 +480,7 @@ function IndexingPanel({
               ? `Indexing ${status.done} / ${status.total} files...`
               : `${status.files} files / ${status.chunks || 0} chunks`}
           </div>
+          {status.limitReason && <div className="index-progress-meta" role="status">{status.limitReason}</div>}
         </div>
         <div className="index-divider" />
         <div className="index-runtime">
@@ -745,6 +601,7 @@ function IndexingPanel({
 
 export function App() {
   const [section, setSection] = React.useState<Section>("general");
+  const contentRef = React.useRef<HTMLElement>(null);
   const [s, setS] = React.useState<Settings>(DEFAULTS);
   const [apiKey, setApiKey] = React.useState("");
   const [models, setModels] = React.useState<string[]>([]);
@@ -766,15 +623,22 @@ export function App() {
   const [usage, setUsage] = React.useState<Record<string, ModelUsage>>({});
   const [navQuery, setNavQuery] = React.useState("");
 
+  React.useEffect(() => { setMotionPreference(features.motion); }, [features.motion]);
+
+  React.useLayoutEffect(() => {
+    if (contentRef.current) {
+      contentRef.current.scrollTop = 0;
+      contentRef.current.scrollLeft = 0;
+    }
+  }, [section]);
+
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setS((prev) => ({ ...prev, [k]: v }));
 
   // Patch + persist features immediately.
   const setFeatures = (patch: Partial<FeatureConfig>) => {
-    setFeaturesState((prev) => {
-      const next = { ...prev, ...patch };
-      vscode.postMessage({ type: "saveFeatures", features: next });
-      return next;
-    });
+    setFeaturesState((prev) => ({ ...prev, ...patch }));
+    // Other views can update model options while this settings page stays open.
+    vscode.postMessage({ type: "saveFeatures", features: patch });
   };
 
   React.useEffect(() => {
@@ -852,21 +716,22 @@ export function App() {
         <div className="brand">
           <img className="brand-badge" src={document.getElementById("root")?.dataset.icon} alt="" />
           <span>
-            <span className="brand-name">OpenCursor</span>
-            <span className="brand-sub">Local · Open Source</span>
+            <span className="brand-name">Settings</span>
+            <span className="brand-sub">OpenCursor</span>
           </span>
         </div>
         <input
           className="nav-search"
           type="search"
           placeholder="Search settings"
+          aria-label="Search settings"
           value={navQuery}
           onChange={(e) => setNavQuery(e.target.value)}
         />
         {navFiltered.map((n) => (
           <React.Fragment key={n.id}>
             {n.sep && !navQuery && <div className="nav-sep" />}
-            <button className={"nav-item" + (section === n.id ? " active" : "")} onClick={() => setSection(n.id)}>
+            <button className={"nav-item" + (section === n.id ? " active" : "")} aria-current={section === n.id ? "page" : undefined} onClick={() => setSection(n.id)}>
               <Icon name={n.icon} />
               <span>{n.label}</span>
             </button>
@@ -880,8 +745,9 @@ export function App() {
         ))}
       </aside>
 
-      <main className="content">
-        <div className="content-inner">
+      <main className="content" ref={contentRef}>
+        <div className="settings-page">
+        <div className="content-inner" key={section}>
           {section === "general" && (
             <>
               <h1 className="page-title">General</h1>
@@ -894,6 +760,13 @@ export function App() {
 
               <div className="section-label">Preferences</div>
               <Group>
+                <Row title="Animations" desc="Enable animated loading indicators and transitions, follow your system preference, or reduce motion.">
+                  <Select aria-label="Animations" value={features.motion} onChange={(event) => setFeatures({ motion: event.target.value as MotionPreference })}>
+                    <option value="full">Enabled</option>
+                    <option value="system">Follow system</option>
+                    <option value="reduced">Reduced motion</option>
+                  </Select>
+                </Row>
                 <Row title="Editor Settings" desc="Configure font, formatting, minimap and more.">
                   <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "openEditorSettings" })}>Open ↗</button>
                 </Row>
@@ -968,14 +841,15 @@ export function App() {
 
               <Group>
                 <Row title="Text Size" desc="Adjust the conversation text size.">
-                  <select
+                  <Select
+                    aria-label="Text size"
                     value={features.chatTextSize || "default"}
                     onChange={(e) => setFeatures({ chatTextSize: e.target.value as FeatureConfig["chatTextSize"] })}
                   >
                     <option value="compact">Compact</option>
                     <option value="default">Default</option>
                     <option value="large">Large</option>
-                  </select>
+                  </Select>
                 </Row>
                 <Row title="Submit with Ctrl + Enter" desc="When enabled, Ctrl + Enter submits chat and Enter inserts a newline.">
                   <Toggle checked={features.submitWithCtrlEnter === true} onChange={(v) => setFeatures({ submitWithCtrlEnter: v })} />
@@ -1167,11 +1041,13 @@ export function App() {
           )}
 
         </div>
+        </div>
+        <footer className="settings-actions" aria-label="Settings actions">
+          <div className="settings-actions-inner">
+            <button className="btn-save" onClick={save}>Save</button>
+          </div>
+        </footer>
       </main>
-
-      <button className="btn-save" onClick={save}>
-        Save
-      </button>
     </div>
   );
 }

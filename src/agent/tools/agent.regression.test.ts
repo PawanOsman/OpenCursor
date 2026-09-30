@@ -61,17 +61,18 @@ describe("TodoWrite production handler", () => {
     expect(ctx.todos).toEqual(before);
   });
 
-  it("defaults missing fields for newly merged items", async () => {
+  it("defaults new task status and skips merged items without descriptions", async () => {
     const ctx = existingTodos();
-    await todoWriteTool.execute(
+    const result = await todoWriteTool.execute(
       { merge: true, todos: [{ id: "new", content: "Document the fix" }, { id: "unknown" }] },
       undefined, undefined, ctx,
     );
 
     expect(ctx.todos.slice(2)).toEqual([
       { id: "new", content: "Document the fix", status: "pending" },
-      { id: "unknown", content: "unnamed", status: "pending" },
     ]);
+    expect(result.output).toContain("Skipped 1 invalid task entry");
+    expect(result.output).not.toContain("unnamed");
   });
 
   it("replaces the list and supplies defaults without inheriting previous fields", async () => {
@@ -103,9 +104,9 @@ describe("TodoWrite production handler", () => {
     expect(ctx.todos).toEqual([{ id: "auto_0", content: "Read the file", status: "pending" }]);
   });
 
-  it("normalizes supported aliases and malformed fields for new tasks", async () => {
+  it("normalizes supported aliases and skips malformed or undescribed new tasks", async () => {
     const ctx: ToolContext = { todos: [] };
-    await todoWriteTool.execute({
+    const result = await todoWriteTool.execute({
       todos: [
         null,
         42,
@@ -120,8 +121,9 @@ describe("TodoWrite production handler", () => {
       { id: "text", content: "Read", status: "pending" },
       { id: "title", content: "Write", status: "in_progress" },
       { id: "name", content: "Verify", status: "completed" },
-      { id: "empty", content: "unnamed", status: "pending" },
     ]);
+    expect(result.output).toContain("Skipped 3 invalid task entries");
+    expect(result.output).not.toContain("unnamed");
   });
   it("does not overwrite an explicitly assigned id when normalizing another incoming task", async () => {
     const ctx: ToolContext = { todos: [] };

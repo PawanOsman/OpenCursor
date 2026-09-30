@@ -72,7 +72,7 @@ describe("Claude OAuth request protocol", () => {
     expect(request.headers.get("accept")).toBe("text/event-stream");
     expect(request.headers.get("content-type")).toBe("application/json");
     expect(request.headers.get("anthropic-version")).toBe("2023-06-01");
-    expect(request.headers.get("user-agent")).toBe("claude-cli/2.1.258 (external, sdk-cli)");
+    expect(request.headers.get("user-agent")).toBe("claude-cli/2.1.280 (external, sdk-cli)");
     expect(request.headers.get("x-app")).toBe("cli");
     expect([...request.headers.keys()].some((key) => key.startsWith("x-stainless"))).toBe(false);
     expect(request.headers.has("x-api-key")).toBe(false);
@@ -132,6 +132,28 @@ describe("Claude OAuth request protocol", () => {
     const body = JSON.parse(String(request.init.body));
     expect(body.context_management).toBeUndefined();
     expect(body.output_config).toBeUndefined();
+    expect(body.speed).toBeUndefined();
+  });
+
+  it.each(["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"])("merges fast mode with OAuth betas and reasoning for %s", (model) => {
+    const request = makeRequest({ model, modelParams: { speed: "fast", thinking: "adaptive", reasoningEffort: "max" } });
+    expect(JSON.parse(String(request.init.body))).toMatchObject({
+      speed: "fast", thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: "max" },
+    });
+    expect(new Headers(request.init.headers).get("anthropic-beta")!.split(",")).toEqual([
+      "oauth-2025-04-20", "claude-code-20250219", "interleaved-thinking-2025-05-14", "fast-mode-2026-02-01",
+    ]);
+  });
+
+  it.each([
+    ["claude-opus-5-5", "standard"],
+    ["claude-opus-4-7", "fast"],
+    ["claude-opus-4-6", "fast"],
+    ["claude-sonnet-5", "fast"],
+  ] as const)("keeps %s at standard speed when %s is selected", (model, speed) => {
+    const request = makeRequest({ model, modelParams: { speed } });
+    expect(JSON.parse(String(request.init.body))).not.toHaveProperty("speed");
+    expect(new Headers(request.init.headers).get("anthropic-beta")).not.toContain("fast-mode-");
   });
 
   it("preserves modern and manual reasoning without obsolete effort/context betas", () => {
@@ -156,7 +178,8 @@ describe("Claude OAuth request protocol", () => {
 });
 
 describe("Claude OAuth streaming contract", () => {
-  it("sends the new request through the real account router and preserves tool/usage streaming", async () => {
+  it.each([undefined, "fast"] as const)("sends %s speed through the real account router and preserves tool/usage streaming", async (speed) => {
+    const model = speed === "fast" ? "claude-opus-5-5" : "claude-sonnet-4-6";
     initOAuth({
       globalState: { get: (key: string, fallback: unknown) => key === "ocursor.oauth.accountIds" ? ["claude-contract"] : fallback },
       secrets: { get: async () => JSON.stringify({
@@ -169,12 +192,14 @@ describe("Claude OAuth streaming contract", () => {
       expect(url).toBe(CLAUDE_OAUTH_CONFIG.messagesUrl);
       const headers = new Headers(init.headers);
       expect(headers.get("authorization")).toBe("Bearer contract-access");
-      expect(headers.get("user-agent")).toBe("claude-cli/2.1.258 (external, sdk-cli)");
+      expect(headers.get("user-agent")).toBe("claude-cli/2.1.280 (external, sdk-cli)");
       const body = JSON.parse(String(init.body));
       expect(body.tools).toHaveLength(1);
       expect(body.tools[0].name).toBe("Read");
+      expect(body.speed).toBe(speed);
+      expect(headers.get("anthropic-beta")!.includes("fast-mode-2026-02-01")).toBe(speed === "fast");
       return new Response([
-        { type: "message_start", message: { id: "request-fixture", model: "claude-sonnet-4-6", usage: { input_tokens: 12, cache_read_input_tokens: 4 } } },
+        { type: "message_start", message: { id: "request-fixture", model, usage: { input_tokens: 12, cache_read_input_tokens: 4 } } },
         { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call-fixture", name: "Read" } },
         { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path":"README.md"}' } },
         { type: "content_block_stop", index: 0 },
@@ -186,7 +211,7 @@ describe("Claude OAuth streaming contract", () => {
     vi.stubGlobal("fetch", fetchMock);
     const events = [];
     for await (const event of streamOAuthChat("claude-code", {
-      model: "claude-sonnet-4-6", messages: [{ role: "user", content: "Read the README" }], tools,
+      model, messages: [{ role: "user", content: "Read the README" }], tools, modelParams: { speed },
       signal: new AbortController().signal,
     })) events.push(event);
     expect(fetchMock).toHaveBeenCalledTimes(1);

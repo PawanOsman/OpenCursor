@@ -22,6 +22,9 @@ import type {
   AssistantTurn,
   Turn,
 } from "../../src/shared/turns";
+import type { ChatWorkspaceState, ConversationGoal, GoalStatus, QueuedMessage, ReviewTarget } from "../../src/shared/chatSession";
+import type { ApprovalPolicy } from "../../src/agent/approvalPolicy";
+export type { ApprovalPolicy } from "../../src/agent/approvalPolicy";
 export type {
   Mode,
   AgentEvent,
@@ -41,6 +44,8 @@ export interface ConversationSummary {
   id: string;
   title: string;
   updatedAt: number;
+  archivedAt?: number;
+  excerpt?: string;
 }
 
 export interface PersonaInfo {
@@ -52,6 +57,7 @@ export interface PersonaInfo {
 export interface ModelOption {
   key: string;
   label: string;
+  description?: string;
   type: "select" | "toggle";
   values?: string[];
   value: string;
@@ -75,7 +81,7 @@ export type MentionKind =
   | "file" | "folder" | "code" | "doc" | "git" | "composer"
   | "terminal" | "rule" | "branch_diff" | "link";
 
-/** Categories shown in the top-level @ menu (Cursor-style). */
+/** Categories shown in the top-level @ menu. */
 export type MentionCategory = "files" | "code" | "docs" | "git" | "terminals" | "rules" | "chats" | "branch" | "link";
 
 export interface MentionItem {
@@ -93,16 +99,22 @@ export interface PendingChangeInfo {
 }
 
 // Extension -> webview
-export type UiPrefs = { chatTextSize: string; submitWithCtrlEnter: boolean; maxTabCount: number; completionSound: boolean; perTabDrafts: boolean };
+export type UiPrefs = { chatTextSize: string; motion?: "full" | "system" | "reduced"; submitWithCtrlEnter: boolean; maxTabCount: number; completionSound: boolean; perTabDrafts: boolean };
 /** A subagent team as shown in the composer's Project-mode picker. */
 export type TeamInfo = { id: string; name: string; description: string; members: string[] };
 export type InMessage =
-  | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; runningConvIds?: string[]; uiPrefs?: UiPrefs; usedTokens?: number }
-  | { type: "configState"; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; uiPrefs?: UiPrefs }
+  | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; runningConvIds?: string[]; uiPrefs?: UiPrefs; usedTokens?: number; workspaceState?: ChatWorkspaceState; workspaceRoot?: string; approvalPolicy?: ApprovalPolicy }
+  | { type: "workflowState"; queues: Record<string, QueuedMessage[]>; steeringQueues?: Record<string, QueuedMessage[]>; goals: Record<string, ConversationGoal> }
+  | { type: "queueSteeringResult"; convId: string; requestId: string; accepted: boolean }
+  | { type: "requestAccepted"; requestId: string; convId: string; created: boolean }
+  | { type: "steeringAccepted"; convId: string }
+  | { type: "queueDraft"; convId: string; draft: { text: string; attachments: Attachment[] } }
+  | { type: "conversationSearchResults"; requestId: number; list: ConversationSummary[] }
+  | { type: "configState"; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; uiPrefs?: UiPrefs; approvalPolicy?: ApprovalPolicy }
   | { type: "modelsFetched"; models: string[]; modelList?: ModelDef[] }
   | { type: "modelSelected"; model: string }
   | { type: "conversations"; list: ConversationSummary[]; activeId?: string; runningConvIds?: string[] }
-  | { type: "loadConversation"; activeId?: string; turns: Turn[]; personaId?: string; usedTokens?: number; running?: boolean }
+  | { type: "loadConversation"; activeId?: string; turns: Turn[]; personaId?: string; usedTokens?: number; running?: boolean; workspaceRoot?: string }
   | { type: "error"; convId?: string; message: string }
   | { type: "attachmentsPicked"; attachments: Attachment[] }
   | { type: "fileSearchResults"; requestId: number; items: MentionItem[] }
@@ -140,11 +152,22 @@ export interface ApprovalRequestInfo {
 // webview -> extension
 export type OutMessage =
   | { type: "ready" }
-  | { type: "sendMessage"; convId?: string | null; text: string; attachments?: Attachment[]; fromIndex?: number; model?: string; mode?: Mode; revertFiles?: boolean }
+  | { type: "sendMessage"; convId?: string | null; text: string; attachments?: Attachment[]; fromIndex?: number; model?: string; mode?: Mode; revertFiles?: boolean; requestId?: string }
+  | { type: "updateChatWorkspace"; state: Partial<ChatWorkspaceState> }
+  | { type: "queueAction"; convId: string; id: string; action: "remove" | "run" | "steer" | "up" | "down" | "edit" }
+  | { type: "steerMessage"; convId: string; text: string }
+  | { type: "forkConversation"; id: string }
+  | { type: "archiveConversation"; id: string; archived: boolean }
+  | { type: "searchConversations"; query: string; archived: boolean; requestId: number }
+  | { type: "setGoal"; convId?: string; objective: string; tokenBudget?: number }
+  | { type: "setGoalStatus"; convId: string; status: GoalStatus }
+  | { type: "startReview"; target: ReviewTarget }
+  | { type: "createWorktreeConversation"; title?: string }
   | { type: "continueRun"; always?: boolean }
   | { type: "revertToMessage"; index: number; revertFiles?: boolean }
   | { type: "browseAttachments" }
   | { type: "openSettings"; section?: string }
+  | { type: "setApprovalPreset"; preset: "ask" | "review" | "allow" }
   | { type: "openBrowserTab"; url?: string }
   | { type: "exportConversation"; convId?: string }
   | { type: "newConversation"; personaId?: string }

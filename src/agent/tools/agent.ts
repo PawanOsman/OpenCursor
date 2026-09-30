@@ -32,7 +32,7 @@ export const askQuestionTool = defineTool("AskQuestion", false, async (input, ab
   const asker = ctx?.askUser ?? getQuestionAsker();
   if (!asker) return { output: "error: cannot ask questions in this context" };
 
-// Cursor shape: questions:[{id, prompt, options:[{id,label}], allow_multiple}], title.
+// Question shape: questions:[{id, prompt, options:[{id,label}], allow_multiple}], title.
   // Back-compat: also accept {question, options:[string], multiple} and header.
   // Structured inputs: {type: "text"|"textArea"|"number"|"date", required, placeholder}.
   const questions: AskQuestionItem[] = Array.isArray(input?.questions)
@@ -83,9 +83,16 @@ export const taskTool = defineTool("Task", false, async (input, abortSignal, cal
     fileAttachments,
     resume: input.resume ? String(input.resume) : undefined,
     interrupt: input.interrupt === true,
+    fork: input.fork === true,
   });
   return { output: result };
 });
+
+export const listAgentsTool = defineTool("ListAgents", false, async (_input, signal, _id, ctx) => ({ output: await ctx?.agentControl?.({ action: "list" }, signal) ?? "No agent registry is available." }));
+export const sendAgentMessageTool = defineTool("SendAgentMessage", false, async (input, signal, _id, ctx) => ({ output: await ctx?.agentControl?.({ action: "message", id: input.id, message: input.message }, signal) ?? "error: agent collaboration unavailable" }));
+export const followupAgentTool = defineTool("FollowupAgent", false, async (input, signal, _id, ctx) => ({ output: await ctx?.agentControl?.({ action: "followup", id: input.id, message: input.message }, signal) ?? "error: agent collaboration unavailable" }));
+export const interruptAgentTool = defineTool("InterruptAgent", false, async (input, signal, _id, ctx) => ({ output: await ctx?.agentControl?.({ action: "interrupt", id: input.id }, signal) ?? "error: agent collaboration unavailable" }));
+export const waitForAgentTool = defineTool("WaitForAgent", false, async (input, signal, _id, ctx) => ({ output: await ctx?.agentControl?.({ action: "wait", id: input.id, timeout_ms: input.timeout_ms }, signal) ?? "error: agent collaboration unavailable" }));
 
 // ---- Wait (plain sleep) ----
 const MAX_WAIT_MS = 120_000;

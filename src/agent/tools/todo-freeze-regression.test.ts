@@ -200,17 +200,10 @@ describe("FREEZE REGRESSION: 15 exact scenarios that caused the todo freeze", ()
       merge: false,
     });
 
-    // Object {} hits the "t && typeof t === 'object'" branch
     expect(hasErrorPrefix(handlerOutput)).toBe(false);
-    expect(handlerOutput).not.toBe("(no todos)");
-    // 1 item survives filter, content defaults to "unnamed"
-    expect(ctx.todos.length).toBe(1);
-    expect(ctx.todos[0].content).toBe("unnamed");
-    expect(ctx.todos[0].status).toBe("pending");
-    // parseTodos recovers it
-    expect(uiItems.length).toBe(1);
-    expect(uiItems[0].content).toBe("unnamed");
-    expect(uiItems[0].status).toBe("pending");
+    expect(handlerOutput).toContain("Skipped 1 invalid task entry");
+    expect(ctx.todos).toHaveLength(0);
+    expect(uiItems).toHaveLength(0);
   });
 
   // ------------------------------------------------------------------

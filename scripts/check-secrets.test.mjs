@@ -16,6 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const scanner = fileURLToPath(new URL("./check-secrets.mjs", import.meta.url));
+const googleApiKey = "AIza" + "aB3_-".repeat(7);
 function scan(files, afterStage = () => {}) {
   const cwd = mkdtempSync(join(tmpdir(), "ocursor-security-"));
   try {
@@ -49,6 +50,35 @@ for (const prefix of ["sk-", "tp-", "vbk_", "Bearer "]) {
     assert.ok(!result.stderr.includes(token));
   });
 }
+
+test("rejects Google API keys in production sources without logging them", () => {
+  const result = scan({
+    "src/google.ts": `\nconst key = "${googleApiKey}";`,
+    "webview-ui/google.tsx": `const key = "${googleApiKey}";`,
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /src\/google\.ts:2: potential credential/);
+  assert.match(result.stderr, /webview-ui\/google\.tsx:1: potential credential/);
+  assert.ok(!result.stderr.includes(googleApiKey));
+  assert.ok(!result.stdout.includes(googleApiKey));
+});
+
+test("accepts a bare Google API key prefix and an incomplete key", () => {
+  const result = scan({
+    "src/google.ts": `const prefix = "AIza"; const incomplete = "${googleApiKey.slice(0, -1)}";`,
+  });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("skips test files and test directories containing sample credentials", () => {
+  const sample = 'const key = "sk-' + 'aB3dE5fG7hI9jK1lM3nO5pQ7";' + `\nconst googleKey = "${googleApiKey}";`;
+  const result = scan(Object.fromEntries([
+    "src/example.test.ts", "webview-ui/example.test.tsx",
+    "src/example.spec.ts", "webview-ui/example.spec.tsx",
+    "src/__tests__/fixture.ts", "src/tests/fixture.ts", "webview-ui/test/fixture.tsx",
+  ].map(file => [file, sample])));
+  assert.equal(result.status, 0, result.stderr);
+});
 
 for (const filename of [".env", ".env.local", "nested/service.env", "nested/.env.production"]) {
   test(`rejects tracked ${filename}`, () => {

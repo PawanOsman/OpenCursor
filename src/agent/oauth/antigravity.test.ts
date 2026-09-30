@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ProviderEvent, ToolSchema, WireMessage } from "../types";
 import {
   ANTIGRAVITY_CONFIG, AntigravityProtocolError, antigravityHeaders,
-  parseAntigravityStream, resolveAntigravityProject, toAntigravityRequest,
+  antigravityModelChoices, parseAntigravityStream, resolveAntigravityProject, toAntigravityRequest,
 } from "./antigravity";
 
 const base = { projectId: "fixture-project", model: "gemini-3-flash", messages: [{ role: "user", content: "Fix the tests." }] as WireMessage[] };
@@ -101,6 +101,7 @@ describe("Antigravity request conversion", () => {
     expect({ messages, tool }).toEqual(before);
     expect(body).not.toHaveProperty("safetySettings");
     expect(body).not.toHaveProperty("billing");
+    expect(body).not.toHaveProperty("requestType");
   });
 
   it("preserves legacy unsigned Gemini 3 tool observations without a fabricated signature", () => {
@@ -142,10 +143,49 @@ describe("Antigravity request conversion", () => {
   });
 
   it("maps only explicit catalog aliases and forwards dynamic model ids unchanged", () => {
-    expect(toAntigravityRequest({ ...base, model: "gemini-3.8-flash" }).model).toBe("gemini-3.8-flash-medium(medium)");
-    expect(toAntigravityRequest({ ...base, model: "gemini-3.7-flash-high" }).model).toBe("gemini-3.7-flash-tiered(high)");
-    expect(toAntigravityRequest({ ...base, model: "gemini-3.8-flash-high(high)" }).model).toBe("gemini-3.8-flash-high(high)");
+    expect(toAntigravityRequest({ ...base, model: "gemini-3.8-flash" }).model).toBe("gemini-3.8-flash-medium");
+    expect(toAntigravityRequest({ ...base, model: "gemini-3.7-flash-high" }).model).toBe("gemini-3.7-flash-tiered");
+    expect(toAntigravityRequest({ ...base, model: "gemini-3.8-flash-high(high)" }).model).toBe("gemini-3.8-flash-high");
     expect(toAntigravityRequest({ ...base, model: "account-specific-model" }).model).toBe("account-specific-model");
+  });
+
+  it.each([
+    ["gemini-3.8-flash-high", "gemini-3.8-flash-high(high)"],
+    ["gemini-3.8-flash-medium", "gemini-3.8-flash-medium(medium)"],
+    ["gemini-3.8-flash-low", "gemini-3.8-flash-low(low)"],
+    ["gemini-3.7-flash-high", "gemini-3.7-flash-tiered(high)"],
+    ["gemini-3.7-flash-medium", "gemini-3.7-flash-tiered(medium)"],
+    ["gemini-3.7-flash-low", "gemini-3.7-flash-tiered(low)"],
+    ["gemini-3.6-flash-high", "gemini-3.6-flash-tiered(high)"],
+    ["gemini-3.6-flash-medium", "gemini-3.6-flash-tiered(medium)"],
+    ["gemini-3.6-flash-low", "gemini-3.6-flash-tiered(low)"],
+  ])("separates the wire model and reasoning level for catalog choice %s", (model, upstream) => {
+    const body = toAntigravityRequest({ ...base, model, projectId: " fixture-project " });
+    const [, wireModel, level] = /^(.*)\((.*)\)$/.exec(upstream)!;
+    expect(body.model).toBe(wireModel);
+    expect(body.request.generationConfig.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: level });
+    expect(body.project).toBe("fixture-project");
+    expect(body).not.toHaveProperty("requestType");
+  });
+
+  it("keeps only aliases actually backed by a live project model", () => {
+    const choices = antigravityModelChoices(["gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.7-flash-tiered"]);
+    expect(choices).toContain("gemini-3.8-flash");
+    expect(choices).toContain("gemini-3.7-flash-low");
+    expect(choices).not.toContain("gemini-3.8-flash-low");
+    expect(choices).not.toContain("gemini-3.6-flash-low");
+    expect(antigravityModelChoices([])).toEqual([]);
+  });
+
+  it("prefers exact live IDs over historical aliases and honors explicit reasoning options", () => {
+    const exact = toAntigravityRequest({ ...base, model: "gemini-3.7-flash-low", availableModels: ["gemini-3.7-flash-low"] });
+    expect(exact.model).toBe("gemini-3.7-flash-low");
+    expect(exact.request.generationConfig.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "low" });
+    const override = toAntigravityRequest({ ...base, model: "gemini-3.8-flash", modelParams: { reasoningEffort: "high" } });
+    expect(override.model).toBe("gemini-3.8-flash-medium");
+    expect(override.request.generationConfig.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "high" });
+    const disabled = toAntigravityRequest({ ...base, model: "gemini-3.8-flash-low", modelParams: { thinking: "disabled" } });
+    expect(disabled.request.generationConfig.thinkingConfig).toEqual({ includeThoughts: false, thinkingLevel: "minimal" });
   });
 
   it("honors response limits, supported reasoning levels and sampling without adding OpenAI fields", () => {
@@ -334,13 +374,31 @@ describe("Antigravity project onboarding", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("refreshes a stale saved project once using the account's authoritative project lookup", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => json({ cloudaicompanionProject: { id: " replacement-project " } }));
+    const resolved = await resolveAntigravityProject("fixture-token", { projectId: "stale-project", forceRefresh: true, fetch });
+    expect(resolved).toEqual({ projectId: "replacement-project", tierId: "legacy-tier" });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0]).toEqual([ANTIGRAVITY_CONFIG.loadCodeAssistUrl, expect.objectContaining({
+      headers: antigravityHeaders("fixture-token", { purpose: "project" }),
+    })]);
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({ metadata: expect.objectContaining({ ideType: 9, pluginType: 2 }) });
+  });
+
+  it("surfaces authoritative project404 errors instead of retaining the stale project or inventing one", async () => {
+    const fetch = vi.fn(async () => json({ error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND" } }, 404));
+    await expect(resolveAntigravityProject("fixture-token", { projectId: "stale-project", forceRefresh: true, fetch }))
+      .rejects.toMatchObject({ status: 404, message: expect.stringContaining("Requested entity was not found.") });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it.each(["loaded-project", { id: "loaded-project" }])("reads a provisioned project in either response shape: %j", async (project) => {
     const fetch = vi.fn(async () => json({ cloudaicompanionProject: project, allowedTiers: [{ id: "free-tier", isDefault: true }] }));
     expect(await resolveAntigravityProject("fixture-token", { fetch })).toEqual({ projectId: "loaded-project", tierId: "free-tier" });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch.mock.calls[0]).toEqual([ANTIGRAVITY_CONFIG.loadCodeAssistUrl, expect.objectContaining({
       method: "POST", headers: antigravityHeaders("fixture-token", { purpose: "project" }),
-      body: JSON.stringify({ metadata: { ideType: 9, platform: process.platform === "linux" ? process.arch === "arm64" ? 4 : 3 : process.platform === "darwin" ? process.arch === "arm64" ? 2 : 1 : process.platform === "win32" ? 5 : 0, pluginType: 2 }, mode: 1 }),
+      body: JSON.stringify({ metadata: { ideType: 9, platform: process.platform === "linux" ? process.arch === "arm64" ? 4 : 3 : process.platform === "darwin" ? process.arch === "arm64" ? 2 : 1 : process.platform === "win32" ? 5 : 0, pluginType: 2 } }),
     })]);
   });
 

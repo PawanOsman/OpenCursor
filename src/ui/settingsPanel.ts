@@ -11,16 +11,22 @@ import * as vscode from "vscode";
 import { SettingsManager, Settings, DEFAULT_SETTINGS } from "../stores/settingsManager";
 import { listModels } from "../agent/provider";
 import { renderWebviewHtml } from "./webviewHtml";
-import { FeatureStore, MODEL_CATALOG } from "../stores/featureStore";
+import { FeatureStore, MODEL_CATALOG, getProviderApiKeys } from "../stores/featureStore";
+import { ProviderKeyStore, type ProviderKeyAction } from "../stores/providerKeys";
+import { PROVIDER_PRESETS } from "../shared/providerCatalog";
 import { listRules, listSkills } from "../context/workspaceContext";
 import { mcpManager } from "../integrations/mcpClient";
 import { BUILTIN_PERSONAS } from "../agent/personas";
 import { getStatus, onIndexStatus, buildIndex, deleteIndex, warmIndex, EMBED_MODELS } from "../agent/semanticIndex";
-import { indexDocSource, deleteDocIndex, onDocsStatus, getDocsStatus, getDocLogs, type DocSource } from "../agent/docsIndex";
+import { indexDocSource, cancelDocIndex, deleteDocIndex, onDocsStatus, getDocsStatus, getDocLogs, type DocSource } from "../agent/docsIndex";
+import { createDocsPageSelector } from "../agent/docsPlanner";
+import { createDocPolicy } from "../agent/docsDiscovery";
+import { docIndexSettingsChanged, normalizeDocSourceSettings } from "../shared/docSourceSettings";
 import { getWorkspaceRoot } from "../context/workspaceUtils";
 import * as llama from "../agent/llamacpp";
 import type { LlamacppModel } from "../agent/llamacpp";
 import * as ollama from "../agent/ollama";
+import { readLocalHardware, estimateModelFit } from "../agent/localRuntime";
 import * as oauth from "../agent/oauth";
 import { getUsage, resetUsage, flushUsage, onUsageChanged } from "../stores/usageStore";
 import { listExternalHooks, saveExternalHook, deleteExternalHook } from "../integrations/externalHooks";
@@ -35,6 +41,10 @@ export class SettingsPanel {
   private readonly _resettingQuota = new Set<string>();
   private readonly _quotaReads = new Map<string, Promise<oauth.OAuthUsage>>();
   private readonly _lifetime = new AbortController();
+  private readonly _modelDownloads = new Map<string, AbortController>();
+  private readonly _providerKeys: ProviderKeyStore;
+  private _docJob?: Promise<void>;
+  private _docChanges: Promise<void> = Promise.resolve();
 
   public static createOrShow(context: vscode.ExtensionContext, settingsManager: SettingsManager, featureStore: FeatureStore, section?: string) {
     const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
@@ -72,6 +82,7 @@ export class SettingsPanel {
     private readonly featureStore: FeatureStore
   ) {
     this._panel = panel;
+    this._providerKeys = new ProviderKeyStore(featureStore, settingsManager);
     this._panel.webview.html = this._getHtmlForWebview(this._panel.webview);
 
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
@@ -114,6 +125,13 @@ export class SettingsPanel {
     this._panel.webview.onDidReceiveMessage(
       async (message) => {
         switch (message.type) {
+          case "managePlugins":
+            await vscode.commands.executeCommand("ocursor.managePlugins");
+            await this._sendFeatures();
+            break;
+          case "browserSettings":
+            await vscode.commands.executeCommand("workbench.action.openSettings", "ocursor.browserExecutablePath");
+            break;
           case "getSettings": {
             await this._sendSettingsToWebview();
             // Models are already loaded in the backend registry: push instantly.
@@ -145,7 +163,7 @@ export class SettingsPanel {
             }
             break;
           case "fetchModels":
-            await this._handleFetchModels(message.apiBaseUrl, message.apiKey, message.anthropic, message.providerId);
+            await this._handleFetchModels(message.apiBaseUrl, message.apiKey, message.anthropic, message.providerId, message.requestId, message.keyId, message.providerKind);
             break;
           case "fetchAllModels": {
             // Serve from the backend registry (cached); refresh in the background.
@@ -242,8 +260,11 @@ export class SettingsPanel {
           case "resetStorage":
             await this._resetStorage();
             break;
+          case "providerKeyAction":
+            await this._handleProviderKeyAction(message);
+            break;
           case "saveProviderKey":
-            await this.settingsManager.setProviderKey(message.providerId, message.apiKey ?? "");
+            await this._providerKeys.saveLegacy(message.providerId, message.apiKey ?? "");
             this.featureStore.notifyChanged();
             await this._sendFeatures();
             break;
@@ -251,7 +272,7 @@ export class SettingsPanel {
             await this._sendFeatures();
             break;
           case "saveFeatures":
-            await this.featureStore.set(message.features);
+            await this._providerKeys.saveFeatures(message.features);
             // Re-sync MCP connections if servers changed.
             await mcpManager.sync(this.featureStore.get().mcpServers);
             await this._sendFeatures();
@@ -281,39 +302,32 @@ export class SettingsPanel {
             await mcpManager.sync(this.featureStore.get().mcpServers);
             await this._sendFeatures();
             break;
+          case "mcpLogin":
+          case "mcpLogout":
+            try {
+              if (message.type === "mcpLogin") await mcpManager.login(String(message.name));
+              else await mcpManager.logout(String(message.name));
+            } catch (error) { this._panel.webview.postMessage({ type: "mcpAuthError", error: String(error) }); }
+            await this._sendFeatures();
+            break;
           case "getIndexStatus":
             await warmIndex(getWorkspaceRoot());
             this._panel.webview.postMessage({ type: "indexStatus", status: getStatus(getWorkspaceRoot()), models: EMBED_MODELS });
             this._sendDocs();
             break;
-          case "addDoc": {
-            const doc: DocSource = { id: `doc-${Date.now()}`, name: message.name, url: message.url, maxPages: Number(message.maxPages) || undefined };
-            const f = this.featureStore.get();
-            await this.featureStore.set({ docSources: [...(f.docSources ?? []), doc] });
-            this._sendDocs();
-            this._indexDoc(doc);
+          case "addDoc":
+          case "editDoc":
+          case "reindexDoc":
+          case "removeDoc":
+            this._docChanges = this._docChanges.then(() => this._handleDocAction(message));
+            await this._docChanges;
             break;
-          }
+          case "cancelDocIndex":
+            if (typeof message.id === "string") cancelDocIndex(message.id);
+            break;
           case "getDocLogs":
             this._panel.webview.postMessage({ type: "docLogs", id: message.id, lines: getDocLogs(message.id) });
             break;
-          case "reindexDoc": {
-            const doc = (this.featureStore.get().docSources ?? []).find((d) => d.id === message.id);
-            if (doc) this._indexDoc(doc);
-            break;
-          }
-          case "editDoc": {
-            const cur = this.featureStore.get().docSources ?? [];
-            const doc = cur.find((d) => d.id === message.id);
-            if (doc) {
-              const next = { ...doc, name: message.name || doc.name, url: message.url || doc.url, maxPages: Number(message.maxPages) || doc.maxPages };
-              await this.featureStore.set({ docSources: cur.map((d) => (d.id === doc.id ? next : d)) });
-              this._sendDocs();
-              // URL changed → old index is stale, re-crawl.
-              if (next.url !== doc.url) this._indexDoc(next);
-            }
-            break;
-          }
           case "openExternal":
             if (/^https?:\/\//.test(message.url || "")) await vscode.env.openExternal(vscode.Uri.parse(message.url));
             break;
@@ -326,13 +340,6 @@ export class SettingsPanel {
               await vscode.workspace.fs.writeFile(uri, Buffer.from("# Files to exclude from indexing (gitignore syntax)\n"));
             }
             await vscode.window.showTextDocument(uri);
-            break;
-          }
-          case "removeDoc": {
-            await deleteDocIndex(message.id);
-            const f = this.featureStore.get();
-            await this.featureStore.set({ docSources: (f.docSources ?? []).filter((d) => d.id !== message.id) });
-            this._sendDocs();
             break;
           }
           case "syncIndex":
@@ -348,6 +355,12 @@ export class SettingsPanel {
             await applyEmbedModel(message.modelId);
             this._panel.webview.postMessage({ type: "indexStatus", status: getStatus(getWorkspaceRoot()), models: EMBED_MODELS });
             if (f.indexingEnabled !== false) buildIndex(getWorkspaceRoot()).catch(() => {});
+            break;
+          }
+          case "localHardwareGet": {
+            const hardware = await readLocalHardware(this.context.globalStorageUri.fsPath);
+            const fits = Object.fromEntries(this.featureStore.get().llamacppModels.map(model => [model.id, estimateModelFit(model.sizeBytes, hardware)]));
+            this._panel.webview.postMessage({ type: "localHardware", hardware, fits });
             break;
           }
           case "llamacppGet":
@@ -376,23 +389,30 @@ export class SettingsPanel {
             }
             break;
           }
+          case "llamacppCancelDownload":
+            this._modelDownloads.get(String(message.id))?.abort(new Error("Download cancelled. Download again to resume."));
+            break;
           case "llamacppDownload": {
+            const id = `${message.repo}/${message.file}`;
+            if (this._modelDownloads.has(id)) break;
+            const controller = new AbortController();
+            this._modelDownloads.set(id, controller);
             try {
               const model = await llama.downloadGguf(message.repo, message.file, (received, total) => {
-                this._panel.webview.postMessage({ type: "llamacppDownloadProgress", id: `${message.repo}/${message.file}`, received, total });
-              });
+                this._panel.webview.postMessage({ type: "llamacppDownloadProgress", id, received, total });
+              }, AbortSignal.any([controller.signal, this._lifetime.signal]), { sha256: message.sha256, sizeBytes: message.sizeBytes });
               await this._addLlamacppModel(model);
               this._panel.webview.postMessage({ type: "llamacppDownloadDone", id: model.id });
             } catch (err: any) {
-              this._panel.webview.postMessage({ type: "llamacppDownloadDone", id: `${message.repo}/${message.file}`, error: String(err?.message || err) });
-            }
+              this._panel.webview.postMessage({ type: "llamacppDownloadDone", id, error: String(err?.message || err) });
+            } finally { this._modelDownloads.delete(id); }
             break;
           }
           case "llamacppImport": {
             const src = await llama.pickLocalGguf();
             if (src) {
-              const model = await llama.importGguf(src);
-              await this._addLlamacppModel(model);
+              try { const model = await llama.importGguf(src); await this._addLlamacppModel(model); }
+              catch (error) { this._panel.webview.postMessage({ type: "localModelError", error: String(error) }); }
             }
             break;
           }
@@ -442,8 +462,10 @@ export class SettingsPanel {
           }
           case "llamacppRemove": {
             const m = this.featureStore.get().llamacppModels.find((x) => x.id === message.id);
-            if (m) await llama.deleteGgufFile(m).catch(() => {});
-            await this._removeLlamacppModel(message.id);
+            try {
+              if (m) await llama.deleteGgufFile(m);
+              await this._removeLlamacppModel(message.id);
+            } catch (error) { this._panel.webview.postMessage({ type: "localModelError", error: String(error) }); }
             break;
           }
 
@@ -466,7 +488,7 @@ export class SettingsPanel {
             this._panel.webview.postMessage({ type: "oauthStatus", status: oauth.getStatus() });
             break;
           case "oauthLogin":
-            oauth.login(message.kind).catch((error) => this._postOAuthError(message.kind, error));
+            oauth.login(message.kind, message.options).catch((error) => this._postOAuthError(message.kind, error));
             break;
           case "oauthOpenLogin":
             oauth.openLoginInBrowser(message.kind).catch((error) => this._postOAuthError(message.kind, error));
@@ -512,7 +534,7 @@ export class SettingsPanel {
             this.featureStore.notifyChanged();
             break;
           case "oauthSetBalance":
-            await oauth.setBalanceStrategy(message.strategy);
+            await oauth.setBalanceStrategy(message.strategy, message.kind);
             break;
           case "oauthLimits":
             await this._sendAccountLimits(message.id, message.requestId);
@@ -528,6 +550,22 @@ export class SettingsPanel {
             await this._sendOllamaModels();
             break;
           }
+          case "ollamaSetEndpoint": {
+            try {
+              ollama.setOllamaHost(String(message.endpoint));
+              await this.context.globalState.update("ocursor.ollamaEndpoint", ollama.getStatus().endpoint);
+              await ollama.refreshStatus(); await this._sendOllamaModels();
+            } catch (error) { this._panel.webview.postMessage({ type: "localModelError", error: String(error) }); }
+            break;
+          }
+          case "ollamaLoad":
+          case "ollamaUnload":
+            void ollama.setModelLoaded(String(message.name), message.type === "ollamaLoad", Number(message.contextLength ?? 8192), Number(message.keepAliveMinutes ?? 5))
+              .catch(error => this._panel.webview.postMessage({ type: "localModelError", error: String(error) }));
+            break;
+          case "ollamaInspect":
+            void ollama.inspectModel(String(message.name)).catch(error => this._panel.webview.postMessage({ type: "localModelError", error: String(error) }));
+            break;
           case "ollamaInstall":
             await ollama.installOllama();
             break;
@@ -542,7 +580,7 @@ export class SettingsPanel {
             ollama.cancelPull(String(message.name));
             break;
           case "ollamaRemove":
-            await ollama.deleteModel(String(message.name)).catch(() => {});
+            await ollama.deleteModel(String(message.name)).catch(error => this._panel.webview.postMessage({ type: "localModelError", error: String(error) }));
             await this._sendOllamaModels();
             break;
           case "ollamaRefresh":
@@ -642,18 +680,33 @@ export class SettingsPanel {
     }
   }
 
-  private async _handleFetchModels(apiBaseUrl: string, apiKey: string, anthropic?: boolean, providerId?: string) {
-    let key = apiKey;
-    if (key === "●●●●●●●●" || key === undefined) {
-      key = providerId
-        ? (await this.settingsManager.getProviderKey(providerId)) || ""
-        : (await this.settingsManager.getApiKey()) || "";
-    }
+  private async _handleFetchModels(apiBaseUrl: string, apiKey: string, anthropic?: boolean, providerId?: string, requestId?: string, keyId?: string, providerKind?: string) {
     try {
-      const models = await listModels(apiBaseUrl, key, anthropic);
-      this._panel.webview.postMessage({ type: "modelsFetched", models: models.map((m) => m.id), providerId });
+      let key = apiKey;
+      if (key === "●●●●●●●●" || key === undefined) {
+        if (!providerId) key = (await this.settingsManager.getApiKey()) || "";
+        else {
+          const provider = this.featureStore.get().providers.find(item => item.id === providerId);
+          const candidates = provider ? getProviderApiKeys(provider).filter(item => keyId ? item.id === keyId : item.enabled !== false) : [];
+          if (keyId && !candidates.length) throw new Error("API key not found for this provider.");
+          key = "";
+          for (const candidate of candidates) {
+            key = (await this.settingsManager.getProviderKey(candidate.id)) || "";
+            if (key) break;
+          }
+        }
+      }
+      const configured = this.featureStore.get().providers.find(item => item.id === providerId);
+      const kind = configured?.kind ?? (providerId === `popular:${providerKind}` ? providerKind : undefined);
+      const preset = kind && Object.prototype.hasOwnProperty.call(PROVIDER_PRESETS, kind) ? PROVIDER_PRESETS[kind as keyof typeof PROVIDER_PRESETS] : undefined;
+      let verified = true;
+      const models = await listModels(apiBaseUrl, key, anthropic, {
+        providerAdapterId: preset?.protocol === "adapter" ? preset.adapterId : undefined,
+        onVerification: value => { verified = value; }, signal: AbortSignal.timeout(30_000),
+      });
+      this._panel.webview.postMessage({ type: "modelsFetched", models: models.map((m) => m.id), providerId, ...(requestId ? { requestId } : {}), ...(!verified ? { verified: false } : {}) });
     } catch (err: any) {
-      this._panel.webview.postMessage({ type: "modelsFetched", models: [], providerId, error: String(err?.message || err) });
+      this._panel.webview.postMessage({ type: "modelsFetched", models: [], providerId, ...(requestId ? { requestId } : {}), error: String(err?.message || err) });
     }
   }
 
@@ -671,7 +724,8 @@ export class SettingsPanel {
 
     // Delete provider API keys (need ids before clearing globalState) + the main key.
     const features = this.featureStore.get();
-    await Promise.all(features.providers.map((p) => this.settingsManager.deleteProviderKey(p.id)));
+    const providerKeys = new Set(features.providers.flatMap(provider => [provider.id, ...getProviderApiKeys(provider).map(key => key.id)]));
+    await Promise.all([...providerKeys].map(id => this.settingsManager.deleteProviderKey(id)));
     await this.settingsManager.deleteApiKey();
 
     // Delete OAuth account secrets, then every globalState key.
@@ -714,8 +768,8 @@ export class SettingsPanel {
     let models: ollama.OllamaModel[] = [];
     try {
       models = await ollama.listModels();
-    } catch {
-      models = [];
+    } catch (error) {
+      this._panel.webview.postMessage({ type: "localModelError", error: String(error) });
     }
     this._panel.webview.postMessage({ type: "ollamaModels", models });
   }
@@ -730,14 +784,58 @@ export class SettingsPanel {
 
   /** Index a doc source in the background; persist result or error on the doc. */
   private _indexDoc(doc: DocSource) {
+    if (this._docJob || getDocsStatus().indexing) return;
     const update = async (patch: Partial<DocSource>) => {
       const cur = this.featureStore.get().docSources ?? [];
+      if (!cur.some((d) => d.id === doc.id)) return;
       await this.featureStore.set({ docSources: cur.map((d) => (d.id === doc.id ? { ...d, ...patch } : d)) });
       this._sendDocs();
     };
-    indexDocSource(doc)
-      .then(({ pages, chunks }) => update({ pages, chunks, indexedAt: Date.now(), error: undefined }))
-      .catch((e: any) => update({ error: String(e?.message || e) }));
+    this._docJob = (async () => {
+      try {
+        const result = await indexDocSource(doc, { selectPages: createDocsPageSelector(this.settingsManager, this.featureStore) });
+        await update({ pages: result.pages, chunks: result.chunks, indexedAt: Date.now(), error: undefined,
+          resolvedScope: result.scope, stopReason: result.stopReason, selected: result.selected });
+      } catch (error) {
+        if ((error as Error)?.name === "AbortError") return;
+        await update({ error: String((error as Error)?.message || error) });
+      }
+    })().catch((error) => {
+      this._panel.webview.postMessage({ type: "docActionResult", ok: false, error: `Could not save the documentation result: ${String((error as Error)?.message || error)}` });
+    }).finally(() => { this._docJob = undefined; this._sendDocs(); });
+  }
+
+  private async _handleDocAction(message: Record<string, unknown>) {
+    try {
+      if (this._docJob || getDocsStatus().indexing) throw new Error("Wait for the current documentation index to finish, or cancel it first.");
+      const cur = this.featureStore.get().docSources ?? [];
+      if (message.type === "addDoc") {
+        const doc: DocSource = { id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, ...normalizeDocSourceSettings(message) };
+        createDocPolicy(doc.url, doc);
+        await this.featureStore.set({ docSources: [...cur, doc] });
+        this._sendDocs();
+        this._indexDoc(doc);
+      } else {
+        const doc = cur.find((entry) => entry.id === message.id);
+        if (!doc) throw new Error("This documentation source no longer exists.");
+        if (message.type === "editDoc") {
+          const next = { ...doc, ...normalizeDocSourceSettings({ ...doc, ...message }) };
+          createDocPolicy(next.url, next);
+          const changed = docIndexSettingsChanged(doc, next);
+          await this.featureStore.set({ docSources: cur.map((entry) => entry.id === doc.id ? next : entry) });
+          this._sendDocs();
+          if (changed) this._indexDoc(next);
+        } else if (message.type === "reindexDoc") this._indexDoc({ ...doc, ...normalizeDocSourceSettings(doc) });
+        else if (message.type === "removeDoc") {
+          await deleteDocIndex(doc.id);
+          await this.featureStore.set({ docSources: (this.featureStore.get().docSources ?? []).filter((entry) => entry.id !== doc.id) });
+          this._sendDocs();
+        }
+      }
+      this._panel.webview.postMessage({ type: "docActionResult", requestId: message.requestId, ok: true });
+    } catch (error) {
+      this._panel.webview.postMessage({ type: "docActionResult", requestId: message.requestId, ok: false, error: String((error as Error)?.message || error) });
+    }
   }
 
   private _sendDocs() {
@@ -748,12 +846,25 @@ export class SettingsPanel {
     });
   }
 
+  private async _handleProviderKeyAction(message: ProviderKeyAction & { requestId?: unknown }) {
+    try {
+      if (typeof message.requestId !== "string" || !message.requestId) throw new Error("Missing API key action request id.");
+      const provider = await this._providerKeys.action(message);
+      // The committed action remains successful if a separate settings refresh fails.
+      await this._sendFeatures().catch(() => undefined);
+      this._panel.webview.postMessage({ type: "providerKeyActionResult", requestId: message.requestId, ok: true, provider });
+    } catch (error) {
+      this._panel.webview.postMessage({ type: "providerKeyActionResult", requestId: message.requestId, ok: false,
+        error: String((error as Error).message || "Could not save API key changes.") });
+    }
+  }
+
   private async _sendFeatures() {
     const [rules, skills] = await Promise.all([listRules(), listSkills()]);
     const features = this.featureStore.get();
     // Annotate each provider with whether a key is stored (never expose the key).
     const providers = await Promise.all(
-      features.providers.map(async (p) => ({ ...p, hasKey: !!(await this.settingsManager.getProviderKey(p.id)) }))
+      features.providers.map(p => this._providerKeys.annotate(p))
     );
     this._panel.webview.postMessage({
       type: "features",

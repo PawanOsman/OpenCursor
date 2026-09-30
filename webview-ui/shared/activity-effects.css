@@ -1,0 +1,102 @@
+/*
+ * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ *
+ * This file is part of OpenCursor — AI coding agent chat inside VS Code.
+ * https://github.com/PawanOsman/OpenCursor
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+
+/* Thinking states and matrix dot loader animations. */
+:root {
+  --think-hold: 2000ms;
+  --think-swap: 150ms;
+  --think-gap: 50ms;
+  --think-distance: 8px;
+  --think-blur: 2px;
+  --think-shimmer: 2000ms;
+  --think-base: var(--fg-dim, #9a9a9a);
+  --think-highlight: var(--fg, #f5f5f5);
+  --think-ease: ease-in-out;
+  --matrix-cycle: 1200ms;
+  --matrix-base: color-mix(in srgb, var(--fg-dim, #9a9a9a) 30%, var(--bg, #181818));
+  --matrix-active: var(--fg, #b8b8c2);
+  --matrix-ease: ease-in-out;
+}
+
+.activity-status { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+.activity-status > .t-matrix { flex: none; }
+.t-think { position: relative; display: inline-block; text-align: left; min-width: 0; max-width: 100%; }
+.t-think-announcement { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.t-think-sizer { display: block; visibility: hidden; white-space: nowrap; max-width: 100%; overflow: hidden; }
+.t-think-measure-root { position: absolute; inset: 0; visibility: hidden; overflow: hidden; pointer-events: none; }
+.t-think-measure { display: inline-block; white-space: nowrap; }
+.t-think-text {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: block;
+  color: var(--think-base);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transform: translateY(0);
+  filter: blur(0);
+  opacity: 1;
+  transition:
+    transform var(--think-swap) var(--think-ease),
+    filter var(--think-swap) var(--think-ease),
+    opacity var(--think-swap) var(--think-ease);
+  will-change: transform, filter, opacity;
+}
+.t-think-text::before {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(90deg,
+    transparent 0%, transparent 40%,
+    var(--think-highlight) 50%,
+    transparent 60%, transparent 100%);
+  background-size: 400% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: t-think-shimmer var(--think-shimmer) linear infinite;
+}
+@keyframes t-think-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: 0% 0; }
+}
+.t-think-text.is-exit {
+  transform: translateY(calc(var(--think-distance) * -1));
+  filter: blur(var(--think-blur));
+  opacity: 0;
+}
+.t-think-text.is-enter-start {
+  transition: none;
+  transform: translateY(var(--think-distance));
+  filter: blur(var(--think-blur));
+  opacity: 0;
+}
+
+.t-matrix { display: grid; grid-template-columns: repeat(4, 2px); grid-auto-rows: 2px; gap: 2px; }
+.t-matrix i {
+  display: block;
+  background: var(--matrix-base);
+  animation: t-matrix-pulse var(--matrix-cycle) var(--matrix-ease) infinite;
+  animation-delay: calc(var(--d, 0) * 1ms);
+}
+.t-matrix i.is-steady { animation: none; }
+.t-matrix i.is-gap { visibility: hidden; animation: none; }
+@keyframes t-matrix-pulse {
+  0%, 45%, 100% { background-color: var(--matrix-base); }
+  15% { background-color: var(--matrix-active); }
+}
+
+html[data-motion="reduced"] .t-think-text { transition: none !important; transform: none !important; filter: none !important; }
+html[data-motion="reduced"] .t-think-text::before { display: none !important; }
+html[data-motion="reduced"] .t-matrix i { animation: none !important; }

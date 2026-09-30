@@ -44,19 +44,42 @@ describe("production approval boundaries", () => {
   it.each(["echo $(touch /tmp/fixture)", 'echo "$(touch /tmp/fixture)"', "echo `touch /tmp/fixture`", "echo safe & touch /tmp/fixture", "echo $(echo $(touch /tmp/fixture))"])("checks hidden commands in %s against explicit denials", (command) => {
     const policy = allowPolicy();
     policy.shell = { mode: "ask", allowlist: ["echo"], denylist: ["touch"] };
-    expect(evaluateApproval(policy, "Shell", { command })).toBe("deny");
-    expect(deniedSubject(policy, "Shell", { command })).toBe("touch /tmp/fixture");
+    for (const mode of ["allow", "ask", "review", "deny"] as const) {
+      policy.shell.mode = mode;
+      expect(evaluateApproval(policy, "Shell", { command })).toBe("deny");
+      expect(deniedSubject(policy, "Shell", { command })).toBe("touch /tmp/fixture");
+    }
   });
-  it("requires review for dynamic commands and preserves literal quoted text", () => {
+  it.each([
+    'cd /project && FILE="src/example.ts"; sed -n 1,10p "$FILE"; echo ----; sed -n 20,30p "$FILE"',
+    'echo "$HOME"',
+    "echo $(pwd)",
+    "echo `pwd`",
+    "cat <(printf ok)",
+    "bash -c 'echo ok'",
+    "eval 'echo ok'",
+    'for file in *.ts; do echo "$file"; done',
+    '$file = "src/app.ts"; Get-Content $file',
+  ])("honors Allow with unrelated deny rules for %s", (command) => {
+    const policy = allowPolicy();
+    policy.shell = { mode: "allow", allowlist: ["git status"], denylist: ["git push", "rm", "touch"] };
+    expect(evaluateApproval(policy, "Shell", { command })).toBe("allow");
+    expect(deniedSubject(policy, "Shell", { command })).toBeUndefined();
+  });
+  it.each(["ask", "review", "deny"] as const)("keeps dynamic commands gated in %s mode", (mode) => {
+    const policy = allowPolicy();
+    policy.shell = { mode, allowlist: ["echo", "pwd", "eval", "bash"], denylist: ["touch"] };
+    for (const command of ['echo "$HOME"', "echo $(pwd)", "eval 'echo ok'", "bash -c 'echo ok'"]) {
+      expect(evaluateApproval(policy, "Shell", { command })).toBe(mode === "deny" ? "deny" : "ask");
+    }
+  });
+  it("preserves literal quoted text and shell prefix boundaries", () => {
     const policy = allowPolicy();
     policy.shell = { mode: "ask", allowlist: ["echo", "pwd"], denylist: ["touch"] };
     expect(evaluateApproval(policy, "Shell", { command: "echo $(pwd)" })).toBe("ask");
     expect(evaluateApproval(policy, "Shell", { command: "echo '$HOME $(touch /tmp/fixture)'" })).toBe("allow");
     expect(evaluateApproval(policy, "Shell", { command: "echo safe \\& touch /tmp/fixture" })).toBe("allow");
     expect(evaluateApproval(policy, "Shell", { command: "echolocation fixture" })).toBe("ask");
-    policy.shell.mode = "allow";
-    expect(evaluateApproval(policy, "Shell", { command: "eval 'touch /tmp/fixture'" })).toBe("ask");
-    expect(evaluateApproval(policy, "Shell", { command: "bash -c 'touch /tmp/fixture'" })).toBe("ask");
     policy.shell = { mode: "allow", allowlist: [], denylist: [] };
     expect(evaluateApproval(policy, "Shell", { command: "echo $(pwd)" })).toBe("allow");
   });

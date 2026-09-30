@@ -12,6 +12,7 @@ import { Icon } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
 import { OllamaLibraryModel, OllamaModel, OllamaStatus } from "../features";
 import { fmtSize } from "./localShared";
+import { HardwareSummary, useLocalHardware } from "./LocalHardware";
 
 export function OllamaPanel({
   status,
@@ -20,6 +21,13 @@ export function OllamaPanel({
   status: OllamaStatus;
   models: OllamaModel[];
 }) {
+  const { hardware } = useLocalHardware();
+  const [endpoint, setEndpoint] = React.useState(status.endpoint || "http://localhost:11434");
+  const [contextLength, setContextLength] = React.useState(8192);
+  const [keepAliveMinutes, setKeepAliveMinutes] = React.useState(5);
+  const [operationError, setOperationError] = React.useState("");
+  const [pullName, setPullName] = React.useState("");
+  React.useEffect(() => { if (status.endpoint) setEndpoint(status.endpoint); }, [status.endpoint]);
   const [tab, setTab] = React.useState<"models" | "search">("models");
   const [query, setQuery] = React.useState("");
   const [searching, setSearching] = React.useState(false);
@@ -38,6 +46,9 @@ export function OllamaPanel({
         setSearchErr(m.error || "");
       } else if (m.type === "ollamaTags") {
         setTags((prev) => ({ ...prev, [m.name]: m.tags || [] }));
+        if (m.error) setSearchErr(m.error);
+      } else if (m.type === "localModelError") {
+        setOperationError(m.error || "Model operation failed.");
       }
     };
     window.addEventListener("message", handler);
@@ -73,9 +84,9 @@ export function OllamaPanel({
       <div className="section-label">Runtime</div>
       <div className="row">
         <div className="row-text">
-          <div className="row-title">Ollama {status.installed ? "running" : "not found"}</div>
+          <div className="row-title">Ollama {status.reachable ? "connected" : "unreachable"}{status.version ? ` · ${status.version}` : ""}</div>
           <div className="row-desc">
-            Requires the <code>ollama</code> CLI + daemon. Install from <code>ollama.com/download</code>, then start it. Models are served at <code>http://localhost:11434/v1</code>.
+            {status.installed ? "CLI installed." : "CLI not found locally."} The daemon must be running to manage or use models. Chat endpoint: <code>{status.endpoint || "http://localhost:11434"}/v1</code>.
           </div>
         </div>
         <div className="row-control" style={{ display: "flex", gap: 8 }}>
@@ -90,6 +101,13 @@ export function OllamaPanel({
         </div>
       </div>
 
+      <div className="row">
+        <label className="fc-field" style={{ flex: 1 }}><span>Daemon endpoint</span><input value={endpoint} onChange={event => setEndpoint(event.target.value)} placeholder="http://localhost:11434" /></label>
+        <button className="btn-ghost" onClick={() => { setOperationError(""); vscode.postMessage({ type: "ollamaSetEndpoint", endpoint }); }}>Connect</button>
+      </div>
+      <p className="panel-hint">Models and loaded memory are reported by this daemon. Host hardware below describes the machine running OpenCursor.</p>
+      <HardwareSummary hardware={hardware} />
+      {operationError && <div className="fc-error" role="alert">{operationError}</div>}
       <div className="sub-tabs" style={{ marginTop: 20 }}>
         <button className={"sub-tab" + (tab === "models" ? " active" : "")} onClick={() => setTab("models")}>Models</button>
         <button className={"sub-tab" + (tab === "search" ? " active" : "")} onClick={() => setTab("search")}>Search &amp; Download</button>
@@ -118,6 +136,10 @@ export function OllamaPanel({
         </div>
       ))}
 
+      <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+        <label className="fc-field"><span>Load context (tokens)</span><input type="number" min={512} max={1048576} value={contextLength} onChange={event => setContextLength(Number(event.target.value))} /></label>
+        <label className="fc-field"><span>Keep loaded (minutes)</span><input type="number" min={0} max={1440} value={keepAliveMinutes} onChange={event => setKeepAliveMinutes(Number(event.target.value))} /></label>
+      </div>
       <div className="section-label" style={{ marginTop: 16 }}>Your Models</div>
       {Object.entries(status.errors).map(([name, err]) => (
         <div className="fc-error" key={`err-${name}`} style={{ marginBottom: 8 }}>{name}: {err}</div>
@@ -132,7 +154,9 @@ export function OllamaPanel({
                 <Icon name="model" size={14} />
                 <span>{m.name}</span>
               </div>
-              <button className="icon-btn" title="Remove" onClick={() => vscode.postMessage({ type: "ollamaRemove", name: m.name })}>
+              <span className="badge-tag">{status.states?.[m.name] || (status.loaded?.[m.name] ? "ready" : "available")}</span>
+              <button className="btn-ghost sm" disabled={!status.reachable || ["loading", "stopping", "downloading"].includes(status.states?.[m.name] || "")} onClick={() => vscode.postMessage({ type: status.loaded?.[m.name] ? "ollamaUnload" : "ollamaLoad", name: m.name, contextLength, keepAliveMinutes })}>{status.loaded?.[m.name] ? "Unload" : "Load"}</button>
+              <button className="icon-btn" title="Remove" disabled={["loading", "stopping", "downloading"].includes(status.states?.[m.name] || "")} onClick={() => vscode.postMessage({ type: "ollamaRemove", name: m.name })}>
                 <Icon name="trash" size={14} />
               </button>
             </div>
@@ -140,6 +164,9 @@ export function OllamaPanel({
               <div className="row-desc">
                 {[m.parameterSize, m.quantization, m.family, m.sizeBytes ? fmtSize(m.sizeBytes) : ""].filter(Boolean).join(" · ")}
               </div>
+              {status.loaded?.[m.name] && <div className="row-desc">Daemon reports loaded: {fmtSize(status.loaded[m.name].sizeBytes || 0)} · GPU: {fmtSize(status.loaded[m.name].vramBytes || 0)} · context: {status.loaded[m.name].contextLength?.toLocaleString() || "unknown"}</div>}
+              <button className="btn-ghost sm" onClick={() => vscode.postMessage({ type: "ollamaInspect", name: m.name })}>Check capabilities</button>
+              {status.capabilities?.[m.name] && <div className="row-desc">Capabilities: {status.capabilities[m.name].join(", ") || "Not reported by this runtime"}{status.capabilities[m.name].length > 0 && !status.capabilities[m.name].includes("tools") ? ". This model does not report tool calling; use Ask mode or choose a tool-capable model for agent tasks." : ""}</div>}
             </div>
           </div>
         ))
@@ -147,6 +174,9 @@ export function OllamaPanel({
       </>)}
 
       {tab === "search" && (<>
+      <div className="section-label" style={{ marginTop: 0 }}>Pull by model name</div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}><input value={pullName} onChange={event => setPullName(event.target.value)} placeholder="e.g. qwen3:8b" style={{ flex: 1 }} /><button className="btn-ghost" disabled={!status.reachable || !pullName.trim()} onClick={() => pull(pullName)}>Pull / resume</button></div>
+      <p className="panel-hint">Ollama verifies downloaded layers and resumes interrupted pulls.</p>
       <div className="section-label" style={{ marginTop: 0 }}>Search Library</div>
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <input

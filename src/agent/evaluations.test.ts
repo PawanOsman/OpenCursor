@@ -58,7 +58,9 @@ afterAll(async () => {
 function call(name: string, input: unknown, id = `${name}-${Math.random()}`): ToolCall { return { name, arguments: JSON.stringify(input), id }; }
 function tools(...calls: ToolCall[]): ProviderEvent[] { return [...calls.map((call): ProviderEvent => ({ type: "tool-call", call })), { type: "done", finishReason: "tool_calls" }]; }
 function answer(text = "Completed and verified."): ProviderEvent[] { return [{ type: "text-delta", text }, { type: "done", finishReason: "stop" }]; }
-function testShell(file = "verify.cjs") { return tools(call("Shell", { command: `node ${file}`, description: "Verify repository task outcome", block_until_ms: 2000 })); }
+// These scripted next turns require exit-code evidence, not a background receipt.
+const TERMINAL_WAIT_MS = 30_000;
+function testShell(file = "verify.cjs") { return tools(call("Shell", { command: `node ${file}`, description: "Verify repository task outcome", block_until_ms: TERMINAL_WAIT_MS })); }
 function policy(): ApprovalPolicy {
   const result = structuredClone(DEFAULT_APPROVAL);
   for (const rule of Object.values(result)) rule.mode = "allow";
@@ -98,14 +100,18 @@ async function evaluate(name: string, turns: Turn[], options: Partial<RunAgentOp
   return { events, history, decisions, requests: [...fixture.requests] };
 }
 function shellSucceeded(events: AgentEvent[]) {
-  expect(events.some((e) => e.type === "tool-call-completed" && e.name === "Shell" && e.outcome?.status === "completed" && e.outcome.exitCode === 0)).toBe(true);
+  expect(events.filter((e) => e.type === "tool-call-completed" && e.name === "Shell")).toContainEqual(expect.objectContaining({
+    outcome: expect.objectContaining({ status: "completed", exitCode: 0 }),
+  }));
 }
 
 describe("repository outcomes through the production agent", () => {
   it("fixes a defect across two files and passes the repository verification", async () => {
     await fs.writeFile(path.join(root, "math.cjs"), "exports.add = (a,b) => a-b;\n");
     await fs.writeFile(path.join(root, "consumer.cjs"), "exports.result = require('./math.cjs').add(2,3) + 1;\n");
-    await fs.writeFile(path.join(root, "verify.cjs"), "const assert=require('node:assert/strict');assert.equal(require('./math.cjs').add(2,3),5);assert.equal(require('./consumer.cjs').result,5);\n");
+    // Deliberately exceed the old two-second polling window. Verification needs
+    // the process exit, including on a busy runner with slower shell startup.
+    await fs.writeFile(path.join(root, "verify.cjs"), "setTimeout(()=>{const assert=require('node:assert/strict');assert.equal(require('./math.cjs').add(2,3),5);assert.equal(require('./consumer.cjs').result,5);},2100);\n");
     const result = await evaluate("multi-file bug fix", [
       tools(call("Read", { path: "math.cjs" }), call("Read", { path: "consumer.cjs" })),
       tools(call("StrReplace", { path: "math.cjs", old_string: "a-b", new_string: "a+b" }), call("StrReplace", { path: "consumer.cjs", old_string: ") + 1", new_string: ")" })),
@@ -113,7 +119,7 @@ describe("repository outcomes through the production agent", () => {
     ]);
     shellSucceeded(result.events); expect(result.requests).toHaveLength(4);
     expect(await fs.readFile(path.join(root, "math.cjs"), "utf8")).toContain("a+b");
-  });
+  }, 45_000);
   it("refactors implementation and caller while preserving behavior", async () => {
     await fs.writeFile(path.join(root, "greet.cjs"), "exports.greet = name => 'Hello '+name;\n");
     await fs.writeFile(path.join(root, "app.cjs"), "exports.message = require('./greet.cjs').greet('Ada');\n");
@@ -167,7 +173,7 @@ describe("repository outcomes through the production agent", () => {
     await fs.writeFile(path.join(root, "verify.cjs"), "require('node:assert/strict').equal(require('./value.cjs').value,42);\n");
     const missingExit = process.platform === "win32" ? 1 : 127;
     const result = await evaluate("missing-command recovery followed by a verified fix", [
-      tools(call("Shell", { command: "opencursor_eval_command_does_not_exist_9f73", description: "Exercise missing command diagnosis", block_until_ms: 2000 })),
+      tools(call("Shell", { command: "opencursor_eval_command_does_not_exist_9f73", description: "Exercise missing command diagnosis", block_until_ms: TERMINAL_WAIT_MS })),
       (request) => { expect(JSON.stringify(request.messages)).toContain(`exit_code=${missingExit}`); return testShell(); },
       (request) => { expect(JSON.stringify(request.messages)).toContain("exit_code=1"); return tools(call("Read", { path: "value.cjs" })); },
       tools(call("StrReplace", { path: "value.cjs", old_string: "41", new_string: "42" })),
@@ -178,7 +184,7 @@ describe("repository outcomes through the production agent", () => {
     expect(outcomes.map((outcome) => outcome?.status)).toEqual(["failed", "failed", "completed"]);
     expect(await fs.readFile(path.join(root, "value.cjs"), "utf8")).toBe("exports.value=42;\n");
     shellSucceeded(result.events);
-  });
+  }, 45_000);
   it("retrieves a targeted 18-line range from a large generated fixture without consuming the surrounding file", async () => {
     const lines = Array.from({ length: 60003 }, (_, i) => `fixture row ${i + 1} ${"x".repeat(150)}`);
     lines[43911] = "TARGET_MARKER: preserve the confirmed value 49152";
@@ -246,7 +252,7 @@ describe("repository outcomes through the production agent", () => {
     expect(result.events).toContainEqual({ type: "run-status", status: "cancelled" }); expect(pendingChanges.count()).toBe(0);
   });
   it("guards MCP resource downloads with every applicable policy and the hook before writing", async () => {
-    const read = vi.spyOn(mcpManager, "readResource").mockResolvedValue("resource content\n");
+    const read = vi.spyOn(mcpManager, "readResourceContents").mockResolvedValue({ contents: [{ uri: "fixture://document", text: "resource content\n" }] });
     const original = Buffer.from([0, 255, 128, 72]);
     const file = path.join(root, "download.bin"); await fs.writeFile(file, original);
     for (const type of ["mcp", "edits", "outside"] as const) {
@@ -259,7 +265,7 @@ describe("repository outcomes through the production agent", () => {
       expect(read).not.toHaveBeenCalled(); expect(await fs.readFile(file)).toEqual(original);
       if (type === "outside") await expect(fs.stat(destination)).rejects.toMatchObject({ code: "ENOENT" });
     }
-    const hook = vi.fn(async () => "resource is blocked by the hook");
+    const hook = vi.fn(async (event: string) => event === "beforeMcp" ? "resource is blocked by the hook" : undefined);
     await evaluate("MCP download hook veto", [tools(call("FetchMcpResource", { server: "fixture", uri: "fixture://document", downloadPath: file })), answer("Hook blocked the download.")], { onHook: hook });
     expect(hook).toHaveBeenCalledWith("beforeMcp", expect.objectContaining({ server: "fixture" }), "FetchMcpResource", expect.any(AbortSignal));
     expect(read).not.toHaveBeenCalled();

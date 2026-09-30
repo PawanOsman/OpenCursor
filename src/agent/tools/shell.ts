@@ -10,10 +10,11 @@
 import { safePath, getWorkspaceRoot } from "../../context/workspaceUtils";
 import { defineTool, type ToolContext, type ToolResult } from "./types";
 import type { ToolOutcome } from "../toolOutcome";
+import { spawnPtyCommand, getInteractiveTerminal, terminalDimensions } from "../ptyRuntime";
 import {
   nextShellId, registerShellJob, getOwnedShell, shellOutcome,
   finishShellTranscript, waitForShell, renderShell, pushShellOutput,
-  getShellSession, spawnShellCommand, killShellProcess, applyCwdSideEffect,
+  getShellSession, spawnShellCommand, trackShellProcess, killShellProcess, applyCwdSideEffect,
   type BgShell, type ShellNotify,
 } from "./shared";
 
@@ -117,7 +118,7 @@ export const runTerminalTool = defineTool("Shell", true, async (input, abortSign
   const sh: BgShell = {
     id: nextShellId(), ownerKey, sessionKey, command,
     output: "", outputChars: 0, done: false, exitCode: null,
-    startedAt: Date.now(), status: "running", cwd, notify: buildNotify(input, ctx),
+    startedAt: Date.now(), status: "running", cwd, notify: buildNotify(input, ctx), tty: input.tty === true,
   };
   try { await registerShellJob(sh); }
   catch (error) {
@@ -146,7 +147,8 @@ export const runTerminalTool = defineTool("Shell", true, async (input, abortSign
   let proc: ReturnType<typeof spawnShellCommand>;
   try {
     abortSignal?.throwIfAborted();
-    proc = spawnShellCommand(command, cwd);
+    proc = input.tty === true ? await spawnPtyCommand(command, cwd, input.cols, input.rows, abortSignal) : spawnShellCommand(command, cwd);
+    if (input.tty === true) trackShellProcess(proc);
   } catch (error) {
     const status = abortSignal?.aborted ? cancellation(abortSignal) : "failed";
     settle(status === "timed_out" ? "timeout" : status, null,
@@ -261,4 +263,28 @@ export const awaitShellTool = defineTool("AwaitShell", false, async (input, abor
     live.dispose();
     sh.outputListeners.delete(listener);
   }
+});
+
+/** Write/resize an owned native terminal; cancelling observation does not undo sent input. */
+export const writeStdinTool = defineTool("WriteStdin", true, async (input, signal, callId, ctx) => {
+  const sh = getOwnedShell(ctx?.shellOwnerKey ?? ctx?.shellSessionKey, String(input?.shell_id || ""));
+  if (!sh || sh.sessionKey !== ctx?.shellSessionKey) return failure("Interactive terminal is unavailable in this run or belongs to another conversation.");
+  if (!sh.tty || !sh.proc || sh.done) return failure("This job is not an active interactive terminal. Start Shell with tty=true.");
+  const terminal = getInteractiveTerminal(sh.proc);
+  if (!terminal) return failure("The native terminal has already closed.");
+  if (input.chars != null && (typeof input.chars !== "string" || input.chars.length > 64 * 1024)) return failure("Terminal input must be a string no larger than 64 KiB.");
+  try {
+    signal?.throwIfAborted();
+    if (input.cols != null || input.rows != null) {
+      const size = terminalDimensions(input.cols ?? terminal.cols, input.rows ?? terminal.rows);
+      terminal.resize(size.cols, size.rows);
+    }
+    if (input.terminate === true) {
+      const proc = sh.proc;
+      sh.abort?.();
+      const stopped = await killShellProcess(proc);
+      if (!stopped) return failure("Terminal termination requested, but process closure is unconfirmed.");
+    } else if (input.chars) terminal.write(input.chars);
+    return await awaitShellTool.execute({ shell_id: sh.id, block_until_ms: Math.min(30_000, Math.max(0, Number(input.block_until_ms) || 0)) }, signal, callId, ctx);
+  } catch (error) { return failure(error instanceof Error ? error.message : String(error)); }
 });
