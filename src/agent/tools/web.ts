@@ -101,16 +101,85 @@ async function ddgSearch(term: string, endpoint: string, signal: AbortSignal | u
   return parseDdgHtml(await r.text(), limit);
 }
 
+// ---- You.com search (optional provider) ----
+// When YDC_API_KEY is set in the environment, WebSearch prefers the You.com
+// Search API (https://you.com/docs/api-reference/search) over the DuckDuckGo
+// HTML scrape: stable JSON results with snippets instead of layout-dependent
+// parsing. Falls back to DuckDuckGo on any error, so default behaviour for
+// users who set nothing is unchanged.
+const YDC_SEARCH_URL = "https://api.ydc-index.io/search";
+
+function ydcApiKey(): string | undefined {
+  const k = process.env.YDC_API_KEY;
+  return k && k.trim() ? k.trim() : undefined;
+}
+
+function parseYdcResults(body: unknown, limit: number): SearchHit[] {
+  const hits: SearchHit[] = [];
+  const seen = new Set<string>();
+  const results = Array.isArray((body as { hits?: unknown })?.hits)
+    ? ((body as { hits: unknown[] }).hits ?? [])
+    : Array.isArray(body)
+      ? body
+      : [];
+  for (const raw of results) {
+    if (hits.length >= limit) break;
+    const h = raw as { title?: unknown; url?: unknown; description?: unknown; snippets?: unknown };
+    const url = typeof h.url === "string" ? h.url : "";
+    const title = typeof h.title === "string" ? h.title : "";
+    if (!url.startsWith("http") || !title) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    // The API may return per-hit "snippets" (array of strings) or "description".
+    let snippet: string | undefined;
+    if (Array.isArray(h.snippets)) {
+      const joined = h.snippets.filter((s): s is string => typeof s === "string" && s.length > 0).join(" ");
+      snippet = joined || undefined;
+    } else if (typeof h.description === "string" && h.description) {
+      snippet = h.description;
+    }
+    hits.push({ url, title, snippet });
+  }
+  return hits;
+}
+
+async function ydcSearch(term: string, signal: AbortSignal | undefined, limit: number): Promise<SearchHit[]> {
+  const key = ydcApiKey();
+  if (!key) throw new Error("YDC_API_KEY is not set");
+  const r = await fetch(`${YDC_SEARCH_URL}?query=${encodeURIComponent(term)}&num=${limit}`, {
+    headers: { "X-API-Key": key, accept: "application/json" },
+    signal,
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return parseYdcResults(await r.json().catch(() => null), limit);
+}
+
+/** Test seam: allows tests to override the You.com search implementation. */
+export const _internals = { ydcSearch, parseYdcResults, ydcApiKey };
+
 // ---- WebSearch ----
-// Returns ranked results (title, URL, snippet) from DuckDuckGo, with the lite
-// endpoint as a fallback when the HTML endpoint returns nothing.
+// Prefers the You.com Search API when YDC_API_KEY is set; otherwise scrapes
+// DuckDuckGo, with the lite endpoint as a fallback when the HTML endpoint
+// returns nothing.
 export const webSearchTool = defineTool("WebSearch", false, async (input, abortSignal) => {
   const term = String(input.search_term || "").trim();
   if (!term) return { output: "error: search_term is required" };
   const LIMIT = 10;
 
   try {
-    let hits = await ddgSearch(term, "https://html.duckduckgo.com/html/", abortSignal, LIMIT);
+    let hits: SearchHit[] = [];
+    let engine = "duckduckgo";
+    if (ydcApiKey()) {
+      try {
+        hits = await _internals.ydcSearch(term, abortSignal, LIMIT);
+        if (hits.length > 0) engine = "you.com";
+      } catch {
+        // You.com unavailable (bad key, network, HTTP error) — fall back below.
+      }
+    }
+    if (hits.length === 0) {
+      hits = await ddgSearch(term, "https://html.duckduckgo.com/html/", abortSignal, LIMIT);
+    }
     if (hits.length === 0) {
       // Fallback engine/endpoint.
       hits = await ddgSearch(term, "https://lite.duckduckgo.com/lite/", abortSignal, LIMIT);
@@ -118,7 +187,7 @@ export const webSearchTool = defineTool("WebSearch", false, async (input, abortS
     if (hits.length === 0) return { output: `No results found for "${term}". Try rephrasing the query or using WebFetch on a specific URL directly.` };
 
     const explanation = input.explanation ? String(input.explanation).trim() : "";
-    const header = `Web results for "${term}"${explanation ? ` — ${explanation}` : ""}:`;
+    const header = `Web results for "${term}"${explanation ? ` — ${explanation}` : ""} (via ${engine}):`;
     const body = hits
       .map((h, i) => {
         const lines = [`${i + 1}. ${h.title}`, `   ${h.url}`];
