@@ -347,9 +347,9 @@ function useStableCallback<Args extends unknown[], Result>(callback: (...args: A
 /** A sent user message. Memoized with stable handlers so settled messages are
  *  not re-rendered on every streaming frame of a long conversation. */
 /** Guidance the user added mid-run, shown inline in the work it changed. */
-function SteeringNote({ text }: { text: string }) {
+function SteeringNote({ text, action }: { text: string; action?: React.ReactNode }) {
   return <div className="steering-note" role="note" aria-label="Your update to the running task">
-    <span className="steering-note-label"><Icon name="steer" size={12} /> You</span>
+    <div className="steering-note-head"><span className="steering-note-label"><Icon name="steer" size={12} /> You</span>{action}</div>
     <div className="steering-note-text"><MentionText text={text} /></div>
   </div>;
 }
@@ -500,7 +500,7 @@ function CompactionCard({ block }: { block: import("./types").AssistantBlock & {
   );
 }
 
-function ThinkingCard({ block }: { block: ThinkingBlock }) {
+function ThinkingCard({ block, action }: { block: ThinkingBlock; action?: React.ReactNode }) {
   const live = !block.endedAt;
   const [open, toggleOpen] = useLiveDisclosure(live);
   const bodyRef = React.useRef<HTMLDivElement>(null);
@@ -532,6 +532,7 @@ function ThinkingCard({ block }: { block: ThinkingBlock }) {
       <div className="thinking-head" onClick={toggleOpen}>
         <Icon name="brain" size={12} className="thinking-spark" />
         <span className="thinking-title">{title}</span>
+        {action}
         <Icon name={open ? "chevD" : "chevR"} size={12} className="thinking-chev" />
       </div>
       {open && <div className="thinking-body" ref={bodyRef} onScroll={event => {
@@ -606,7 +607,8 @@ function parentTaskCallId(turns: Turn[], nestedCallId: string): string | undefin
 
 /** Per-conversation "Allow editing model output" state for the visible chat. */
 const ModelOutputEditContext = React.createContext<{ enabled: boolean; disabled: boolean;
-  save: (turnIndex: number, blockIndex: number, kind: "text" | "thinking", previousText: string, text: string) => void } | null>(null);
+  save: (turnIndex: number, blockIndex: number, kind: EditableKind, previousText: string, text: string) => void } | null>(null);
+type EditableKind = "text" | "thinking" | "steering";
 
 /** Index of a rendered block in the stored turn (presentation may re-split the final text). */
 function sourceIndex(turn: AssistantTurn, block: AssistantBlock): number {
@@ -640,7 +642,17 @@ export function OutputEditor({ initialText, label, onSave, onCancel }: { initial
   </div>;
 }
 
-function EditableOutput({ turn, turnIndex, blockIndex, kind, children }: { turn: AssistantTurn; turnIndex?: number; blockIndex: number; kind: "text" | "thinking"; children: React.ReactNode }) {
+const EDIT_LABEL: Record<EditableKind, string> = { text: "Edit response text", thinking: "Edit thinking", steering: "Edit your update" };
+
+/**
+ * Edit affordance for one stored block. Cards with a header (thinking, steering)
+ * place the button in their own header row via `render(action)`; response text
+ * reserves a right-hand gutter for it, so the button never covers content.
+ */
+function EditableOutput({ turn, turnIndex, blockIndex, kind, render }: {
+  turn: AssistantTurn; turnIndex?: number; blockIndex: number; kind: EditableKind;
+  render: (action?: React.ReactNode) => React.ReactNode;
+}) {
   const edit = React.useContext(ModelOutputEditContext);
   const [editing, setEditing] = React.useState(false);
   // `turn` is the stored turn at `turnIndex`, so editors start from the exact
@@ -649,16 +661,18 @@ function EditableOutput({ turn, turnIndex, blockIndex, kind, children }: { turn:
   // streaming frame.
   const source = turnIndex === undefined ? undefined : turn.blocks[blockIndex];
   const original = source && source.kind === kind ? source.text : undefined;
-  React.useEffect(() => { if (edit?.disabled || !edit?.enabled) setEditing(false); }, [edit?.disabled, edit?.enabled]);
-  if (!edit?.enabled || turnIndex === undefined || original === undefined) return <>{children}</>;
-  const label = kind === "text" ? "Edit response text" : "Edit thinking";
+  // The user's own steering updates are always editable; model output only with the opt-in.
+  const enabled = !!edit && (kind === "steering" || edit.enabled);
+  React.useEffect(() => { if (edit?.disabled || !enabled) setEditing(false); }, [edit?.disabled, enabled]);
+  if (!edit || !enabled || turnIndex === undefined || original === undefined) return <>{render()}</>;
+  const label = EDIT_LABEL[kind];
   if (editing && !edit.disabled) return <OutputEditor initialText={original} label={label} onCancel={() => setEditing(false)}
     onSave={(text) => { setEditing(false); if (text !== original) edit.save(turnIndex, blockIndex, kind, original, text); }} />;
-  return <div className={`editable-output editable-${kind}`}>
-    {children}
-    <button type="button" className="message-action output-edit-action" aria-label={label} title={edit.disabled ? "Wait for the run to finish to edit" : label}
-      disabled={edit.disabled} onClick={() => setEditing(true)}><Icon name="edit" size={14} /></button>
-  </div>;
+  const action = <button type="button" className="message-action output-edit-action" aria-label={label}
+    title={edit.disabled ? "Wait for the run to finish to edit" : label} disabled={edit.disabled}
+    onClick={(event) => { event.stopPropagation(); setEditing(true); }}><Icon name="edit" size={14} /></button>;
+  if (kind !== "text") return <div className={`editable-output editable-${kind}`}>{render(action)}</div>;
+  return <div className="editable-output editable-text">{render()}{action}</div>;
 }
 
 const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals }: {
@@ -677,14 +691,16 @@ const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex,
       if (block.kind === "explore-group") return <ExploringSection key={index} tools={block.tools}
         live={live && index === items.length - 1} onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvals} />;
       if (block.kind === "text") return <div className="block-group" key={index}>
-        <EditableOutput turn={turn} turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="text"><Markdown text={block.text} /></EditableOutput>
+        <EditableOutput turn={turn} turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="text" render={() => <Markdown text={block.text} />} />
       </div>;
-      if (block.kind === "thinking") return <EditableOutput key={index} turn={turn} turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="thinking"><ThinkingCard block={block} /></EditableOutput>;
+      if (block.kind === "thinking") return <EditableOutput key={index} turn={turn} turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="thinking"
+        render={(action) => <ThinkingCard block={block} action={action} />} />;
       if (block.kind === "error") return <div className="block-group" key={index}><ErrorCard block={block} /></div>;
       if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} /></div>;
       if (block.kind === "max-steps") return <div className="block-group" key={index}><MaxStepsCard block={block} running={running} /></div>;
       if (block.kind === "verification") return <VerificationCard key={index} summary={block.summary} />;
-      if (block.kind === "steering") return <SteeringNote key={index} text={block.text} />;
+      if (block.kind === "steering") return <EditableOutput key={index} turn={turn} turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="steering"
+        render={(action) => <SteeringNote text={block.text} action={action} />} />;
       return <div className="block-group" key={index}>
         <ToolCard block={block} onImplement={onImplement} onOpenSubagent={onOpenSubagent} awaitingApproval={!!taskApprovals[block.callId]?.length} />
         {approvals[block.callId] && <ApprovalCard request={approvals[block.callId]} inline />}
@@ -1036,7 +1052,7 @@ export function App() {
     setConversations((list) => list.map((c) => c.id === activeId ? { ...c, allowModelOutputEdits: enabled } : c));
     post({ type: "setModelOutputEditing", convId: activeId, enabled });
   };
-  const saveOutputEdit = React.useCallback((turnIndex: number, blockIndex: number, kind: "text" | "thinking", previousText: string, text: string) => {
+  const saveOutputEdit = React.useCallback((turnIndex: number, blockIndex: number, kind: EditableKind, previousText: string, text: string) => {
     const convId = activeIdRef.current;
     const s = convId ? sessionsRef.current.get(convId) : undefined;
     if (!convId || !s || s.running) return;

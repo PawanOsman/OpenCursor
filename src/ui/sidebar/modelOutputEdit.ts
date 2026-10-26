@@ -15,7 +15,8 @@ import type { Turn } from "../../shared/turns";
 export interface ModelOutputEdit {
   turnIndex: number;
   blockIndex: number;
-  kind: "text" | "thinking";
+  /** `steering`: the user's own mid-run update, stored as a user step in the history. */
+  kind: "text" | "thinking" | "steering";
   /** The block text the user started from; a mismatch means the transcript moved on. */
   previousText: string;
   text: string;
@@ -32,7 +33,8 @@ export interface ModelOutputEditResult {
 type AssistantStep = Extract<Step, { kind: "assistant" }>;
 /** Steering stays inside its turn (a SteeringBlock), so it is not a request boundary. */
 const isRequest = (step: Step) => step.kind === "user" && !step.synthetic && !step.steering;
-const field = (kind: ModelOutputEdit["kind"]) => (step: AssistantStep) => (kind === "text" ? step.text : step.thinking) ?? "";
+const field = (kind: "text" | "thinking") => (step: AssistantStep) => (kind === "text" ? step.text : step.thinking) ?? "";
+const isSteering = (step: Step): step is Extract<Step, { kind: "user" }> => step.kind === "user" && !!step.steering;
 
 /** Steps produced in reply to the turn's user request, when turns and requests still align. */
 function segmentFor(turns: Turn[], steps: Step[], turnIndex: number): [number, number] | undefined {
@@ -54,6 +56,10 @@ function segmentFor(turns: Turn[], steps: Step[], turnIndex: number): [number, n
  * segment and the block's ordinal; fall back to the most recent exact match.
  */
 function locate(turns: Turn[], steps: Step[], edit: ModelOutputEdit): { indexes: number[]; partial?: boolean } | undefined {
+  if (edit.kind === "steering") {
+    const index = locateSteering(turns, steps, edit);
+    return index >= 0 ? { indexes: [index] } : undefined;
+  }
   const get = field(edit.kind);
   const turn = turns[edit.turnIndex];
   if (turn.role !== "assistant") return undefined;
@@ -92,6 +98,25 @@ function locate(turns: Turn[], steps: Step[], edit: ModelOutputEdit): { indexes:
   return index >= 0 ? { indexes: [index], partial: true } : undefined;
 }
 
+/** The steering step for this note: the turn's Nth steering step, else the latest with the same text. */
+function locateSteering(turns: Turn[], steps: Step[], edit: ModelOutputEdit): number {
+  const turn = turns[edit.turnIndex];
+  if (turn.role !== "assistant") return -1;
+  const ordinal = turn.blocks.slice(0, edit.blockIndex).filter((block) => block.kind === "steering").length;
+  const segment = segmentFor(turns, steps, edit.turnIndex);
+  if (segment) {
+    const inTurn = [] as number[];
+    for (let i = segment[0]; i < segment[1]; i++) if (isSteering(steps[i])) inTurn.push(i);
+    const index = inTurn[ordinal];
+    if (index !== undefined && (steps[index] as Extract<Step, { kind: "user" }>).text === edit.previousText) return index;
+  }
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const step = steps[i];
+    if (isSteering(step) && step.text === edit.previousText) return i;
+  }
+  return -1;
+}
+
 /** The step without provider-signed or encrypted replay state. */
 function unsigned(step: AssistantStep): AssistantStep {
   const next: AssistantStep = { ...step, calls: step.calls.map(({ thoughtSignature: _signature, ...call }) => call) };
@@ -100,7 +125,7 @@ function unsigned(step: AssistantStep): AssistantStep {
 }
 
 /** Same step after the edit, as the provider should receive it. */
-function editedStep(step: AssistantStep, kind: ModelOutputEdit["kind"], text: string): AssistantStep {
+function editedStep(step: AssistantStep, kind: "text" | "thinking", text: string): AssistantStep {
   if (kind === "text") {
     // Text is replayed as ordinary assistant content; signed state for this
     // response is removed by the caller (see applyModelOutputEdit).
@@ -125,7 +150,7 @@ export function applyModelOutputEdit(turns: Turn[], steps: Step[], contextState:
   const turn = turns[edit.turnIndex];
   if (!turn || turn.role !== "assistant") throw new Error("Only assistant responses can be edited.");
   const block = turn.blocks[edit.blockIndex];
-  if (!block || block.kind !== edit.kind) throw new Error("Only assistant text and thinking can be edited.");
+  if (!block || block.kind !== edit.kind) throw new Error("Only assistant text, thinking and your steering updates can be edited.");
   if (block.text !== edit.previousText) throw new Error("This response changed while you were editing it. Reopen the editor and try again.");
   const isFinal = edit.kind === "text" && !turn.blocks.slice(edit.blockIndex + 1).some((later) => later.kind === "text");
   const nextTurns = turns.slice();
@@ -141,6 +166,10 @@ export function applyModelOutputEdit(turns: Turn[], steps: Step[], contextState:
   const { indexes } = found;
   const nextSteps = steps.slice();
   indexes.forEach((index, position) => {
+    if (edit.kind === "steering") {
+      nextSteps[index] = { ...(steps[index] as Extract<Step, { kind: "user" }>), text: edit.text };
+      return;
+    }
     const step = steps[index] as AssistantStep;
     let text = position === 0 ? edit.text : ""; // a joined block keeps its whole edited text in the first response
     if (found.partial) {

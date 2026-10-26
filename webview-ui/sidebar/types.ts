@@ -178,7 +178,7 @@ export type OutMessage =
   | { type: "selectConversation"; id: string }
   | { type: "deleteConversation"; id: string }
   | { type: "setModelOutputEditing"; convId: string; enabled: boolean }
-  | { type: "editModelOutput"; convId: string; turnIndex: number; blockIndex: number; kind: "text" | "thinking"; previousText: string; text: string }
+  | { type: "editModelOutput"; convId: string; turnIndex: number; blockIndex: number; kind: "text" | "thinking" | "steering"; previousText: string; text: string }
   | { type: "cancelRun"; convId?: string }
   | { type: "cancelSubagent"; callId: string; reason?: "timeout" | "user" }
   | { type: "answerQuestion"; callId: string; answers: Record<string, string[]> }

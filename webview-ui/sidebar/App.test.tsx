@@ -178,6 +178,44 @@ describe("editing model output", () => {
     expect(editButtons().length).toBeGreaterThan(0);
     expect(editButtons().every(button => button.disabled)).toBe(true);
   });
+
+  it("places each edit button inside its own block, not over the content", () => {
+    open(true);
+    expandWork();
+    const thinking = container.querySelector<HTMLButtonElement>('[aria-label="Edit thinking"]')!;
+    expect(thinking.closest(".thinking-head")).not.toBeNull();
+    // Opening the editor must not also toggle the thinking card.
+    const card = thinking.closest(".thinking-card")!;
+    const wasOpen = card.classList.contains("open");
+    act(() => thinking.click());
+    expect(container.querySelector('textarea[aria-label="Edit thinking"]')).not.toBeNull();
+    expect(container.querySelector(".thinking-card")?.classList.contains("open") ?? wasOpen).toBe(wasOpen);
+    const text = container.querySelector<HTMLButtonElement>('[aria-label="Edit response text"]')!;
+    expect(text.parentElement?.classList.contains("editable-text")).toBe(true);
+  });
+
+  it("lets the user edit their own steering update without the model-output opt-in", () => {
+    const steered = [
+      { role: "user", text: "Task A" },
+      { role: "assistant", blocks: [{ kind: "text", text: "Working" }, { kind: "steering", text: "Keep tabs", at: 2 }, { kind: "text", text: "Done" }], startedAt: 1, endedAt: 3 },
+    ];
+    initial({ turns: steered, runningConvIds: [] });
+    message({ type: "conversations", list: [{ id: "A", title: "A", updatedAt: 1, allowModelOutputEdits: false }], activeId: "A", runningConvIds: [] });
+    expandWork();
+    // Model output stays locked; the user's own update does not.
+    expect(editButtons().map(button => button.getAttribute("aria-label"))).toEqual(["Edit your update"]);
+    const edit = container.querySelector<HTMLButtonElement>('[aria-label="Edit your update"]')!;
+    expect(edit.closest(".steering-note-head")).not.toBeNull();
+    act(() => edit.click());
+    const field = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Edit your update"]')!;
+    expect(field.value).toBe("Keep tabs");
+    const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+    act(() => { setValue.call(field, "Use two spaces"); field.dispatchEvent(new Event("input", { bubbles: true })); });
+    vi.mocked(vscode.postMessage).mockClear();
+    act(() => { field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true })); });
+    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "editModelOutput", convId: "A", turnIndex: 1, blockIndex: 1, kind: "steering", previousText: "Keep tabs", text: "Use two spaces" });
+    expect(container.querySelector(".steering-note")?.textContent).toContain("Use two spaces");
+  });
 });
 
 describe("streaming thinking scroll", () => {

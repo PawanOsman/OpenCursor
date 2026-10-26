@@ -102,3 +102,58 @@ describe("editing model output", () => {
     expect(() => applyModelOutputEdit(turns, steps, undefined, { turnIndex: 2, blockIndex: 0, kind: "text", previousText: "", text: "x" })).toThrow();
   });
 });
+
+describe("editing a steering update", () => {
+  function steered() {
+    const steps: Step[] = [
+      { kind: "user", text: "Build the page" },
+      { kind: "assistant", text: "Starting", calls: [{ id: "c1", name: "Read", arguments: "{}", thoughtSignature: "sig-1" }], responsesReasoning: reasoning("r1") },
+      { kind: "tool-result", callId: "c1", name: "Read", output: "file", status: "completed" },
+      { kind: "user", text: "Use tabs", steering: true },
+      { kind: "assistant", text: "Using tabs", calls: [{ id: "c2", name: "Read", arguments: "{}", thoughtSignature: "sig-2" }], responsesReasoning: reasoning("r2") },
+      { kind: "tool-result", callId: "c2", name: "Read", output: "file", status: "completed" },
+      { kind: "user", text: "Use tabs", steering: true },
+      { kind: "assistant", text: "Done", calls: [] },
+    ];
+    const turns: Turn[] = [
+      { role: "user", text: "Build the page" },
+      { role: "assistant", blocks: [
+        { kind: "text", text: "Starting" },
+        { kind: "tool", callId: "c1", name: "Read", input: {}, status: "completed", result: "file" },
+        { kind: "steering", text: "Use tabs", at: 1 },
+        { kind: "text", text: "Using tabs" },
+        { kind: "tool", callId: "c2", name: "Read", input: {}, status: "completed", result: "file" },
+        { kind: "steering", text: "Use tabs", at: 2 },
+        { kind: "text", text: "Done" },
+      ] },
+    ];
+    return { steps, turns };
+  }
+
+  it("rewrites the matching steering step and the note, and the next request sends the new text", () => {
+    const { steps, turns } = steered();
+    const result = applyModelOutputEdit(turns, steps, undefined, { turnIndex: 1, blockIndex: 2, kind: "steering", previousText: "Use tabs", text: "Use two spaces" });
+    expect(result.historyUpdated).toBe(true);
+    expect((result.turns[1] as any).blocks[2]).toMatchObject({ kind: "steering", text: "Use two spaces" });
+    // The first of two identical updates is the one edited (by position in the turn).
+    expect(result.steps[3]).toEqual({ kind: "user", text: "Use two spaces", steering: true });
+    expect(result.steps[6]).toEqual({ kind: "user", text: "Use tabs", steering: true });
+    expect(JSON.stringify(buildMessages("system", result.steps))).toContain("Use two spaces");
+  });
+
+  it("keeps signed state before the update and drops it after", () => {
+    const { steps, turns } = steered();
+    const result = applyModelOutputEdit(turns, steps, undefined, { turnIndex: 1, blockIndex: 2, kind: "steering", previousText: "Use tabs", text: "Use two spaces" });
+    expect(at(result.steps, 1).responsesReasoning).toEqual(reasoning("r1"));
+    expect(at(result.steps, 1).calls[0].thoughtSignature).toBe("sig-1");
+    expect(at(result.steps, 4).responsesReasoning).toBeUndefined();
+    expect(at(result.steps, 4).calls[0].thoughtSignature).toBeUndefined();
+  });
+
+  it("edits the second of two identical updates when that note is chosen", () => {
+    const { steps, turns } = steered();
+    const result = applyModelOutputEdit(turns, steps, undefined, { turnIndex: 1, blockIndex: 5, kind: "steering", previousText: "Use tabs", text: "Use tabs everywhere" });
+    expect(result.steps[3]).toEqual({ kind: "user", text: "Use tabs", steering: true });
+    expect(result.steps[6]).toEqual({ kind: "user", text: "Use tabs everywhere", steering: true });
+  });
+});

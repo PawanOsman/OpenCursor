@@ -4285,6 +4285,7 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 /* Mid-run guidance: part of the running task, so it sits in the work stream
    instead of opening a new message group. */
 .steering-note { display: flex; flex-direction: column; gap: 3px; width: fit-content; max-width: min(420px, 92%); margin: 6px 0 6px auto; padding: 7px 11px; border-radius: 12px; background: var(--user-bubble); font-size: var(--fs-base); line-height: calc(var(--fs-base) + 6px); overflow-wrap: anywhere; }
+.steering-note-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 16px; }
 .steering-note-label { display: inline-flex; align-items: center; gap: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 14px; }
 .steering-note-text { white-space: pre-wrap; }
 .verification-card { margin: 12px 0; border: 1px solid var(--vscode-widget-border, #333); border-radius: 8px; padding: 9px 11px; font-size: 12px; }

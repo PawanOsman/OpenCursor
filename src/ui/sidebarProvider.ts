@@ -865,9 +865,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const id = typeof data.convId === "string" ? data.convId : undefined;
     const conversation = id ? this._store.get(id) : undefined;
     if (!id || !conversation) throw new Error("Conversation no longer exists.");
-    if (!conversation.allowModelOutputEdits) throw new Error("Turn on \"Allow editing model output\" for this conversation first.");
-    if (this._sessions.has(id) || this._queueWorkers.has(id)) throw new Error("Wait for the active run to finish before editing its output.");
-    if (!Number.isSafeInteger(data.turnIndex) || !Number.isSafeInteger(data.blockIndex) || (data.kind !== "text" && data.kind !== "thinking")
+    // Steering updates are the user's own words, editable like their messages;
+    // changing the model's output still needs the per-conversation opt-in.
+    if (data.kind !== "steering" && !conversation.allowModelOutputEdits) throw new Error("Turn on \"Allow editing model output\" for this conversation first.");
+    if (this._sessions.has(id) || this._queueWorkers.has(id)) throw new Error("Wait for the active run to finish before editing it.");
+    if (!Number.isSafeInteger(data.turnIndex) || !Number.isSafeInteger(data.blockIndex) || (data.kind !== "text" && data.kind !== "thinking" && data.kind !== "steering")
       || typeof data.text !== "string" || typeof data.previousText !== "string") throw new Error("Invalid edit.");
     const result = applyModelOutputEdit(conversation.turns, conversation.steps, conversation.contextState, {
       turnIndex: data.turnIndex!, blockIndex: data.blockIndex!, kind: data.kind, previousText: data.previousText, text: data.text,

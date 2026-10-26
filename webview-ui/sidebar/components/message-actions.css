@@ -57,19 +57,22 @@
 
 /* "Allow editing model output": per-block edit affordance and inline editor. */
 .editable-output { position: relative; }
-.editable-output > .output-edit-action {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 24px;
-  height: 24px;
-  flex-basis: 24px;
+/* The pencil lives inside the block it edits: in the header row of cards
+   (thinking, steering) and in a reserved gutter beside response text. */
+.editable-output .output-edit-action {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  margin: -3px 0;
   opacity: 0;
-  background: var(--vscode-sideBar-background, transparent);
-  transition: opacity 100ms ease;
+  transition: opacity 100ms ease, background-color 100ms ease;
 }
-.editable-output:hover > .output-edit-action,
-.editable-output:focus-within > .output-edit-action { opacity: 1; }
+.editable-output:hover .output-edit-action,
+.editable-output:focus-within .output-edit-action,
+.editable-output .output-edit-action:focus-visible { opacity: 1; }
+.editable-text { padding-right: 28px; }
+.editable-text > .output-edit-action { position: absolute; top: 2px; right: 0; margin: 0; }
+.thinking-head .output-edit-action { margin-left: auto; }
 .output-editor {
   display: flex;
   flex-direction: column;
@@ -93,4 +96,4 @@
 .output-editor-input:focus { outline: 1px solid var(--vscode-focusBorder, var(--fg-dim)); outline-offset: -1px; }
 .output-editor-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .output-editor-hint { margin-right: auto; color: var(--fg-dim); font-size: 11px; }
-@media (prefers-reduced-motion: reduce) { .editable-output > .output-edit-action { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .editable-output .output-edit-action { transition: none; } }
