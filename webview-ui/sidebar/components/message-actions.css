@@ -54,3 +54,43 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* "Allow editing model output": per-block edit affordance and inline editor. */
+.editable-output { position: relative; }
+.editable-output > .output-edit-action {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 24px;
+  height: 24px;
+  flex-basis: 24px;
+  opacity: 0;
+  background: var(--vscode-sideBar-background, transparent);
+  transition: opacity 100ms ease;
+}
+.editable-output:hover > .output-edit-action,
+.editable-output:focus-within > .output-edit-action { opacity: 1; }
+.output-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+.output-editor-input {
+  width: 100%;
+  min-height: 60px;
+  box-sizing: border-box;
+  resize: none;
+  overflow: hidden;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-input-border, var(--border, transparent));
+  border-radius: var(--control-radius-sm, 6px);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground, var(--fg));
+  font: inherit;
+  line-height: 1.5;
+}
+.output-editor-input:focus { outline: 1px solid var(--vscode-focusBorder, var(--fg-dim)); outline-offset: -1px; }
+.output-editor-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.output-editor-hint { margin-right: auto; color: var(--fg-dim); font-size: 11px; }
+@media (prefers-reduced-motion: reduce) { .editable-output > .output-edit-action { transition: none; } }

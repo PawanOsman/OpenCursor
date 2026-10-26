@@ -347,7 +347,9 @@ export async function scanFiles(root: string, opts: ScanOptions = {}): Promise<S
 
         // Nested .gitignore files refine pruning for their subtree.
         if (useGitignore && dir.rel) {
-          gitRules = gitRules.concat(await directoryIgnoreRules(dir.abs, dir.rel));
+          // Await before reading gitRules: concurrent workers append to the live array.
+          const nested = await directoryIgnoreRules(dir.abs, dir.rel);
+          if (nested.length) gitRules = gitRules.concat(nested);
         }
 
         for (const e of entries) {

@@ -39,6 +39,22 @@ describe("shared provider catalog", () => {
     expect(MODEL_CATALOG.find(model => model.id === "gpt-6-astra" && kindMatches(model.kind, "openai"))?.options?.some(option => option.key === "reasoning_effort")).toBe(true);
   });
 
+  it("lists the October 2026 frontier models on every provider that serves them", () => {
+    const has = (kind: string, id: string) => MODEL_CATALOG.some(model => model.id === id && kindMatches(model.kind, kind));
+    for (const [kind, id] of [
+      ["anthropic", "claude-sonnet-5-5"], ["claude-code", "claude-sonnet-5-5"], ["anthropic", "claude-haiku-5-5"], ["claude-code", "claude-haiku-5-5"],
+      ["openai", "gpt-6.1-sol"], ["codex", "gpt-6.1-sol"], ["openai", "gpt-6.1-terra"], ["google", "gemini-4-argon"],
+      ["github", "claude-sonnet-5.5"], ["github", "claude-haiku-5.5"], ["github", "gpt-6.1-sol"], ["kiro", "claude-opus-5.5"],
+      ["antigravity", "gemini-4-argon-high"], ["antigravity", "claude-sonnet-5-5"], ["opencode-go", "claude-haiku-5-5"],
+      ["xai", "grok-4.7"], ["moonshot", "kimi-k3.1-pro"],
+    ] as const) expect(has(kind, id), `${kind}/${id}`).toBe(true);
+    const effortOf = (id: string, kind: string) => MODEL_CATALOG.find(model => model.id === id && kindMatches(model.kind, kind))?.options?.find(option => option.key === "reasoning_effort")?.values;
+    expect(effortOf("gpt-6.1-sol", "openai")).not.toContain("none");
+    expect(effortOf("gpt-6.1-terra", "openai")).toContain("none");
+    expect(effortOf("gemini-4-argon", "google")).toEqual(["low", "medium", "high"]);
+    expect(MODEL_CATALOG.find(model => model.id === "claude-sonnet-5-5")?.options?.find(option => option.key === "thinking")?.values).toEqual(["adaptive"]);
+  });
+
   it("uses the exact supported Antigravity list and excludes media-only/free-retired models", () => {
     const actual = MODEL_CATALOG.filter(model => kindMatches(model.kind, "antigravity")).map(model => model.id).sort();
     const expected = PROVIDER_MODELS.filter(model => model.kind === "antigravity").map(model => model.id).sort();

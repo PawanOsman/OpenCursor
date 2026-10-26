@@ -48,7 +48,7 @@ vi.mock("../agent/oauth", () => ({
 }));
 vi.mock("../stores/settingsManager", () => ({ DEFAULT_SETTINGS: {} }));
 vi.mock("../agent/provider", () => ({ listModels: vi.fn() }));
-vi.mock("./webviewHtml", () => ({ renderWebviewHtml: () => "<html></html>" }));
+vi.mock("./webviewHtml", () => ({ renderWebviewHtml: () => "<html></html>", webviewResourceRoots: () => [] }));
 vi.mock("../stores/featureStore", () => ({ MODEL_CATALOG: [], PROVIDER_PRESETS: { deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", needsKey: true } },
   getProviderApiKeys: (provider: any) => provider.apiKeys ?? [{ id: provider.id, label: "Key 1", enabled: true }] }));
 vi.mock("../context/workspaceContext", () => ({ listRules: vi.fn(), listSkills: vi.fn() }));
@@ -56,7 +56,7 @@ vi.mock("../integrations/mcpClient", () => ({ mcpManager: { status: () => [], sy
 vi.mock("../agent/personas", () => ({ BUILTIN_PERSONAS: [] }));
 vi.mock("../agent/semanticIndex", () => ({ onIndexStatus: () => () => {} }));
 vi.mock("../agent/docsIndex", () => ({ onDocsStatus: () => () => {} }));
-vi.mock("../context/workspaceUtils", () => ({ getWorkspaceRoot: vi.fn() }));
+vi.mock("../context/workspaceUtils", () => ({ getWorkspaceRoot: vi.fn(), findWorkspaceRoot: vi.fn() }));
 vi.mock("../agent/llamacpp", () => ({ onLlamacppStatus: () => ({ dispose() {} }) }));
 vi.mock("../agent/ollama", () => ({ onOllamaStatus: () => ({ dispose() {} }) }));
 vi.mock("../stores/usageStore", () => ({

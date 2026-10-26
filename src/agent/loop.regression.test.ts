@@ -1535,3 +1535,33 @@ describe("optional built-in schema discovery", () => {
     expectFinished(events, "Interactive input is disabled for this run.", 2);
   });
 });
+
+describe("batch ordering and abort registration", () => {
+  it("runs a batch in emission order, parallelising only contiguous reads", async () => {
+    await run([
+      toolTurn(
+        call("Write", { path: "a.ts", contents: "1" }, "w1"),
+        call("Read", { path: "a.ts" }, "r1"),
+        call("Grep", { pattern: "x", path: "." }, "r2"),
+        call("Write", { path: "b.ts", contents: "2" }, "w2"),
+        call("Read", { path: "b.ts" }, "r3"),
+      ),
+      answer("Done."),
+    ]);
+    const names = fixture.executions.map((e) => e.name);
+    expect(names[0]).toBe("Write");
+    expect(names.slice(1, 3).sort()).toEqual(["Grep", "Read"]);
+    expect(names.slice(3)).toEqual(["Write", "Read"]);
+  });
+  it("makes a settled call's registered abort inert", async () => {
+    const aborts = new Map<string, () => void>();
+    let toolSignal: AbortSignal | undefined;
+    vi.spyOn(TOOLS.Read, "execute").mockImplementation(async (_input, signal) => { toolSignal = signal; return { output: "file contents" }; });
+    await run([toolTurn(call("Read", { path: "a.ts" }, "read-1")), answer("Done.")], {
+      registerSubagentAbort: (id, abort) => { aborts.set(id, abort); },
+    });
+    expect(aborts.has("read-1")).toBe(true);
+    aborts.get("read-1")!();
+    expect(toolSignal?.aborted).toBe(false);
+  });
+});

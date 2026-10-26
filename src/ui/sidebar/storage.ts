@@ -10,11 +10,11 @@
 import type * as vscode from "vscode";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { getWorkspaceRoot } from "../../context/workspaceUtils";
+import { findWorkspaceRoot } from "../../context/workspaceUtils";
 
 export function workspaceStorageDirectory(context: vscode.ExtensionContext): string | undefined {
   if (context.storageUri?.fsPath) return context.storageUri.fsPath;
   if (!context.globalStorageUri?.fsPath) return undefined;
-  const workspace = getWorkspaceRoot() ?? "no-workspace";
+  const workspace = findWorkspaceRoot() ?? "no-workspace";
   return path.join(context.globalStorageUri.fsPath, "workspaces", createHash("sha256").update(workspace).digest("hex").slice(0, 24));
 }

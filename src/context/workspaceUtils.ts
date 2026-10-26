@@ -18,19 +18,31 @@ export function withWorkspaceRoot<T>(root: string | undefined, work: () => T): T
 	return root ? workspaceScope.run(path.resolve(root), work) : work();
 }
 
-export function getWorkspaceRoot(): string {
+/**
+ * The conversation-scoped root, else the first open workspace folder, else
+ * `undefined` when no folder is open. Never guesses from the host's cwd (which
+ * is VS Code's install/launch directory, not a user project).
+ */
+export function findWorkspaceRoot(): string | undefined {
 	const scoped = workspaceScope.getStore();
 	if (scoped) return scoped;
 	const folders = vscode.workspace.workspaceFolders;
-	if (folders && folders.length > 0) {
-		return folders[0].uri.fsPath;
-	}
-	return process.cwd();
+	return folders && folders.length > 0 ? folders[0].uri.fsPath : undefined;
+}
+
+/**
+ * @deprecated Prefer `findWorkspaceRoot()`, which reports "no folder open".
+ * Kept string-typed for agent tools that still require a base directory; it
+ * falls back to the process cwd only when no folder is open.
+ */
+export function getWorkspaceRoot(): string {
+	return findWorkspaceRoot() ?? process.cwd();
 }
 
 /** Recently viewed files (workspace-relative), most recent first. */
 export function getRecentFiles(): string[] {
-	const root = getWorkspaceRoot();
+	const root = findWorkspaceRoot();
+	if (!root) return [];
 	const out: string[] = [];
 	for (const tab of vscode.window.tabGroups.all.flatMap((g) => g.tabs)) {
 		const input = tab.input as { uri?: vscode.Uri } | undefined;
@@ -119,7 +131,7 @@ export function normalizeToolPaths(toolName: string, input: any, root = getWorks
 		SemanticSearch: ["target_directories"], StrReplace: ["path"], Write: ["path"],
 		Delete: ["path"], EditNotebook: ["target_notebook"], ReadLints: ["paths"],
 		Task: ["file_attachments"], FetchMcpResource: ["downloadPath"],
-		Shell: ["working_directory"],
+		Shell: ["working_directory"], Rg: ["working_directory"],
 		GoToDefinition: ["path"], FindReferences: ["path"], RenamePreview: ["path"],
 	};
 	const out = { ...input };

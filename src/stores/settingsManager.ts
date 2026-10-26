@@ -47,16 +47,28 @@ export class SettingsManager {
     };
   }
 
-  public async saveSettings(settings: Settings): Promise<void> {
+  /**
+   * Persist only the keys whose effective value actually changed. A key the
+   * workspace overrides is updated in the workspace (where it is defined), so a
+   * workspace-scoped value is never copied into the user's Global settings.
+   */
+  public async saveSettings(settings: Partial<Settings>): Promise<void> {
     const config = vscode.workspace.getConfiguration("ocursor");
-    await Promise.all([
-      config.update("model", settings.model, vscode.ConfigurationTarget.Global),
-      config.update("maxResponseLength", settings.maxResponseLength, vscode.ConfigurationTarget.Global),
-      config.update("enableWorkspaceContext", settings.enableWorkspaceContext, vscode.ConfigurationTarget.Global),
-      config.update("enableFileReading", settings.enableFileReading, vscode.ConfigurationTarget.Global),
-      config.update("enableTerminalSuggestions", settings.enableTerminalSuggestions, vscode.ConfigurationTarget.Global),
-      config.update("systemPrompt", settings.systemPrompt, vscode.ConfigurationTarget.Global),
-    ]);
+    const current = this.getSettings();
+    const updates: Thenable<void>[] = [];
+    for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]) {
+      if (!(key in settings)) continue;
+      const value = settings[key];
+      if (value === undefined || value === current[key]) continue;
+      const inspected = config.inspect(key);
+      const target = inspected?.workspaceFolderValue !== undefined
+        ? vscode.ConfigurationTarget.WorkspaceFolder
+        : inspected?.workspaceValue !== undefined
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+      updates.push(config.update(key, value, target));
+    }
+    await Promise.all(updates);
   }
 
   public async getApiKey(): Promise<string | undefined> {

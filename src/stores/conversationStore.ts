@@ -38,6 +38,8 @@ export interface Conversation {
   steeringQueue?: QueuedMessage[];
   steering?: string[];
   workspaceRoot?: string;
+  /** User opted in to editing this conversation's assistant text and reasoning. */
+  allowModelOutputEdits?: boolean;
 }
 
 export interface ConversationSummary {
@@ -46,6 +48,42 @@ export interface ConversationSummary {
   updatedAt: number;
   archivedAt?: number;
   excerpt?: string;
+  allowModelOutputEdits?: boolean;
+}
+
+/** Run evidence kept per conversation; the durable run journal holds the full record. */
+export const MAX_RUN_EVENTS = 500;
+/** Queue outcomes deduplicate retransmitted requests, so they outlive ordinary events. */
+const MAX_QUEUE_EVENTS = 500;
+export function capRunEvents<T extends { type: string }>(events: T[]): T[] {
+  if (events.length <= MAX_RUN_EVENTS) return events;
+  const queue = events.filter((event) => event.type.startsWith("queue.")).slice(-MAX_QUEUE_EVENTS);
+  const other = events.filter((event) => !event.type.startsWith("queue.")).slice(-MAX_RUN_EVENTS);
+  const keep = new Set<T>([...queue, ...other]);
+  return events.filter((event) => keep.has(event));
+}
+/** Archived transcripts keep only a preview of long tool output. */
+const ARCHIVED_TOOL_OUTPUT = 4_000;
+function clip(text: string): string {
+  return text.length > ARCHIVED_TOOL_OUTPUT ? `${text.slice(0, ARCHIVED_TOOL_OUTPUT)}
+… [${text.length - ARCHIVED_TOOL_OUTPUT} characters of archived tool output trimmed]` : text;
+}
+function trimTurns(turns: Turn[]): Turn[] {
+  const trimBlocks = <B extends { kind: string }>(blocks: B[]): B[] => blocks.map((block) => {
+    if (block.kind !== "tool") return block;
+    const tool = block as unknown as { result?: string; subBlocks?: { kind: string }[] };
+    return { ...block, ...(tool.result ? { result: clip(tool.result) } : {}), ...(tool.subBlocks ? { subBlocks: trimBlocks(tool.subBlocks) } : {}) };
+  });
+  return turns.map((turn) => turn.role === "assistant" ? { ...turn, blocks: trimBlocks(turn.blocks) } : turn);
+}
+/** Trim stored tool output once a conversation is archived; the run journal keeps evidence. */
+export function trimArchivedConversation(conversation: Conversation): Conversation {
+  return {
+    ...conversation,
+    turns: trimTurns(conversation.turns),
+    steps: conversation.steps.map((step) => step.kind === "tool-result" ? { ...step, output: clip(step.output), image: undefined } : step),
+    runEvents: (conversation.runEvents ?? []).filter((event) => event.type.startsWith("queue.")).slice(-MAX_QUEUE_EVENTS),
+  };
 }
 
 const KEY = "ocursor.conversations";
@@ -62,7 +100,7 @@ type StoreState = {
 // A single synchronous view per workspace prevents competing live sessions from
 // losing each other's changes while VS Code asynchronously flushes its Memento.
 const sharedStates = new WeakMap<vscode.Memento, StoreState>();
-type ConversationPatch = Partial<Pick<Conversation, "steps" | "contextState" | "turns" | "title" | "personaId" | "usedTokens" | "archivedAt" | "goal" | "queue" | "reviewTarget" | "runEvents" | "steeringQueue" | "steering" | "workspaceRoot">>;
+type ConversationPatch = Partial<Pick<Conversation, "steps" | "contextState" | "turns" | "title" | "personaId" | "usedTokens" | "archivedAt" | "goal" | "queue" | "reviewTarget" | "runEvents" | "steeringQueue" | "steering" | "workspaceRoot" | "allowModelOutputEdits">>;
 
 export class ConversationStore {
   private readonly cache: StoreState;
@@ -142,7 +180,7 @@ export class ConversationStore {
       })
       .filter((c) => c.matches)
       .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt, archivedAt: c.archivedAt, excerpt: c.excerpt }));
+      .map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt, archivedAt: c.archivedAt, excerpt: c.excerpt, ...(c.allowModelOutputEdits ? { allowModelOutputEdits: true } : {}) }));
   }
 
   get(id: string): Conversation | undefined {
@@ -194,7 +232,23 @@ export class ConversationStore {
     const list = [...this.cache.conversations];
     const i = list.findIndex((c) => c.id === id);
     if (i === -1) return Promise.resolve();
-    list[i] = { ...list[i], ...structuredClone(patch), updatedAt: Date.now() };
+    const current = list[i];
+    // Frequent saves (token usage, goal counters, unchanged turns) must not
+    // rewrite the whole store when nothing actually changed.
+    const changed = (Object.keys(patch) as (keyof ConversationPatch)[]).filter((key) => {
+      const next = patch[key], previous = current[key];
+      if (next === previous) return false;
+      // Transcripts are compared by identity; deep comparison would cost as much as saving.
+      if (key === "turns" || key === "steps" || key === "contextState" || key === "runEvents") return true;
+      if (next === undefined || previous === undefined || typeof next !== "object" || typeof previous !== "object") return true;
+      return JSON.stringify(next) !== JSON.stringify(previous);
+    });
+    if (!changed.length) return this.cache.latestWrites.get(KEY) ?? Promise.resolve();
+    const changes = Object.fromEntries(changed.map((key) => [key, patch[key]])) as ConversationPatch;
+    if (changes.runEvents) changes.runEvents = capRunEvents(changes.runEvents);
+    let next: Conversation = { ...current, ...structuredClone(changes), updatedAt: Date.now() };
+    if (changes.archivedAt && !current.archivedAt) next = trimArchivedConversation(next);
+    list[i] = next;
     return this.persist(list);
   }
 
@@ -292,7 +346,7 @@ export class ConversationStore {
 
   async appendRunEvent(id: string, event: { runId: string; type: string; at: number; data?: unknown }): Promise<void> {
     const conversation = this.cache.conversations.find(conversation => conversation.id === id);
-    if (conversation) await this.update(id, { runEvents: [...conversation.runEvents ?? [], event].slice(-2000) });
+    if (conversation) await this.update(id, { runEvents: [...conversation.runEvents ?? [], event] });
   }
 
   /** A barrier for writes already submitted; later token saves cannot extend it. */

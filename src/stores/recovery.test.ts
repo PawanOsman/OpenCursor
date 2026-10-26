@@ -135,8 +135,9 @@ it("preserves undo tracking when acceptance persistence fails and retries restor
   const root = await fixture(), file = path.join(root, "code.txt"), journal = path.join(root, "pending-edits.json"), saved = path.join(root, "saved.json");
   await fs.writeFile(file, "after");
   const store = new PendingChangesStore(); await store.initialize(root); store.record(file, "before", "after", true);
+  await store.flush();
   await fs.rename(journal, saved); await fs.mkdir(journal);
-  expect(() => store.accept(file)).toThrow(); expect(store.count()).toBe(1);
+  await expect(store.accept(file)).rejects.toThrow(); expect(store.count()).toBe(1);
   await expect(store.reject(file)).rejects.toThrow(); expect(store.count()).toBe(1);
   expect(await fs.readFile(file, "utf8")).toBe("before");
   await fs.rmdir(journal); await fs.rename(saved, journal);
@@ -153,8 +154,39 @@ it("rejects corrupted backup contents and out-of-storage backup references", asy
   await expect(restarted.reject(file)).rejects.toThrow("backup is corrupt"); expect(await fs.readFile(file, "utf8")).toBe("after");
   const journal = path.join(root, "pending-edits.json"), data = JSON.parse(await fs.readFile(journal, "utf8"));
   data.records[0].backupPath = file; await fs.writeFile(journal, JSON.stringify(data));
-  await expect(new PendingChangesStore().initialize(root)).rejects.toThrow("backup path");
+  // A corrupt journal no longer blocks activation: it is quarantined for inspection.
+  const quarantinedStore = new PendingChangesStore();
+  const result = await quarantinedStore.initialize(root);
+  expect(result.error).toContain("backup path");
+  expect(path.basename(result.quarantined!)).toMatch(/^pending-edits\.json\.corrupt-\d+$/);
+  expect(JSON.parse(await fs.readFile(result.quarantined!, "utf8")).records[0].backupPath).toBe(file);
+  expect(quarantinedStore.count()).toBe(0);
   expect(await fs.readFile(file, "utf8")).toBe("after");
+});
+it("quarantines an unparsable journal instead of failing initialization", async () => {
+  const root = await fixture();
+  await fs.writeFile(path.join(root, "pending-edits.json"), "{not json");
+  const store = new PendingChangesStore();
+  const result = await store.initialize(root);
+  expect(result.quarantined).toBeDefined();
+  expect(await fs.readFile(result.quarantined!, "utf8")).toBe("{not json");
+  expect(store.count()).toBe(0);
+});
+it("keeps the journal metadata-only and stores original bytes in backup files", async () => {
+  const root = await fixture(), file = path.join(root, "code.txt");
+  await fs.writeFile(file, "after");
+  const store = new PendingChangesStore(); await store.initialize(root);
+  store.record(file, "before", "after", true);
+  store.record(file, "after", "after", true);
+  await store.flush();
+  const journal = JSON.parse(await fs.readFile(path.join(root, "pending-edits.json"), "utf8"));
+  expect(journal.records.every((row: any) => row.beforeBytes === undefined && typeof row.backupPath === "string")).toBe(true);
+  expect(await fs.readFile(journal.records[0].backupPath, "utf8")).toBe("before");
+  const restarted = new PendingChangesStore(); await restarted.initialize(root);
+  await restarted.reject(file);
+  expect(await fs.readFile(file, "utf8")).toBe("before");
+  await restarted.flush();
+  expect(await fs.readdir(path.join(root, "edit-backups"))).toEqual([]);
 });
 it("serializes independent journal instances while recovering the same torn tail", async () => {
   const root = await fixture(), a = new RunJournal(root, "thread"), b = new RunJournal(root, "thread");
@@ -162,4 +194,15 @@ it("serializes independent journal instances while recovering the same torn tail
   await Promise.all([a.append({ type: "one", at: 1 }), b.append({ type: "two", at: 2 })]);
   expect((await a.read()).map(row => row.type).sort()).toEqual(["one", "two"]);
   expect((await fs.readdir(root)).filter(name => name.includes(".torn-"))).toHaveLength(1);
+});
+it("reports a failed append without poisoning later appends, and deletes a conversation's journal", async () => {
+  const root = await fixture(), journal = new RunJournal(root, "thread");
+  await fs.mkdir(journal.file); // appending to a directory fails
+  await expect(journal.append({ type: "lost", at: 1 })).rejects.toThrow();
+  await fs.rmdir(journal.file);
+  await journal.append({ type: "kept", at: 2 });
+  expect((await journal.read()).map(row => row.type)).toEqual(["kept"]);
+  await journal.delete();
+  await expect(fs.stat(journal.file)).rejects.toThrow();
+  expect(await journal.read()).toEqual([]);
 });

@@ -1177,6 +1177,38 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "GPT-5.4 Mini"
         },
         {
+            "id": "gpt-5.5",
+            "name": "GPT-5.5"
+        },
+        {
+            "id": "gpt-5.6-luna",
+            "name": "GPT-5.6 Luna"
+        },
+        {
+            "id": "gpt-5.6-sol",
+            "name": "GPT-5.6 Sol"
+        },
+        {
+            "id": "gpt-5.6-terra",
+            "name": "GPT-5.6 Terra"
+        },
+        {
+            "id": "gpt-6-astra",
+            "name": "GPT-6 Astra"
+        },
+        {
+            "id": "gpt-6-luna",
+            "name": "GPT-6 Luna"
+        },
+        {
+            "id": "gpt-6-sol",
+            "name": "GPT-6 Sol"
+        },
+        {
+            "id": "gpt-6.1-sol",
+            "name": "GPT-6.1 Sol"
+        },
+        {
             "id": "claude-haiku-4.5",
             "name": "Claude Haiku 4.5"
         },
@@ -1201,6 +1233,42 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "Claude Opus 4.7"
         },
         {
+            "id": "claude-fable-5",
+            "name": "Claude Fable 5"
+        },
+        {
+            "id": "claude-fable-5.1",
+            "name": "Claude Fable 5.1"
+        },
+        {
+            "id": "claude-haiku-5.5",
+            "name": "Claude Haiku 5.5"
+        },
+        {
+            "id": "claude-opus-4.8",
+            "name": "Claude Opus 4.8"
+        },
+        {
+            "id": "claude-opus-4.8-fast",
+            "name": "Claude Opus 4.8 (Fast)"
+        },
+        {
+            "id": "claude-opus-5",
+            "name": "Claude Opus 5"
+        },
+        {
+            "id": "claude-opus-5.5",
+            "name": "Claude Opus 5.5"
+        },
+        {
+            "id": "claude-sonnet-5",
+            "name": "Claude Sonnet 5"
+        },
+        {
+            "id": "claude-sonnet-5.5",
+            "name": "Claude Sonnet 5.5"
+        },
+        {
             "id": "gemini-2.5-pro",
             "name": "Gemini 2.5 Pro"
         },
@@ -1213,6 +1281,18 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "Gemini 3.1 Pro"
         },
         {
+            "id": "gemini-3.7-flash",
+            "name": "Gemini 3.7 Flash"
+        },
+        {
+            "id": "gemini-3.8-flash",
+            "name": "Gemini 3.8 Flash"
+        },
+        {
+            "id": "gemini-4-argon",
+            "name": "Gemini 4 Argon"
+        },
+        {
             "id": "grok-code-fast-1",
             "name": "Grok Code Fast 1"
         },
@@ -1223,6 +1303,14 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
         {
             "id": "goldeneye-free-auto",
             "name": "GoldenEye"
+        },
+        {
+            "id": "kimi-k3",
+            "name": "Kimi K3"
+        },
+        {
+            "id": "mai-code-1.1-flash",
+            "name": "MAI-Code-1.1-Flash"
         },
         {
             "id": "text-embedding-3-small",
@@ -1257,6 +1345,38 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "GPT-5.4 Mini"
         },
         {
+            "id": "gpt-5.5",
+            "name": "GPT-5.5"
+        },
+        {
+            "id": "gpt-5.6-luna",
+            "name": "GPT-5.6 Luna"
+        },
+        {
+            "id": "gpt-5.6-sol",
+            "name": "GPT-5.6 Sol"
+        },
+        {
+            "id": "gpt-5.6-terra",
+            "name": "GPT-5.6 Terra"
+        },
+        {
+            "id": "gpt-6-astra",
+            "name": "GPT-6 Astra"
+        },
+        {
+            "id": "gpt-6-luna",
+            "name": "GPT-6 Luna"
+        },
+        {
+            "id": "gpt-6-sol",
+            "name": "GPT-6 Sol"
+        },
+        {
+            "id": "gpt-6.1-sol",
+            "name": "GPT-6.1 Sol"
+        },
+        {
             "id": "claude-haiku-4.5",
             "name": "Claude Haiku 4.5"
         },
@@ -1281,6 +1401,42 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "Claude Opus 4.7"
         },
         {
+            "id": "claude-fable-5",
+            "name": "Claude Fable 5"
+        },
+        {
+            "id": "claude-fable-5.1",
+            "name": "Claude Fable 5.1"
+        },
+        {
+            "id": "claude-haiku-5.5",
+            "name": "Claude Haiku 5.5"
+        },
+        {
+            "id": "claude-opus-4.8",
+            "name": "Claude Opus 4.8"
+        },
+        {
+            "id": "claude-opus-4.8-fast",
+            "name": "Claude Opus 4.8 (Fast)"
+        },
+        {
+            "id": "claude-opus-5",
+            "name": "Claude Opus 5"
+        },
+        {
+            "id": "claude-opus-5.5",
+            "name": "Claude Opus 5.5"
+        },
+        {
+            "id": "claude-sonnet-5",
+            "name": "Claude Sonnet 5"
+        },
+        {
+            "id": "claude-sonnet-5.5",
+            "name": "Claude Sonnet 5.5"
+        },
+        {
             "id": "gemini-2.5-pro",
             "name": "Gemini 2.5 Pro"
         },
@@ -1293,6 +1449,18 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "Gemini 3.1 Pro"
         },
         {
+            "id": "gemini-3.7-flash",
+            "name": "Gemini 3.7 Flash"
+        },
+        {
+            "id": "gemini-3.8-flash",
+            "name": "Gemini 3.8 Flash"
+        },
+        {
+            "id": "gemini-4-argon",
+            "name": "Gemini 4 Argon"
+        },
+        {
             "id": "grok-code-fast-1",
             "name": "Grok Code Fast 1"
         },
@@ -1303,6 +1471,14 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
         {
             "id": "goldeneye-free-auto",
             "name": "GoldenEye"
+        },
+        {
+            "id": "kimi-k3",
+            "name": "Kimi K3"
+        },
+        {
+            "id": "mai-code-1.1-flash",
+            "name": "MAI-Code-1.1-Flash"
         },
         {
             "id": "text-embedding-3-small",
@@ -1705,6 +1881,22 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
     ],
     "kiro": [
         {
+            "id": "claude-opus-5.5",
+            "name": "Claude Opus 5.5"
+        },
+        {
+            "id": "claude-opus-5.5-thinking",
+            "name": "Claude Opus 5.5 (Thinking)"
+        },
+        {
+            "id": "claude-opus-5.5-agentic",
+            "name": "Claude Opus 5.5 (Agentic)"
+        },
+        {
+            "id": "claude-opus-5.5-thinking-agentic",
+            "name": "Claude Opus 5.5 (Thinking + Agentic)"
+        },
+        {
             "id": "claude-opus-5",
             "name": "Claude Opus 5"
         },
@@ -1938,6 +2130,22 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
         }
     ],
     "kr": [
+        {
+            "id": "claude-opus-5.5",
+            "name": "Claude Opus 5.5"
+        },
+        {
+            "id": "claude-opus-5.5-thinking",
+            "name": "Claude Opus 5.5 (Thinking)"
+        },
+        {
+            "id": "claude-opus-5.5-agentic",
+            "name": "Claude Opus 5.5 (Agentic)"
+        },
+        {
+            "id": "claude-opus-5.5-thinking-agentic",
+            "name": "Claude Opus 5.5 (Thinking + Agentic)"
+        },
         {
             "id": "claude-opus-5",
             "name": "Claude Opus 5"
@@ -2295,6 +2503,10 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "maxOutputTokens": 64000
         },
         {
+            "id": "grok-4.7",
+            "name": "Grok 4.7"
+        },
+        {
             "id": "grok-4.5",
             "name": "Grok 4.5"
         },
@@ -2320,6 +2532,10 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "Grok Build",
             "contextLength": 500000,
             "maxOutputTokens": 64000
+        },
+        {
+            "id": "grok-4.7",
+            "name": "Grok 4.7"
         },
         {
             "id": "grok-4.5",
@@ -3524,6 +3740,10 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
     ],
     "xai": [
         {
+            "id": "grok-4.7",
+            "name": "Grok 4.7"
+        },
+        {
             "id": "grok-4.6",
             "name": "Grok 4.6"
         },
@@ -3604,8 +3824,20 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
     ],
     "codex": [
         {
+            "id": "gpt-6.1-sol",
+            "name": "GPT 6.1 Sol"
+        },
+        {
             "id": "gpt-6-astra",
             "name": "GPT 6.0 Astra"
+        },
+        {
+            "id": "gpt-6-sol",
+            "name": "GPT 6.0 Sol"
+        },
+        {
+            "id": "gpt-6-luna",
+            "name": "GPT 6.0 Luna"
         },
         {
             "id": "gpt-5.6-sol",
@@ -3867,8 +4099,20 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
     ],
     "cx": [
         {
+            "id": "gpt-6.1-sol",
+            "name": "GPT 6.1 Sol"
+        },
+        {
             "id": "gpt-6-astra",
             "name": "GPT 6.0 Astra"
+        },
+        {
+            "id": "gpt-6-sol",
+            "name": "GPT 6.0 Sol"
+        },
+        {
+            "id": "gpt-6-luna",
+            "name": "GPT 6.0 Luna"
         },
         {
             "id": "gpt-5.6-sol",
@@ -4146,8 +4390,16 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "Claude Fable 5"
         },
         {
+            "id": "claude-sonnet-5-5",
+            "name": "Claude Sonnet 5.5"
+        },
+        {
             "id": "claude-sonnet-5",
             "name": "Claude Sonnet 5"
+        },
+        {
+            "id": "claude-haiku-5-5",
+            "name": "Claude Haiku 5.5"
         },
         {
             "id": "claude-haiku-4-5-20251001",
@@ -4172,8 +4424,16 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "Claude Fable 5"
         },
         {
+            "id": "claude-sonnet-5-5",
+            "name": "Claude Sonnet 5.5"
+        },
+        {
             "id": "claude-sonnet-5",
             "name": "Claude Sonnet 5"
+        },
+        {
+            "id": "claude-haiku-5-5",
+            "name": "Claude Haiku 5.5"
         },
         {
             "id": "claude-haiku-4-5-20251001",
@@ -4181,6 +4441,21 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
         }
     ],
     "antigravity": [
+        {
+            "id": "gemini-4-argon-high",
+            "name": "Gemini 4 Argon (High)",
+            "upstreamModelId": "gemini-4-argon-high(high)"
+        },
+        {
+            "id": "gemini-4-argon-medium",
+            "name": "Gemini 4 Argon (Medium)",
+            "upstreamModelId": "gemini-4-argon-medium(medium)"
+        },
+        {
+            "id": "gemini-4-argon-low",
+            "name": "Gemini 4 Argon (Low)",
+            "upstreamModelId": "gemini-4-argon-low(low)"
+        },
         {
             "id": "gemini-3.8-flash-high",
             "name": "Gemini 3.8 Flash (High)",
@@ -4248,12 +4523,57 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "Gemini 3.5 Flash (Low)"
         },
         {
+            "id": "gemini-3.1-pro-high",
+            "name": "Gemini 3.1 Pro (High)",
+            "upstreamModelId": "gemini-pro-agent"
+        },
+        {
             "id": "gemini-pro-agent",
             "name": "Gemini 3.1 Pro (High)"
         },
         {
             "id": "gemini-3.1-pro-low",
             "name": "Gemini 3.1 Pro (Low)"
+        },
+        {
+            "id": "claude-sonnet-5-5-high",
+            "name": "Claude Sonnet 5.5 (High)",
+            "upstreamModelId": "claude-sonnet-5-5-high(high)"
+        },
+        {
+            "id": "claude-sonnet-5-5-medium",
+            "name": "Claude Sonnet 5.5 (Medium)",
+            "upstreamModelId": "claude-sonnet-5-5-medium(medium)"
+        },
+        {
+            "id": "claude-sonnet-5-5-low",
+            "name": "Claude Sonnet 5.5 (Low)",
+            "upstreamModelId": "claude-sonnet-5-5-low(low)"
+        },
+        {
+            "id": "claude-sonnet-5-5",
+            "name": "Claude Sonnet 5.5 (Thinking)",
+            "upstreamModelId": "claude-sonnet-5-5-high(high)"
+        },
+        {
+            "id": "claude-opus-5-5-high",
+            "name": "Claude Opus 5.5 (High)",
+            "upstreamModelId": "claude-opus-5-5-high(high)"
+        },
+        {
+            "id": "claude-opus-5-5-medium",
+            "name": "Claude Opus 5.5 (Medium)",
+            "upstreamModelId": "claude-opus-5-5-medium(medium)"
+        },
+        {
+            "id": "claude-opus-5-5-low",
+            "name": "Claude Opus 5.5 (Low)",
+            "upstreamModelId": "claude-opus-5-5-low(low)"
+        },
+        {
+            "id": "claude-opus-5-5",
+            "name": "Claude Opus 5.5 (Thinking)",
+            "upstreamModelId": "claude-opus-5-5-high(high)"
         },
         {
             "id": "claude-sonnet-4-6",
@@ -4284,6 +4604,21 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
     ],
     "ag": [
         {
+            "id": "gemini-4-argon-high",
+            "name": "Gemini 4 Argon (High)",
+            "upstreamModelId": "gemini-4-argon-high(high)"
+        },
+        {
+            "id": "gemini-4-argon-medium",
+            "name": "Gemini 4 Argon (Medium)",
+            "upstreamModelId": "gemini-4-argon-medium(medium)"
+        },
+        {
+            "id": "gemini-4-argon-low",
+            "name": "Gemini 4 Argon (Low)",
+            "upstreamModelId": "gemini-4-argon-low(low)"
+        },
+        {
             "id": "gemini-3.8-flash-high",
             "name": "Gemini 3.8 Flash (High)",
             "upstreamModelId": "gemini-3.8-flash-high(high)"
@@ -4350,12 +4685,57 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "Gemini 3.5 Flash (Low)"
         },
         {
+            "id": "gemini-3.1-pro-high",
+            "name": "Gemini 3.1 Pro (High)",
+            "upstreamModelId": "gemini-pro-agent"
+        },
+        {
             "id": "gemini-pro-agent",
             "name": "Gemini 3.1 Pro (High)"
         },
         {
             "id": "gemini-3.1-pro-low",
             "name": "Gemini 3.1 Pro (Low)"
+        },
+        {
+            "id": "claude-sonnet-5-5-high",
+            "name": "Claude Sonnet 5.5 (High)",
+            "upstreamModelId": "claude-sonnet-5-5-high(high)"
+        },
+        {
+            "id": "claude-sonnet-5-5-medium",
+            "name": "Claude Sonnet 5.5 (Medium)",
+            "upstreamModelId": "claude-sonnet-5-5-medium(medium)"
+        },
+        {
+            "id": "claude-sonnet-5-5-low",
+            "name": "Claude Sonnet 5.5 (Low)",
+            "upstreamModelId": "claude-sonnet-5-5-low(low)"
+        },
+        {
+            "id": "claude-sonnet-5-5",
+            "name": "Claude Sonnet 5.5 (Thinking)",
+            "upstreamModelId": "claude-sonnet-5-5-high(high)"
+        },
+        {
+            "id": "claude-opus-5-5-high",
+            "name": "Claude Opus 5.5 (High)",
+            "upstreamModelId": "claude-opus-5-5-high(high)"
+        },
+        {
+            "id": "claude-opus-5-5-medium",
+            "name": "Claude Opus 5.5 (Medium)",
+            "upstreamModelId": "claude-opus-5-5-medium(medium)"
+        },
+        {
+            "id": "claude-opus-5-5-low",
+            "name": "Claude Opus 5.5 (Low)",
+            "upstreamModelId": "claude-opus-5-5-low(low)"
+        },
+        {
+            "id": "claude-opus-5-5",
+            "name": "Claude Opus 5.5 (Thinking)",
+            "upstreamModelId": "claude-opus-5-5-high(high)"
         },
         {
             "id": "claude-sonnet-4-6",
@@ -4613,6 +4993,10 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
         }
     ],
     "gemini": [
+        {
+            "id": "gemini-4-argon",
+            "name": "Gemini 4 Argon"
+        },
         {
             "id": "gemini-3.8-flash",
             "name": "Gemini 3.8 Flash"
@@ -5373,6 +5757,10 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "name": "DeepSeek V4 Flash"
         },
         {
+            "id": "moonshotai/Kimi-K3.1-Pro",
+            "name": "Kimi K3.1 Pro"
+        },
+        {
             "id": "moonshotai/Kimi-K2.7-Code",
             "name": "Kimi K2.7 Code"
         },
@@ -5890,10 +6278,26 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             ]
         },
         {
+            "id": "kimi-k3.1-pro",
+            "name": "Kimi K3.1 Pro",
+            "supportedFormats": [
+                "openai"
+            ]
+        },
+        {
             "id": "kimi-k3",
             "name": "Kimi K3",
             "supportedFormats": [
                 "openai"
+            ]
+        },
+        {
+            "id": "deepseek-v4.1-flash",
+            "name": "DeepSeek V4.1 Flash",
+            "supportedFormats": [
+                "openai",
+                "claude",
+                "openai-responses"
             ]
         },
         {
@@ -5926,6 +6330,20 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
         {
             "id": "longcat-2.0",
             "name": "LongCat 2.0",
+            "supportedFormats": [
+                "openai"
+            ]
+        },
+        {
+            "id": "mimo-v2.6-flash",
+            "name": "MiMo V2.6 Flash",
+            "supportedFormats": [
+                "openai"
+            ]
+        },
+        {
+            "id": "mimo-v2.6-pro",
+            "name": "MiMo V2.6 Pro",
             "supportedFormats": [
                 "openai"
             ]
@@ -6023,8 +6441,24 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             ]
         },
         {
+            "id": "grok-4.7",
+            "name": "Grok 4.7",
+            "targetFormat": "openai-responses",
+            "supportedFormats": [
+                "openai-responses"
+            ]
+        },
+        {
             "id": "grok-4.6",
             "name": "Grok 4.6",
+            "targetFormat": "openai-responses",
+            "supportedFormats": [
+                "openai-responses"
+            ]
+        },
+        {
+            "id": "gpt-6-luna",
+            "name": "GPT 6 Luna",
             "targetFormat": "openai-responses",
             "supportedFormats": [
                 "openai-responses"
@@ -6036,6 +6470,14 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
             "targetFormat": "openai-responses",
             "supportedFormats": [
                 "openai-responses"
+            ]
+        },
+        {
+            "id": "claude-haiku-5-5",
+            "name": "Claude Haiku 5.5",
+            "targetFormat": "claude",
+            "supportedFormats": [
+                "claude"
             ]
         },
         {
@@ -7394,6 +7836,10 @@ export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
         }
     ],
     "vertex": [
+        {
+            "id": "gemini-4-argon",
+            "name": "Gemini 4 Argon"
+        },
         {
             "id": "gemini-3.1-pro-preview",
             "name": "Gemini 3.1 Pro Preview"

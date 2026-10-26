@@ -90,6 +90,28 @@ export function capabilitiesFromServiceKind(kind: ProtocolValue) {
 export const MODEL_CAPABILITIES: ProtocolRecord = {
     // Claude Fable 5.1, Opus 5, 4.6/4.7/4.8, and Kiro Sonnet 5 have 1M context + adaptive thinking (override generic claude pattern)
     "claude-fable-5-1": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "claude-fable-5.1": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    // Claude Opus 5.5: adaptive thinking is always on; thinking.type "disabled" is a 400 at every effort.
+    // https://platform.claude.com/docs/en/models/opus-5-5/overview
+    "claude-opus-5-5": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "claude-opus-5-5-thinking": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "claude-opus-5-5-high": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "claude-opus-5-5-medium": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "claude-opus-5-5-low": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    // Claude Sonnet 5.5 rejects thinking.type "disabled"; its only off switch is
+    // thinking.type "between_tools" (low/medium/high effort), which the translator
+    // does not emit, so thinking is advertised as non-disableable.
+    // https://platform.claude.com/docs/en/models/sonnet-5-5/overview
+    "claude-sonnet-5-5": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "claude-sonnet-5.5": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "claude-sonnet-5-5-thinking": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "claude-sonnet-5-5-high": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "claude-sonnet-5-5-medium": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "claude-sonnet-5-5-low": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    // Claude Haiku 5.5: adaptive thinking + effort (default medium); "disabled" is accepted at high effort or below.
+    // https://platform.claude.com/docs/en/models/haiku-5-5/overview
+    "claude-haiku-5-5": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
+    "claude-haiku-5.5": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
     "claude-opus-5": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
     "claude-opus-5-thinking": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
     "claude-opus-5-agentic": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
@@ -133,6 +155,10 @@ export const MODEL_CAPABILITIES: ProtocolRecord = {
     "coder-model": { reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000 },
     // Kimi flagship + coding (platform + Kimi Code ids) — vision/video native
     "kimi-k3": { vision: true, videoInput: true, reasoning: true, thinkingFormat: "kimi", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 131072 },
+    // Kimi K3.1 Pro: thinking always on, reasoning_effort low|high|max (default max).
+    // https://platform.kimi.ai/docs/guide/kimi-k3-1-pro-quickstart.md
+    "kimi-k3.1-pro": { vision: true, videoInput: true, reasoning: true, thinkingFormat: "kimi", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 131072 },
+    "kimi-k3.1-pro-highspeed": { vision: true, videoInput: true, reasoning: true, thinkingFormat: "kimi", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 131072 },
     "k3": { vision: true, videoInput: true, reasoning: true, thinkingFormat: "kimi", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 131072 },
     "kimi-for-coding": { vision: true, videoInput: true, reasoning: true, thinkingFormat: "kimi", thinkingCanDisable: false, contextWindow: 262144, maxOutput: 65536 },
     "kimi-for-coding-highspeed": { vision: true, videoInput: true, reasoning: true, thinkingFormat: "kimi", thinkingCanDisable: false, contextWindow: 262144, maxOutput: 65536 },
@@ -171,6 +197,9 @@ export const PROVIDER_CAPABILITIES: ProtocolRecord = {
     },
     "codex": {
         "gpt-6-astra": { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
+        "gpt-6.1-sol": { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
+        "gpt-6-sol": { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
+        "gpt-6-luna": { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
         "gpt-5.6-sol": CODEX_GPT_56_SOL_CAPS,
         "gpt-5.6-sol-review": CODEX_GPT_56_SOL_CAPS,
         "gpt-5.6-terra": CODEX_GPT_56_DEFAULT_CAPS,
@@ -267,6 +296,9 @@ export const PATTERN_CAPABILITIES: ProtocolValue[] = [
     { pattern: "*claude*opus-4.8*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive" } },
     { pattern: "*claude*sonnet-4.6*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive" } },
     { pattern: "*claude*sonnet-4.7*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive" } },
+    { pattern: "*claude*sonnet-5*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 } },
+    // Haiku 5.x rejects thinking.type "enabled" (budget); it takes adaptive + effort.
+    { pattern: "*claude*haiku-5*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 } },
     { pattern: "*claude*haiku*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "claude-budget" } },
     { pattern: "*claude*opus*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "claude-budget" } },
     { pattern: "*claude*sonnet*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "claude-budget" } },
@@ -276,6 +308,9 @@ export const PATTERN_CAPABILITIES: ProtocolValue[] = [
     { pattern: "*claude*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "claude-budget" } },
     // ── Gemini (all 2.0+ multimodal + google_search grounding, 1M ctx) ─
     { pattern: "*gemini*image*", caps: { vision: true, imageOutput: true, contextWindow: 1048576 } },
+    // Gemini 4 (Argon): thinking levels low/medium/high only (no minimal, no budget); 65,536 sync output.
+    // https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+    { pattern: "*gemini-4*", caps: { vision: true, audioInput: true, videoInput: true, reasoning: true, search: true, thinkingFormat: "gemini-level", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 65536 } },
     { pattern: "*gemini-3.8*", caps: { vision: true, audioInput: true, videoInput: true, reasoning: true, search: true, thinkingFormat: "gemini-level", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 65536 } },
     { pattern: "*gemini-3.7*", caps: { vision: true, audioInput: true, videoInput: true, reasoning: true, search: true, thinkingFormat: "gemini-level", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 65536 } },
     { pattern: "*gemini-3*pro*", caps: { vision: true, audioInput: true, videoInput: true, reasoning: true, search: true, thinkingFormat: "gemini-level", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 65535 } },
@@ -305,6 +340,8 @@ export const PATTERN_CAPABILITIES: ProtocolValue[] = [
     // ── Grok (vision + Live Search) ──────────────────────────────────
     { pattern: "*grok*image*", caps: { imageOutput: true } },
     { pattern: "*grok-code*", caps: { reasoning: true, thinkingFormat: "openai", contextWindow: 256000 } },
+    // Grok 4.7: 500k context, same limits as 4.6 (docs.x.ai/docs/models)
+    { pattern: "*grok-4.7*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 500000, maxOutput: 500000 } },
     // Grok 4.6: 500k context, no text output limit (docs.x.ai/developers/grok-4-6)
     { pattern: "*grok-4.6*", caps: { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 500000, maxOutput: 500000 } },
     // Grok 4.5 (Grok CLI / Grok Build): 500k context per cli-chat-proxy /v1/models

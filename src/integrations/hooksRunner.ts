@@ -10,7 +10,8 @@
 import { spawn } from "child_process";
 import { getWorkspaceRoot } from "../context/workspaceUtils";
 import type { HookDef } from "../stores/featureStore";
-import { listExternalHooks, type ExternalHook } from "./externalHooks";
+import type { ExternalHook } from "./externalHooks";
+import { runnableExternalHooks } from "./hookConsent";
 import { killShellProcess, trackShellProcess } from "../agent/tools/shared";
 import { currentExecutionProfile, configuredExecutionProfile, spawnExecutionCommand, withExecutionProfile } from "../agent/execution";
 
@@ -56,11 +57,12 @@ function matcherHits(matcher: string | undefined, tool: string | undefined): boo
 }
 
 /** External (Cursor/Claude file-based) hooks that should fire for a trigger. */
-function externalFor(event: TriggerEvent, tool?: string): ExternalHook[] {
+async function externalFor(event: TriggerEvent, tool?: string): Promise<ExternalHook[]> {
 	const t = TRIGGERS[event];
 	const claudeTool = tool ?? ("claudeTool" in t ? t.claudeTool : undefined);
 	try {
-		return listExternalHooks().filter((h) => {
+		// Workspace hook files run only after workspace trust + per-content consent.
+		return (await runnableExternalHooks()).filter((h) => {
 			if (h.source.startsWith("cursor")) return (t.cursor as readonly string[]).includes(h.event);
 			return (t.claude as readonly string[]).includes(h.event) && matcherHits(h.matcher, claudeTool);
 		});
@@ -208,12 +210,12 @@ function ownPayload(event: TriggerEvent, root: string | undefined, context: Reco
 }
 
 /** All hook launches for a trigger: [command, payload] pairs (our hooks + external). */
-function launchesFor(hooks: HookDef[], event: TriggerEvent, root: string | undefined, context: Record<string, string>, tool?: string): { command: string; payload: object }[] {
+async function launchesFor(hooks: HookDef[], event: TriggerEvent, root: string | undefined, context: Record<string, string>, tool?: string): Promise<{ command: string; payload: object }[]> {
 	const out: { command: string; payload: object }[] = [];
 	for (const h of hooks) {
 		if (h.enabled && h.event === event) out.push({ command: h.command, payload: ownPayload(event, root, context, tool) });
 	}
-	for (const h of externalFor(event, tool)) {
+	for (const h of await externalFor(event, tool)) {
 		const trigger = TRIGGERS[event];
 		const nativeTool = tool ?? ("claudeTool" in trigger ? trigger.claudeTool : undefined);
 		out.push({ command: h.command, payload: nativePayload(h, root, context, nativeTool) });
@@ -221,8 +223,13 @@ function launchesFor(hooks: HookDef[], event: TriggerEvent, root: string | undef
 	return out;
 }
 
-function envFor(context: Record<string, string>): NodeJS.ProcessEnv {
-	return { ...process.env, ...Object.fromEntries(Object.entries(context).map(([k, v]) => [`OPENCURSOR_${k.toUpperCase()}`, v])) };
+/** Per-variable cap: the full value is always on stdin, and oversized env makes spawn fail (E2BIG). */
+export const HOOK_ENV_VALUE_LIMIT = 8 * 1024;
+const TRUNCATION_MARKER = "…[truncated; full value is in the stdin JSON]";
+
+export function envFor(context: Record<string, string>): NodeJS.ProcessEnv {
+	const clip = (v: string) => v.length > HOOK_ENV_VALUE_LIMIT ? v.slice(0, HOOK_ENV_VALUE_LIMIT - TRUNCATION_MARKER.length) + TRUNCATION_MARKER : v;
+	return { ...process.env, ...Object.fromEntries(Object.entries(context).map(([k, v]) => [`OPENCURSOR_${k.toUpperCase()}`, clip(String(v))])) };
 }
 
 /**
@@ -232,9 +239,9 @@ function envFor(context: Record<string, string>): NodeJS.ProcessEnv {
 export function runHooks(hooks: HookDef[], event: TriggerEvent, context: Record<string, string> = {}, tool?: string): void {
 	const root = getWorkspaceRoot();
 	const env = envFor(context);
-	for (const l of launchesFor(hooks, event, root, context, tool)) {
-		void runHook(l.command, root, env, l.payload);
-	}
+	void launchesFor(hooks, event, root, context, tool).then((launches) => {
+		for (const l of launches) void runHook(l.command, root, env, l.payload);
+	}, () => {});
 }
 
 /**
@@ -249,7 +256,9 @@ export async function runBlockingHooks(hooks: HookDef[], event: TriggerEvent, co
 	}
 	const root = getWorkspaceRoot();
 	const env = envFor(context);
-	const results = await Promise.all(launchesFor(hooks, event, root, context, tool).map((l) => runHook(l.command, root, env, l.payload, signal)));
+	const launches = await launchesFor(hooks, event, root, context, tool);
+	if (signal?.aborted) return "hook cancelled";
+	const results = await Promise.all(launches.map((l) => runHook(l.command, root, env, l.payload, signal)));
 	for (const r of results) {
 		const reason = verdictOf(r);
 		if (reason) return reason;

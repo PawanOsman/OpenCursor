@@ -15,28 +15,38 @@ export function stripModelScope(id: string): string {
   return i >= 0 ? id.slice(i + 2) : id;
 }
 
+// Tools whose second word is a fixed subcommand (`git status`), not free input.
+const SUBCOMMAND_TOOLS = new Set(["git", "npm", "pnpm", "yarn", "docker", "kubectl", "cargo", "go", "dotnet", "pip"]);
+// Subcommands that run arbitrary scripts/packages: never widen past the exact command.
+const OPEN_SUBCOMMANDS = new Set(["run", "exec", "x", "dlx", "create", "-c", "-e"]);
+// Editor/VCS/CI config: auto-allowing writes here can run code later.
+const SENSITIVE_DIR = /(^|\/)\.(vscode|git|github)(\/|$)/i;
+
 /**
- * Suggest an allow/deny pattern for a subject (e.g. "git *", "*.md",
- * "https://x.com/*"), used to pre-fill the approval prompt.
+ * Suggest an allow/deny pattern for a subject, used to pre-fill the approval
+ * prompt. Deliberately narrow: an exact command (or command + fixed
+ * subcommand like `git status`), an exact path or its folder, an origin.
  */
 export function suggestPattern(type: ApprovalActionType, toolName: string, subject: string): string | undefined {
   if (type === "shell") {
-    const tokens = subject.trim().split(/\s+/);
+    const command = subject.trim().replace(/\s+/g, " ");
+    const tokens = command.split(" ");
     if (!tokens[0]) return undefined;
-    // Multi-word tools get a "git push *" style prefix; everything else "node *".
-    const multi = new Set(["git", "npm", "pnpm", "yarn", "docker", "kubectl", "cargo", "go", "dotnet", "pip", "python", "node", "npx"]);
-    const base = multi.has(tokens[0].toLowerCase()) && tokens[1] ? `${tokens[0]} ${tokens[1]}` : tokens[0];
-    return `${base} *`;
+    const sub = tokens[1];
+    if (SUBCOMMAND_TOOLS.has(tokens[0].toLowerCase()) && sub && /^[a-z][\w-]*$/i.test(sub) && !OPEN_SUBCOMMANDS.has(sub.toLowerCase())) {
+      return `${tokens[0]} ${sub}`;
+    }
+    return command;
   }
-  if (type === "edits" || type === "delete") {
-    const base = subject.replace(/\\/g, "/").split("/").pop() ?? subject;
-    const i = base.lastIndexOf(".");
-    return i > 0 ? `*${base.slice(i)}` : base || undefined;
-  }
-  if (type === "outside") {
-    // Allowing the containing directory is the least-surprising default.
-    const dir = subject.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
-    return dir ? `${dir}/**` : undefined;
+  if (type === "edits" || type === "delete" || type === "outside") {
+    const path = subject.replace(/\\/g, "/").trim();
+    if (!path || SENSITIVE_DIR.test(path)) return undefined;
+    if (type === "outside") {
+      // Allowing the containing directory is the least-surprising default.
+      const dir = path.split("/").slice(0, -1).join("/");
+      return dir ? `${dir}/**` : undefined;
+    }
+    return path;
   }
   if (type === "web") {
     try { return `${new URL(subject).origin}/*`; } catch { return undefined; }

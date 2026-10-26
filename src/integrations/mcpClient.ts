@@ -8,6 +8,8 @@
  */
 
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
 import { getWorkspaceRoot } from "../context/workspaceUtils";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -67,6 +69,39 @@ interface JsonRpcResponse {
   params?: any;
 }
 
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+
+/** Quote one argument for CommandLineToArgvW, then caret-escape it for cmd.exe (twice for .cmd/.bat shims). */
+export function escapeCmdArgument(arg: string, doubleEscape: boolean): string {
+  let quoted = arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1");
+  quoted = `"${quoted}"`.replace(CMD_META, "^$1");
+  return doubleEscape ? quoted.replace(CMD_META, "^$1") : quoted;
+}
+
+function resolveWindowsCommand(command: string, env: NodeJS.ProcessEnv): string | undefined {
+  const exts = (env.PATHEXT || env.Pathext || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  const candidates = (base: string) => path.extname(base) ? [base] : exts.map((ext) => base + ext.toLowerCase());
+  const exists = (file: string) => { try { return fs.statSync(file).isFile(); } catch { return false; } };
+  if (/[\\/]/.test(command) ||path.isAbsolute(command)) return candidates(path.resolve(getWorkspaceRoot() ?? process.cwd(), command)).find(exists);
+  const dirs = (env.PATH || env.Path || "").split(";").filter(Boolean);
+  for (const dir of dirs) {
+    const found = candidates(path.join(dir, command)).find(exists);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Spawn plan for a stdio MCP server on Windows. */
+export function windowsLaunch(command: string, args: readonly string[], env: NodeJS.ProcessEnv): { file: string; args: string[]; verbatim: boolean } {
+  const resolved = resolveWindowsCommand(command, env);
+  if (resolved && /\.(?:exe|com)$/i.test(resolved)) return { file: resolved, args: [...args], verbatim: false };
+  // Batch shims re-parse %* through cmd, so their arguments need a second escape.
+  const shim = !!resolved && /\.(?:cmd|bat)$/i.test(resolved);
+  const target = (resolved ?? command).replace(CMD_META, "^$1");
+  const line = [target, ...args.map((arg) => escapeCmdArgument(arg, shim))].join(" ");
+  return { file: env.ComSpec || env.COMSPEC || "cmd.exe", args: ["/d", "/s", "/c", `"${line}"`], verbatim: true };
+}
+
 /** MCP stdio bridge and SDK-backed Streamable HTTP / legacy SSE connections. */
 export class McpConnection {
   private client?: Client;
@@ -97,18 +132,16 @@ export class McpConnection {
     }
 
     // On Windows, npm-shipped launchers (npx/npm/pnpm/yarn) are .cmd shims that
-    // are not directly spawnable, so run through a shell. The shell also resolves
-    // commands via PATHEXT instead of failing with ENOENT.
-    // Node deprecated args+shell:true (DEP0190), so pre-join into one quoted string.
-    const useShell = process.platform === "win32";
+    // Node cannot spawn directly. Real executables are spawned without a shell;
+    // shims go through cmd.exe with every metacharacter (including %) escaped.
     const args = this.config.args ?? [];
-    const cmd = useShell
-      ? [this.config.command, ...args].map((a) => (/[\s"^&|<>]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a)).join(" ")
-      : this.config.command;
-    const proc = spawn(cmd, useShell ? [] : args, {
+    const env = { ...process.env, ...(this.config.env ?? {}) };
+    const launch = process.platform === "win32" ? windowsLaunch(this.config.command, args, env) : { file: this.config.command, args, verbatim: false };
+    const proc = spawn(launch.file, launch.args, {
       cwd: getWorkspaceRoot(),
-      env: { ...process.env, ...(this.config.env ?? {}) },
-      shell: useShell,
+      env,
+      windowsHide: true,
+      windowsVerbatimArguments: launch.verbatim,
     });
     this.proc = proc;
     proc.stdin.on("error", (error) => {

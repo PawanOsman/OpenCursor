@@ -14,6 +14,8 @@ describe("fast mode capabilities", () => {
   it.each([
     ["gpt-6-astra", "openai", "openai"],
     ["gpt-6-sol", "codex", "openai"],
+    ["gpt-6.1-sol", "codex", "openai"],
+    ["gpt-6.1-terra", "openai", "openai"],
     ["gpt-5.5-2026-04-23", "openai", "openai"],
     ["cx/gpt-6-astra", "openai", "openai"],
     ["openai/gpt-5.4", "openai", "openai"],
@@ -35,6 +37,8 @@ describe("fast mode capabilities", () => {
     ["gpt-6-astra-custom", "openai"], ["ft:gpt-6-astra:custom", "openai"],
     ["claude-opus-4-6", "anthropic"], ["claude-sonnet-5", "claude-code"],
     ["claude-opus-5-50", "anthropic"],
+    ["claude-sonnet-5-5", "anthropic"], ["claude-haiku-5-5", "claude-code"],
+    ["gpt-6.1-sol-custom", "openai"], ["gpt-6.1-luna", "openai"],
   ])("excludes unsupported %s through %s", (model, kind) => {
     expect(supportsFastMode(model, kind)).toBe(false);
   });

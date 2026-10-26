@@ -255,7 +255,11 @@ export async function refreshProviderAccount(account: OAuthAccount, signal: Abor
     });
   } else if (handlers[kind]) tokens = await withAuthSignal(signal, handlers[kind]);
   if (!tokens?.accessToken) throw new Error("This account could not be refreshed. Reconnect it in Providers.");
+  // A Copilot session token is minted from the GitHub token it replaced; keeping
+  // it would replay the rejected session. The transport mints a fresh one.
+  const retained: AuthPayload = { ...data };
+  if (kind === "github") { delete retained.copilotToken; delete retained.copilotTokenExpiresAt; }
   return { ...account, accessToken: tokens.accessToken, refreshToken: tokens.refreshToken || account.refreshToken,
     expiresAt: Date.now() + Math.max(60, Number(tokens.expiresIn) || 3600) * 1000,
-    providerSpecificData: { ...data, ...(tokens.providerSpecificData ?? {}) } };
+    providerSpecificData: { ...retained, ...(tokens.providerSpecificData ?? {}) } };
 }

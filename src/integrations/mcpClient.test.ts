@@ -14,7 +14,7 @@ import { spawn } from "child_process";
 
 vi.mock("child_process", () => ({ spawn: vi.fn() }));
 vi.mock("../context/workspaceUtils", () => ({ getWorkspaceRoot: () => undefined }));
-import { McpConnection, McpManager } from "./mcpClient";
+import { McpConnection, McpManager, escapeCmdArgument, windowsLaunch } from "./mcpClient";
 
 let connection: McpConnection;
 let proc: EventEmitter & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill: ReturnType<typeof vi.fn> };
@@ -105,5 +105,29 @@ describe("MCP request lifetime", () => {
     manager.disposeAll();
     await sync;
     expect(vi.mocked(spawn).mock.calls).toHaveLength(before);
+  });
+});
+
+describe("Windows stdio launch", () => {
+  it("caret-escapes cmd metacharacters including percent signs", async () => {
+    expect(escapeCmdArgument("%PATH%", false)).toBe('^"^%PATH^%^"');
+    expect(escapeCmdArgument('a"b', false)).toBe('^"a\\^"b^"');
+  });
+
+  it.runIf(process.platform === "win32")("passes literal arguments through a .cmd shim without expansion", async () => {
+    const { mkdtempSync, writeFileSync, rmSync } = await import("fs");
+    const { join } = await import("path");
+    const { tmpdir } = await import("os");
+    const real = await vi.importActual<typeof import("child_process")>("child_process");
+    const dir = mkdtempSync(join(tmpdir(), "ocursor-mcp-shim-"));
+    try {
+      writeFileSync(join(dir, "fixture.cmd"), `@"${process.execPath}" -e "process.stdout.write(JSON.stringify(process.argv.slice(1)))" %*\r\n`);
+      const env = { ...process.env, PATH: `${dir};${process.env.PATH}` };
+      const args = ["%PATH%", "a & echo injected", 'quote"d', "trail\\"];
+      const launch = windowsLaunch("fixture", args, env);
+      expect(launch.file.toLowerCase()).toContain("cmd");
+      const out = real.spawnSync(launch.file, launch.args, { env, windowsHide: true, windowsVerbatimArguments: launch.verbatim, encoding: "utf8" });
+      expect(JSON.parse(out.stdout)).toEqual(args);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

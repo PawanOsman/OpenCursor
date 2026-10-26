@@ -127,3 +127,36 @@ it("bounds highlighting across large responses without truncating code", async (
   const next = htmlDocument(renderMarkdown('```js\nconsole.log("new response");\n```'));
   expect(next.querySelector(".code-token-function")?.textContent).toBe("log");
 });
+
+it("sanitises with an allowlist: event handlers, script URLs, styles and forms", async () => {
+  const { renderMarkdown } = await renderer();
+  const doc = htmlDocument(renderMarkdown([
+    '<img/onerror=alert(1) src=x>',
+    '<a href="&#106;avascript:alert(1)">entity</a> <a href="java&#x09;script:alert(1)">tab</a> <a href="JaVaScRiPt:alert(1)">case</a>',
+    '<div style="position:fixed;inset:0" class="note">overlay</div>',
+    '<form action="https://evil.example"><input name="q" value="x"><button>Go</button></form>after',
+    '<a href="https://example.com" onclick="steal()">ok</a> <a href="#heading">anchor</a> <a href="mailto:me@example.com">mail</a>',
+    '<img src="https://example.com/a.png" alt="remote"> <img src="data:image/png;base64,AAAA" alt="inline"> <img src="data:text/html,<script>" alt="bad">',
+    '<svg onload="alert(1)"><path d="M0 0" /></svg><iframe src="https://example.com"></iframe><style>body{display:none}</style>',
+  ].join("\n\n")));
+  expect(doc.querySelectorAll("[onerror], [onclick], [onload], [style], form, button, iframe, style, script").length).toBe(0);
+  expect(doc.querySelectorAll("input").length).toBe(0);
+  expect(doc.body.textContent).toContain("after");
+  for (const anchor of Array.from(doc.querySelectorAll("a")).slice(0, 3)) expect(anchor.getAttribute("href")).toBe("#");
+  expect(Array.from(doc.querySelectorAll("a"), a => a.getAttribute("href")).slice(3)).toEqual(["https://example.com", "#heading", "mailto:me@example.com"]);
+  expect(doc.querySelector("div.note")?.textContent).toBe("overlay");
+  const images = Array.from(doc.querySelectorAll("img[alt]"));
+  expect(images.map(img => img.getAttribute("src"))).toEqual(["https://example.com/a.png", "data:image/png;base64,AAAA", null]);
+  expect(doc.querySelector("svg path")?.getAttribute("d")).toBe("M0 0");
+});
+
+it("keeps markdown task lists as disabled checkboxes and keeps tables", async () => {
+  const { renderMarkdown } = await renderer();
+  const doc = htmlDocument(renderMarkdown("- [x] done\n- [ ] todo\n\n| a | b |\n|:-|-:|\n| 1 | 2 |"));
+  const boxes = Array.from(doc.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+  expect(boxes).toHaveLength(2);
+  expect(boxes.every(box => box.hasAttribute("disabled"))).toBe(true);
+  expect(boxes[0].hasAttribute("checked")).toBe(true);
+  expect(doc.querySelectorAll("table th, table td").length).toBe(4);
+  expect(doc.querySelector("td")?.getAttribute("align")).toBe("left");
+});

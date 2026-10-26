@@ -9,7 +9,8 @@
 
 // llama.cpp local model manager.
 // - Requires llama.cpp installed on the system (provides `llama-server`).
-//   Windows: irm https://llama.app/install.ps1 | iex · Linux/Mac: curl -LsSf https://llama.app/install.sh | sh
+//   Windows: winget install llama.cpp · macOS/Linux: brew install llama.cpp
+//   (otherwise https://github.com/ggml-org/llama.cpp/releases)
 // - Search/download GGUF models from the Hugging Face Hub (@huggingface/hub).
 // - Import local .gguf files. Load/unload = spawn/kill a `llama-server` per model
 //   on its own port, exposing an OpenAI-compatible endpoint at /v1.
@@ -235,17 +236,41 @@ export function checkInstalled(): Promise<boolean> {
   });
 }
 
-/** Install llama.cpp via the platform package manager (winget / curl script). */
+const LLAMACPP_RELEASES_URL = "https://github.com/ggml-org/llama.cpp/releases";
+
+/** Package-manager install plan; never pipes a downloaded script into a shell. */
+export function llamacppInstallPlan(platform: NodeJS.Platform, hasBrew: boolean): { command: string; shellPath?: string } | undefined {
+  if (platform === "win32") return { command: "winget install llama.cpp", shellPath: "powershell.exe" };
+  if (platform === "darwin" || hasBrew) return { command: "brew install llama.cpp" };
+  return undefined;
+}
+
+function commandExists(bin: string): Promise<boolean> {
+  return new Promise((resolve) => execFile(bin, ["--version"], { timeout: 5000, windowsHide: true }, (error) => resolve(!error)));
+}
+
+/** Install llama.cpp via the platform package manager (winget / Homebrew), after confirmation. */
 export async function installLlamacpp(): Promise<void> {
-  const term = vscode.window.createTerminal("Install llama.cpp");
-  term.show();
-  if (process.platform === "win32") {
-    term.sendText("irm https://llama.app/install.ps1 | iex");
-  } else if (process.platform === "darwin") {
-    term.sendText("curl -LsSf https://llama.app/install.sh | sh");
-  } else {
-    term.sendText("curl -LsSf https://llama.app/install.sh | sh");
+  const plan = llamacppInstallPlan(process.platform, process.platform === "linux" && await commandExists("brew"));
+  if (!plan) {
+    const open = "Open Releases";
+    const choice = await vscode.window.showInformationMessage(
+      "OpenCursor: Install llama.cpp with your distribution's package manager, or download a release build. Re-check status once it is on PATH.",
+      open,
+    );
+    if (choice === open) await vscode.env.openExternal(vscode.Uri.parse(LLAMACPP_RELEASES_URL));
+    return;
   }
+  const run = "Run in Terminal";
+  const choice = await vscode.window.showWarningMessage(
+    "OpenCursor: Install llama.cpp?",
+    { modal: true, detail: `This runs the following command in a new terminal:\n\n${plan.command}` },
+    run,
+  );
+  if (choice !== run) return;
+  const term = vscode.window.createTerminal({ name: "Install llama.cpp", ...(plan.shellPath ? { shellPath: plan.shellPath } : {}) });
+  term.show();
+  term.sendText(plan.command);
   vscode.window.showInformationMessage(
     "OpenCursor: Installing llama.cpp in the terminal. Re-check status once it finishes."
   );
@@ -388,6 +413,21 @@ export function serverUrlFor(m: LlamacppModel, globalCfg?: LlamacppServerConfig)
   return `http://${urlHost(host)}:${effectivePort(m, cfg)}/v1`;
 }
 
+/** True for bind hosts reachable only from this machine. */
+export function isLoopbackHost(host: string | undefined): boolean {
+  const h = (host || "127.0.0.1").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return h === "localhost" || h === "::1" || /^127(?:\.\d{1,3}){3}$/.test(h);
+}
+
+/** An exposed llama-server without --api-key lets anyone on the network use it. */
+export function exposedWithoutApiKey(cfg: LlamacppServerConfig, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (isLoopbackHost(cfg.host)) return false;
+  if (env.LLAMA_API_KEY) return false;
+  const extra = cfg.extraArgs?.trim() ? parseExtraArgs(cfg.extraArgs) : [];
+  return !extra.some(arg => /^--api-key(?:-file)?(?:=|$)/.test(arg));
+}
+const warnedExposed = new Set<string>();
+
 function urlHost(host: string): string { return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host; }
 
 /** Parse quoted arguments without running a shell or expanding variables. */
@@ -470,6 +510,14 @@ async function startModel(m: LlamacppModel, globalCfg: LlamacppServerConfig | nu
     await fs.access(m.filePath);
     signal.throwIfAborted();
     const host = cfg.host === "0.0.0.0" ? "127.0.0.1" : cfg.host === "::" ? "::1" : cfg.host || "127.0.0.1";
+    if (exposedWithoutApiKey(cfg)) {
+      const warning = `[warning] llama-server binds ${cfg.host} without --api-key: anyone who can reach this address can use the model. Bind 127.0.0.1 or add --api-key to extra arguments.`;
+      appendLog(m.id, warning);
+      if (!warnedExposed.has(`${m.id}@${cfg.host}`)) {
+        warnedExposed.add(`${m.id}@${cfg.host}`);
+        void vscode.window.showWarningMessage(`OpenCursor: ${warning.replace("[warning] ", "")}`);
+      }
+    }
     for (let attempt = 1; attempt <= 3; attempt++) {
       signal.throwIfAborted();
       const port = await getFreePort(cfg.host || "127.0.0.1", cfg.port || 0).catch(error => { throw new Error(`Cannot bind ${cfg.host || "127.0.0.1"}:${cfg.port || "auto"}: ${String(error)}. Choose another port or stop the conflicting server.`); });

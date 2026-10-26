@@ -69,18 +69,78 @@ describe("transcript resource usage", () => {
     expect(container.textContent).not.toContain("background");
   });
 
-  it("releases inactive settled transcripts while retaining live background runs", () => {
+  it("never sends turn snapshots back to the host (the host owns transcripts)", () => {
     initial();
     message({ type: "loadConversation", activeId: "B", turns: [{ role: "user", text: "Visible chat" }], running: false });
     vi.mocked(vscode.postMessage).mockClear();
     act(() => window.dispatchEvent(new Event("pagehide")));
-    expect(vi.mocked(vscode.postMessage).mock.calls.filter(([msg]) => (msg as any).type === "persistTurns").map(([msg]) => (msg as any).convId)).toEqual(["A", "B"]);
-
+    message({ type: "agentEvent", convId: "A", event: { type: "text-delta", text: "partial" } });
+    message({ type: "agentEvent", convId: "A", event: { type: "error", message: "boom" } });
     message({ type: "agentEvent", convId: "A", event: { type: "run-status", status: "finished" } });
-    message({ type: "loadConversation", activeId: "C", turns: [{ role: "user", text: "Third chat" }], running: false });
-    vi.mocked(vscode.postMessage).mockClear();
     act(() => window.dispatchEvent(new Event("pagehide")));
-    expect(vi.mocked(vscode.postMessage).mock.calls.filter(([msg]) => (msg as any).type === "persistTurns").map(([msg]) => (msg as any).convId)).toEqual(["C"]);
+    expect(vi.mocked(vscode.postMessage).mock.calls.filter(([msg]) => (msg as any).type === "persistTurns")).toEqual([]);
+  });
+});
+
+describe("editing model output", () => {
+  const transcript = [
+    { role: "user", text: "Task A" },
+    { role: "assistant", blocks: [{ kind: "thinking", text: "Plan the change", startedAt: 1, endedAt: 2 }, { kind: "tool", callId: "t1", name: "Read", input: { path: "a.ts" }, status: "completed", result: "file" }, { kind: "text", text: "Original answer" }], startedAt: 1, endedAt: 3 },
+  ];
+  const open = (allow: boolean, running = false) => {
+    initial({ turns: transcript, runningConvIds: running ? ["A"] : [] });
+    message({ type: "conversations", list: [{ id: "A", title: "A", updatedAt: 1, allowModelOutputEdits: allow }], activeId: "A", runningConvIds: running ? ["A"] : [] });
+  };
+  const editButtons = () => [...container.querySelectorAll<HTMLButtonElement>(".output-edit-action")];
+  const expandWork = () => act(() => container.querySelector<HTMLButtonElement>("button.working-head")!.click());
+
+  it("shows no edit affordance until the conversation opts in, and toggles from the menu", () => {
+    open(false);
+    expect(editButtons()).toHaveLength(0);
+    act(() => container.querySelector<HTMLButtonElement>('button[title="More"]')!.click());
+    const toggle = [...container.querySelectorAll<HTMLButtonElement>(".more-menu button")].find(button => button.textContent?.includes("Allow editing model output"))!;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    vi.mocked(vscode.postMessage).mockClear();
+    act(() => toggle.click());
+    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "setModelOutputEditing", convId: "A", enabled: true });
+    // Text and thinking are editable; tool calls are not.
+    expandWork();
+    expect(editButtons().map(button => button.getAttribute("aria-label")).sort()).toEqual(["Edit response text", "Edit thinking"]);
+    act(() => container.querySelector<HTMLButtonElement>('button[title="More"]')!.click());
+    const checked = [...container.querySelectorAll<HTMLButtonElement>(".more-menu button")].find(button => button.textContent?.includes("Allow editing model output"))!;
+    expect(checked.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("saves with Ctrl+Enter, cancels with Escape, and sends the edit to the host", () => {
+    open(true);
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="Edit response text"]')!.click());
+    let field = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Edit response text"]')!;
+    expect(field.value).toBe("Original answer");
+    act(() => { field.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    expect(container.querySelector("textarea")).toBeNull();
+    expect(container.textContent).toContain("Original answer");
+
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="Edit response text"]')!.click());
+    field = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Edit response text"]')!;
+    const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+    act(() => { setValue.call(field, "Edited answer"); field.dispatchEvent(new Event("input", { bubbles: true })); });
+    vi.mocked(vscode.postMessage).mockClear();
+    act(() => { field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true })); });
+    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "editModelOutput", convId: "A", turnIndex: 1, blockIndex: 2, kind: "text", previousText: "Original answer", text: "Edited answer" });
+    expect(container.textContent).toContain("Edited answer");
+    expect(container.querySelector("textarea")).toBeNull();
+  });
+
+  it("edits thinking blocks and disables editing while the conversation runs", () => {
+    open(true);
+    expandWork();
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="Edit thinking"]')!.click());
+    const field = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Edit thinking"]')!;
+    expect(field.value).toBe("Plan the change");
+    message({ type: "runStarted", convId: "A", turns: transcript });
+    expect(container.querySelector("textarea")).toBeNull();
+    expect(editButtons().length).toBeGreaterThan(0);
+    expect(editButtons().every(button => button.disabled)).toBe(true);
   });
 });
 

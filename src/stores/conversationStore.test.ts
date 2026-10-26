@@ -282,3 +282,28 @@ it("does not drop other pending keys when one storage write fails", async () => 
   await store.update(conversation.id, { usedTokens: 2 });
   await store.flush();
 });
+
+it("skips unchanged saves, caps run events, and trims tool output when archiving", async () => {
+  const context = { workspaceState: storage(), globalState: storage() } as any;
+  const store = new ConversationStore(context);
+  const conversation = await store.create();
+  await store.update(conversation.id, { usedTokens: 10, allowModelOutputEdits: true });
+  const write = vi.spyOn(context.workspaceState, "update");
+  await store.update(conversation.id, { usedTokens: 10, allowModelOutputEdits: true });
+  expect(write).not.toHaveBeenCalled();
+  for (let i = 0; i < 600; i++) await store.appendRunEvent(conversation.id, { runId: "r", type: i === 0 ? "queue.finished" : "tool", at: i });
+  const events = store.get(conversation.id)!.runEvents!;
+  expect(events.length).toBeLessThanOrEqual(501);
+  expect(events[0].type).toBe("queue.finished");
+  const output = "x".repeat(10_000);
+  await store.update(conversation.id, {
+    steps: [{ kind: "tool-result", callId: "c", name: "Read", output, status: "completed" }],
+    turns: [{ role: "assistant", blocks: [{ kind: "tool", callId: "c", name: "Read", input: {}, status: "completed", result: output }] }],
+  });
+  await store.update(conversation.id, { archivedAt: 1 });
+  const archived = store.get(conversation.id)!;
+  expect((archived.steps[0] as any).output.length).toBeLessThan(5_000);
+  expect((archived.turns[0] as any).blocks[0].result.length).toBeLessThan(5_000);
+  expect(archived.runEvents!.every(event => event.type.startsWith("queue."))).toBe(true);
+  expect(store.list()[0].allowModelOutputEdits).toBe(true);
+});

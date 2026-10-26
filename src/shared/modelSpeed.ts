@@ -13,7 +13,7 @@ export type ModelSpeed = "standard" | "fast";
 export const MODEL_SPEED_DESCRIPTION = "Fast processing uses extra credits or higher API rates. Requires account support; custom gateways may ignore this setting.";
 
 // Exact families only: Pro, Spark, fine-tunes and unknown suffixes are excluded.
-const OPENAI_FAST = /^(?:gpt-6-(?:astra|sol|luna)|gpt-5\.6(?:-(?:sol|terra|luna))?|gpt-5\.5|gpt-5\.4(?:-mini)?|gpt-5\.3-codex)(?:-\d{4}-\d{2}-\d{2})?$/;
+const OPENAI_FAST = /^(?:gpt-6\.1-(?:sol|terra)|gpt-6-(?:astra|sol|luna)|gpt-5\.6(?:-(?:sol|terra|luna))?|gpt-5\.5|gpt-5\.4(?:-mini)?|gpt-5\.3-codex)(?:-\d{4}-\d{2}-\d{2})?$/;
 const ANTHROPIC_FAST = /^claude-opus-(?:5-5|5|4-8)(?:-\d{8})?$/;
 
 /** Metadata matching never changes the model ID sent to a gateway. */

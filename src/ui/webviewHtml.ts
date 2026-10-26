@@ -8,14 +8,16 @@
  */
 
 import * as vscode from "vscode";
+import { randomBytes } from "node:crypto";
 
 function nonce(): string {
-  let text = "";
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  for (let i = 0; i < 32; i++) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return text;
+  // CSP nonces must be unpredictable; Math.random is not a CSPRNG.
+  return randomBytes(24).toString("base64url");
+}
+
+/** The only extension folders a webview may load resources from. */
+export function webviewResourceRoots(extensionUri: vscode.Uri): vscode.Uri[] {
+  return [vscode.Uri.joinPath(extensionUri, "dist", "webview"), vscode.Uri.joinPath(extensionUri, "media")];
 }
 
 /** Thin HTML shell that loads a bundled React webview (dist/webview/<entry>.js/.css). */

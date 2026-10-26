@@ -15,7 +15,7 @@ import * as crypto from "crypto";
 import { gzipSync } from "zlib";
 import { spawn } from "node:child_process";
 import { build } from "esbuild";
-import { installRuntime, runtimePackages, extractRuntimeTar, withRuntimePublishLock, type RuntimeManifest } from "./runtimeInstaller";
+import { installRuntime, runtimePackages, extractRuntimeTar, withRuntimePublishLock, collectRuntimeGarbage, type RuntimeManifest } from "./runtimeInstaller";
 
 function tarFile(name: string, content: string): Buffer {
   const bytes = Buffer.from(content), header = Buffer.alloc(512);
@@ -56,6 +56,27 @@ describe("pinned runtime installation", () => {
       await installRuntime("fixture", storage, { manifest: newer.manifest, fetch: request });
       expect(request).toHaveBeenCalledTimes(3);
     } finally { await fs.rm(storage, { recursive: true, force: true }); }
+  });
+  it("collects stale incomplete and old stamp folders without following links", async () => {
+    const storage = await fs.mkdtemp(path.join(os.tmpdir(), "oc-runtime-gc-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "oc-runtime-gc-outside-"));
+    try {
+      const current = "a".repeat(64), old = "b".repeat(64), young = "c".repeat(64), linked = "d".repeat(64);
+      for (const name of [current, old, young, `${current}.incomplete-1234`]) await fs.mkdir(path.join(storage, name, "inner"), { recursive: true });
+      await fs.writeFile(path.join(outside, "keep.txt"), "x");
+      // A junction inside a stale folder must be unlinked, never traversed.
+      await fs.symlink(outside, path.join(storage, old, "inner", "link"), process.platform === "win32" ? "junction" : "dir");
+      await fs.symlink(outside, path.join(storage, linked), process.platform === "win32" ? "junction" : "dir");
+      const past = new Date(Date.now() - 2 * 86_400_000);
+      for (const name of [current, old]) await fs.utimes(path.join(storage, name), past, past);
+      const removed = await collectRuntimeGarbage(storage, new Set([current]));
+      expect(removed.sort()).toEqual([`${current}.incomplete-1234`, old].sort());
+      expect((await fs.readdir(storage)).sort()).toEqual([current, young, linked].sort());
+      expect(await fs.readFile(path.join(outside, "keep.txt"), "utf8")).toBe("x");
+    } finally {
+      await fs.rm(storage, { recursive: true, force: true });
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
   it("rejects a corrupt tarball before publishing an install", async () => {
     const storage = await fs.mkdtemp(path.join(os.tmpdir(), "oc-runtime-"));

@@ -15,8 +15,10 @@ import { listModels, generateTitle, pickModel } from "../agent/provider";
 import { providerApiKeyPool, type ApiKeyPool } from "../agent/provider/apiKeyPool";
 import { OAUTH_KINDS, isOAuthProviderKind } from "../shared/oauthProviders";
 import { PROVIDER_PRESETS } from "../shared/providerCatalog";
-import { renderWebviewHtml } from "./webviewHtml";
-import { ConversationStore, titleFromText } from "../stores/conversationStore";
+import { renderWebviewHtml, webviewResourceRoots } from "./webviewHtml";
+import { ConversationStore, capRunEvents, titleFromText } from "../stores/conversationStore";
+import { applyModelOutputEdit, type ModelOutputEdit } from "./sidebar/modelOutputEdit";
+import * as os from "node:os";
 import { FeatureStore, MODEL_CATALOG, kindMatches, optionsToParams, parseContextLabel, providerEnabled, type ModelDef, type ModelOption, type ProviderConfig } from "../stores/featureStore";
 import { effectiveContextLength, ensureLoaded, isRunning, serverUrlFor } from "../agent/llamacpp";
 import * as ollama from "../agent/ollama";
@@ -26,7 +28,7 @@ import { DEFAULT_APPROVAL, evaluateApproval, deniedSubject, actionTypeForCall, a
 import { stripModelScope, suggestPattern } from "./sidebar/approvalSuggest";
 import type { PendingApproval, RunSession } from "./sidebar/session";
 import { runHooks, runBlockingHooks } from "../integrations/hooksRunner";
-import { getWorkspaceRoot, safePath, withWorkspaceRoot } from "../context/workspaceUtils";
+import { findWorkspaceRoot, getWorkspaceRoot, safePath, withWorkspaceRoot } from "../context/workspaceUtils";
 import { allPersonas, getPersona } from "../agent/personas";
 import { pendingChanges, computeHunks } from "../stores/pendingChanges";
 import { applyEvent, closeTrailingThinking, forceSettleOpenWork, parseMentionTokens, renderMentionTokens, setQuestionAnswers, turnsToTranscript, type AgentEvent as SharedAgentEvent, type Turn } from "../shared/turns";
@@ -42,6 +44,12 @@ import { RunJournal } from "../stores/runJournal";
 import { workspaceStorageDirectory } from "./sidebar/storage";
 import { createConversationWorktree } from "../integrations/worktrees";
 import { reviewInstructions, type QueuedMessage, type ReviewTarget, type GoalStatus, type ChatWorkspaceState } from "../shared/chatSession";
+
+/** Chat links may only open ordinary web pages. */
+function isWebUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try { const url = new URL(value); return url.protocol === "http:" || url.protocol === "https:"; } catch { return false; }
+}
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "ocursor.chatView";
@@ -59,6 +67,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private _workflowReady: Promise<void>;
   private _journals = new Map<string, RunJournal>();
   private _disposed = false;
+  /** Mentions requested before the webview reported `ready` (e.g. the first Ctrl+L). */
+  private _pendingMentions: HostMentionItem[] = [];
+  private _webviewReady = false;
   /** Shared debug/log output channel (View → Output → "OpenCursor"). */
   public static get log(): vscode.OutputChannel {
     return getLog();
@@ -188,7 +199,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           // cannot resurrect a completed request after the webview reconnects.
           const latest = this._store.get(id);
           if (latest) await this._store.update(id, { queue: (latest.queue ?? []).filter((item) => item.id !== next.id),
-            runEvents: [...latest.runEvents ?? [], { runId: next.id, type: "queue.finished", at: Date.now() }].slice(-2000) });
+            runEvents: capRunEvents([...latest.runEvents ?? [], { runId: next.id, type: "queue.finished", at: Date.now() }]) });
         } else {
           await this._store.updateQueue(id, (queue) => queue.map((item) => item.id === next.id ? { ...item, status: result === "cancelled" ? "interrupted" : "failed", error: failure ?? (result === "cancelled" ? "Request stopped. Resume to continue remaining work." : "Request did not finish. Check the conversation before retrying.") } : item));
           this._queuePaused.add(id);
@@ -241,7 +252,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       // can classify this request as an unexpected interruption.
       const saved = retired.length && conversation ? this._store.update(id, {
         queue: (conversation.queue ?? []).filter(item => item.status !== "running"),
-        runEvents: [...conversation.runEvents ?? [], ...retired.map(item => ({ runId: item.id, type: "queue.cancelled", at: Date.now() }))].slice(-2000),
+        runEvents: capRunEvents([...conversation.runEvents ?? [], ...retired.map(item => ({ runId: item.id, type: "queue.cancelled", at: Date.now() }))]),
       }) : Promise.resolve();
       this._cancelSession(id);
       await saved;
@@ -284,7 +295,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           { ...item, status: "queued", resume: item.status !== "queued" || item.resume, error: undefined },
           ...(snapshot.queue ?? []).filter(entry => entry.id !== replaced?.id && entry.id !== requestId),
         ], steering: [], steeringQueue: [],
-          runEvents: [...snapshot.runEvents ?? [], ...retired.map(entry => ({ runId: entry.id, type: "queue.superseded", at: Date.now() }))].slice(-2000) });
+          runEvents: capRunEvents([...snapshot.runEvents ?? [], ...retired.map(entry => ({ runId: entry.id, type: "queue.superseded", at: Date.now() }))]) });
       }
       if (current && this._sessions.get(id) === current) { this._cancelSession(id); await current.done; }
       await this._queueWorkers.get(id);
@@ -330,7 +341,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     await this._store.update(id, {
       queue: fromQueue ? (conversation.queue ?? []).filter(entry => entry.id !== item.id) : conversation.queue,
       steeringQueue: [...conversation.steeringQueue ?? [], item],
-      runEvents: [...conversation.runEvents ?? [], { runId: item.id, type: "queue.steered", at: Date.now(), data: { text: item.text } }].slice(-2000),
+      runEvents: capRunEvents([...conversation.runEvents ?? [], { runId: item.id, type: "queue.steered", at: Date.now(), data: { text: item.text } }]),
     });
     if (this._sessions.get(id) !== live || live.settled || live.abort.signal.aborted) {
       await this._restorePendingSteering(id);
@@ -404,8 +415,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     await this._submitMessage({ convId: conversation.id, text: reviewInstructions(target), mode: "ask" });
   }
 
-  public async implementTodo(uri: vscode.Uri, line: number): Promise<void> {
+  public async implementTodo(uri?: vscode.Uri, line?: number): Promise<void> {
+    // From the command palette there are no CodeLens arguments: use the cursor.
+    if (!uri || typeof line !== "number") {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.uri.scheme !== "file") {
+        void vscode.window.showInformationMessage("OpenCursor: place the cursor on a TODO comment, or use the \"Implement with OpenCursor\" CodeLens.");
+        return;
+      }
+      uri = editor.document.uri;
+      line = editor.selection.active.line;
+    }
     const document = await vscode.workspace.openTextDocument(uri);
+    if (line < 0 || line >= document.lineCount) return;
     const text = document.lineAt(line).text.trim();
     await this.newChat();
     await this._submitMessage({ text: `Implement the TODO at ${vscode.workspace.asRelativePath(uri, false)}:${line + 1}:\n${text}\n\nInspect the surrounding code and relevant tests before editing, and verify the change.`, mode: "agent" });
@@ -454,10 +476,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           name: `${rel.split("/").pop()}:${sel.start.line + 1}-${sel.end.line + 1}`,
           detail: rel,
         };
-    vscode.commands.executeCommand("ocursor.chatView.focus").then(() => {
-      // Small delay so a freshly-created webview is ready to receive it.
-      setTimeout(() => this._view?.webview.postMessage({ type: "insertMention", mention }), 100);
-    });
+    // A freshly created webview cannot receive messages until it reports ready.
+    if (this._view && this._webviewReady) void this._view.webview.postMessage({ type: "insertMention", mention });
+    else this._pendingMentions.push(mention);
+    void vscode.commands.executeCommand("ocursor.chatView.focus");
   }
 
   public resolveWebviewView(
@@ -466,10 +488,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken
   ) {
     this._view = webviewView;
+    this._webviewReady = false;
 
     webviewView.webview.options = {
       enableScripts: true,
-      localResourceRoots: [this.context.extensionUri],
+      localResourceRoots: webviewResourceRoots(this.context.extensionUri),
     };
 
     webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
@@ -492,6 +515,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       if (e.affectsConfiguration("workbench.iconTheme")) invalidateFileIconCache();
     });
     webviewView.onDidDispose(() => {
+      if (this._view === webviewView) { this._view = undefined; this._webviewReady = false; }
       sub();
       cfgSub.dispose();
       oauthSub.dispose();
@@ -505,6 +529,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       switch (data.type) {
         case "ready":
           await this._sendInitialState();
+          this._webviewReady = true;
+          for (const mention of this._pendingMentions.splice(0)) this._view?.webview.postMessage({ type: "insertMention", mention });
           break;
         case "sendMessage":
           if (data.fromIndex == null) {
@@ -552,7 +578,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           await this.startReview(data.target);
           break;
         case "createWorktreeConversation": {
-          const worktree = await createConversationWorktree(getWorkspaceRoot(), path.join(this.context.globalStorageUri.fsPath, "worktrees"), data.title);
+          const root = findWorkspaceRoot();
+          if (!root) throw new Error("Open a folder before creating a worktree conversation.");
+          const worktree = await createConversationWorktree(root, path.join(this.context.globalStorageUri.fsPath, "worktrees"), data.title);
           const conversation = await this._store.create();
           await this._store.update(conversation.id, { title: `Worktree: ${worktree.branch}`, workspaceRoot: worktree.path });
           await this._selectConversation(conversation.id);
@@ -585,14 +613,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           await this._setApprovalPreset(data.preset);
           break;
         case "openBrowserTab":
-          vscode.commands.executeCommand("simpleBrowser.show", data.url || "https://www.google.com");
+          vscode.commands.executeCommand("simpleBrowser.show", isWebUrl(data.url) ? data.url : "https://www.google.com");
           break;
         case "exportConversation": {
           const conv = this._store.get(data.convId || this._activeId || "");
           if (!conv) break;
           const safe = (conv.title || "conversation").replace(/[^\w-]+/g, "_").slice(0, 60);
           const target = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.joinPath(vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd()), `${safe}.json`),
+            defaultUri: vscode.Uri.joinPath(vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir()), `${safe}.json`),
             filters: { JSON: ["json"] },
           });
           if (!target) break;
@@ -612,15 +640,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case "deleteConversation":
           await this._deleteConversation(data.id);
           break;
-        case "persistTurns": {
-          const id = data.convId ?? this._activeId;
-          // Host owns turns while a run is live; ignore webview snapshots for it.
-          if (id && !this._sessions.has(id)) {
-            await this._store.update(id, { turns: data.turns });
-            this._sendConversations();
-          }
+        // The host owns every transcript (live and stored). The webview never
+        // persists turns: its copy may be partial after a reload, and a late
+        // snapshot would overwrite a background run's saved result.
+        case "setModelOutputEditing": {
+          const id = typeof data.convId === "string" ? data.convId : undefined;
+          if (!id || !this._store.getMetadata(id)) break;
+          await this._store.update(id, { allowModelOutputEdits: data.enabled === true });
+          this._sendConversations();
           break;
         }
+        case "editModelOutput":
+          await this._editModelOutput(data);
+          break;
         case "cancelRun": {
           const id = data.convId ?? this._activeId;
           if (id) await this._stopRun(id);
@@ -727,9 +759,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           await this._handleFetchModels();
           break;
         case "selectModel":
-          const settings = this.settingsManager.getSettings();
-          settings.model = data.model;
-          await this.settingsManager.saveSettings(settings);
+          await this.settingsManager.saveSettings({ model: String(data.model ?? "") });
           break;
         case "saveModelOptions": {
           const features = this.featureStore.get();
@@ -771,13 +801,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           });
           break;
         case "acceptChange":
-          if (this._activeId) pendingChanges.accept(data.path, { conversationId: this._activeId });
+          if (this._activeId) await pendingChanges.accept(data.path, { conversationId: this._activeId });
           break;
         case "rejectChange":
           if (this._activeId) await pendingChanges.reject(data.path, { conversationId: this._activeId });
           break;
         case "acceptAllChanges":
-          if (this._activeId) pendingChanges.acceptAll({ conversationId: this._activeId });
+          if (this._activeId) await pendingChanges.acceptAll({ conversationId: this._activeId });
           break;
         case "rejectAllChanges":
           if (this._activeId) await pendingChanges.rejectAll({ conversationId: this._activeId });
@@ -801,6 +831,45 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
       });
     });
+  }
+
+  /**
+   * Webview-supplied paths may only open local files in the workspace (or a
+   * conversation's worktree), extension storage, or files with tracked agent
+   * edits. UNC / network paths are refused before any file system access.
+   */
+  private _openablePath(input: string): string {
+    if (typeof input !== "string" || /^(?:\\\\|\/\/)/.test(input.trim())) throw new Error("network paths cannot be opened from chat");
+    const resolved = safePath(input);
+    if (/^(?:\\\\|\/\/)/.test(resolved)) throw new Error("network paths cannot be opened from chat");
+    const roots = [
+      ...(vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+      ...this._store.listMetadata().flatMap((conversation) => conversation.workspaceRoot ? [conversation.workspaceRoot] : []),
+      findWorkspaceRoot(), this.context.globalStorageUri?.fsPath, this.context.storageUri?.fsPath,
+    ].filter((root): root is string => !!root);
+    const inside = roots.some((root) => {
+      const relative = path.relative(path.resolve(root), resolved);
+      return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+    });
+    if (!inside && !pendingChanges.has(resolved)) throw new Error("the path is outside the workspace");
+    return resolved;
+  }
+
+  /** Save a user edit of assistant text or reasoning to the transcript and the model history. */
+  private async _editModelOutput(data: Partial<ModelOutputEdit> & { convId?: string }) {
+    const id = typeof data.convId === "string" ? data.convId : undefined;
+    const conversation = id ? this._store.get(id) : undefined;
+    if (!id || !conversation) throw new Error("Conversation no longer exists.");
+    if (!conversation.allowModelOutputEdits) throw new Error("Turn on \"Allow editing model output\" for this conversation first.");
+    if (this._sessions.has(id) || this._queueWorkers.has(id)) throw new Error("Wait for the active run to finish before editing its output.");
+    if (!Number.isSafeInteger(data.turnIndex) || !Number.isSafeInteger(data.blockIndex) || (data.kind !== "text" && data.kind !== "thinking")
+      || typeof data.text !== "string" || typeof data.previousText !== "string") throw new Error("Invalid edit.");
+    const result = applyModelOutputEdit(conversation.turns, conversation.steps, conversation.contextState, {
+      turnIndex: data.turnIndex!, blockIndex: data.blockIndex!, kind: data.kind, previousText: data.previousText, text: data.text,
+    });
+    await this._store.update(id, { turns: result.turns, steps: result.steps, contextState: result.contextState });
+    this._view?.webview.postMessage({ type: "modelOutputEdited", convId: id, turns: result.turns });
+    if (!result.historyUpdated) void vscode.window.showInformationMessage("OpenCursor: the edit is shown in the chat, but this part of the conversation was already summarized for the model, so the model will keep seeing the summary.");
   }
 
   private _sendPendingChanges() {
@@ -904,7 +973,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           break;
         }
         case "folder": {
-          const uri = vscode.Uri.file(safePath(p));
+          const uri = vscode.Uri.file(this._openablePath(p));
           await vscode.commands.executeCommand(vscode.workspace.getWorkspaceFolder(uri) ? "revealInExplorer" : "revealFileInOS", uri);
           break;
         }
@@ -921,16 +990,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           break;
         case "doc": {
           const doc = (this.featureStore.get().docSources ?? []).find((d) => d.id === p);
-          if (doc) await vscode.env.openExternal(vscode.Uri.parse(doc.url));
+          if (doc && isWebUrl(doc.url)) await vscode.env.openExternal(vscode.Uri.parse(doc.url));
           break;
         }
         case "link":
+          if (!isWebUrl(p)) throw new Error("only http and https links can be opened");
           await vscode.env.openExternal(vscode.Uri.parse(p));
           break;
         case "git": {
           // Show the commit in a readonly virtual doc.
           const { spawn } = await import("child_process");
-          const root = getWorkspaceRoot();
+          const root = findWorkspaceRoot();
+          if (!root) break;
           const out = await new Promise<string>((res) => {
             const c = spawn("git", ["show", p], { cwd: root });
             let o = "";
@@ -962,7 +1033,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     try {
       // Use the same resolver as tools so model-facing `/workspace/...` paths
       // become this workspace on Windows instead of the nonexistent C:\workspace.
-      const uri = vscode.Uri.file(safePath(relPath));
+      const uri = vscode.Uri.file(this._openablePath(relPath));
       // Race open so a missing/network path cannot hang the extension host forever.
       const doc = await Promise.race([
         vscode.workspace.openTextDocument(uri),
@@ -1003,6 +1074,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       activeId: this._activeId,
       turns: this._turnsFor(this._activeId),
       usedTokens: active?.usedTokens,
+      allowModelOutputEdits: active?.allowModelOutputEdits === true,
       workspaceRoot: active?.workspaceRoot,
       personas: allPersonas(features.customPersonas).map((p) => ({ id: p.id, name: p.name, description: p.description })),
       activePersonaId: active?.personaId ?? features.activePersonaId,
@@ -1131,7 +1203,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this._activeId = id;
     await this._store.setActiveId(id);
     const features = this.featureStore.get();
-    this._view?.webview.postMessage({ type: "loadConversation", activeId: id, turns: this._turnsFor(id), personaId: conv.personaId ?? features.activePersonaId, usedTokens: conv.usedTokens, running: this._sessions.has(id), workspaceRoot: conv.workspaceRoot });
+    this._view?.webview.postMessage({ type: "loadConversation", activeId: id, turns: this._turnsFor(id), personaId: conv.personaId ?? features.activePersonaId, usedTokens: conv.usedTokens, running: this._sessions.has(id), workspaceRoot: conv.workspaceRoot, allowModelOutputEdits: conv.allowModelOutputEdits === true });
     this._sendConversations();
     this._sendWorkflowState();
     this._sendPendingChanges();
@@ -1146,6 +1218,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       if (session) await session.done;
       await this._queueWorkers.get(id);
       await this._store.delete(id);
+      await this._deleteRunJournal(id);
       if (this._activeId === id) {
         this._activeId = undefined;
         this._view?.webview.postMessage({ type: "loadConversation", activeId: undefined, turns: [] });
@@ -1156,6 +1229,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     } finally {
       this._deleting.delete(id);
     }
+  }
+
+  /** A deleted conversation's durable run evidence goes with it. */
+  private async _deleteRunJournal(id: string) {
+    const storage = workspaceStorageDirectory(this.context);
+    const journal = this._journals.get(id) ?? (storage ? new RunJournal(path.join(storage, "runs"), id) : undefined);
+    this._journals.delete(id);
+    await journal?.delete().catch((error) => logError("conversation.delete-journal", error, { conversationId: id }));
   }
 
   /** Team list for the composer's Project-mode picker (member names resolved). */
@@ -2110,7 +2191,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         ? prov.providerId : features.providers.find((p) => p.id === prov.providerId)?.kind);
       let steeringBatch: QueuedMessage[] = [];
       await runAgent({
-        workspaceRoot: getWorkspaceRoot(),
+        workspaceRoot: findWorkspaceRoot(),
         runId: activeRunId,
         goal: this._store.getMetadata(convId)?.goal?.status === "active" ? this._store.getMetadata(convId)?.goal : undefined,
         onGoalUsage: (deltaTokens) => {

@@ -12,7 +12,8 @@ import { responseTokenReservation } from "./providerLimits";
 import type { OAuthKind } from "./oauth";
 import { OAUTH_PROVIDER_DEFINITIONS, supportsOAuthTools } from "../shared/oauthProviders";
 import { TOOLS, schemasForMode, toolsForMode, disposeShellSession, EDIT_TOOLS, MULTITASK_TOOLS, toolTimeoutMs, withToolTimeout, type AskQuestionItem, type ToolContext } from "./tools";
-import { actionTypeForCall } from "./approvalPolicy";
+import { actionTypeForCall, rgPathOperands, setMcpReadOnlyResolver } from "./approvalPolicy";
+import * as nodePath from "path";
 import { getWorkspaceRoot, normalizeToolPaths, withWorkspaceRoot } from "../context/workspaceUtils";
 import { scopedInstructionsForPaths } from "../context/workspaceContext";
 import { renderScopedInstructions } from "../context/scopedInstructions";
@@ -74,6 +75,19 @@ const PROJECT_REMINDER =
 	'(run_in_background=true, subagent_type set to the member name), batching independent launches with at most four active tasks and avoiding duplicate running work.\n</reminder>';
 
 const MAX_STEPS = 200;
+
+/**
+ * Register a per-call abort that goes inert once released, so a settled call
+ * no longer pins its controller (or kills a reused id) via the host's map.
+ */
+function registerReleasable(register: RunAgentOptions["registerSubagentAbort"], callId: string, abort: () => void): () => void {
+	let live: (() => void) | undefined = abort;
+	register?.(callId, () => live?.());
+	return () => { live = undefined; };
+}
+
+// Review mode auto-allows only MCP tools their server annotates as read-only.
+setMcpReadOnlyResolver(name => mcpManager.listTools().some(t => t.qualifiedName === name && t.tool.annotations?.readOnlyHint === true));
 
 /** Searchable text view of the lossless conversation; binary images stay in chat. */
 function archivedTranscript(steps: Step[]): string {
@@ -429,11 +443,9 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			};
 			if (parentSig.aborted) onParentAbort();
 			else parentSig.addEventListener("abort", onParentAbort, { once: true });
-			if (callId && registerSubagentAbort) {
-				registerSubagentAbort(callId, () => {
-					try { childAC.abort(); } catch { /* ignore */ }
-				});
-			}
+			const releaseAbort = callId ? registerReleasable(registerSubagentAbort, callId, () => {
+				try { childAC.abort(); } catch { /* ignore */ }
+			}) : () => {};
 			let finalText = "";
 			let childError = "";
 			let childPauseReason = "";
@@ -502,6 +514,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			if (taskOpts?.runInBackground) {
 				const title = taskOpts.description || subagentName || "subagent";
 				const tracked = runP.then(childReport).finally(() => {
+					releaseAbort();
 					parentSig.removeEventListener("abort", onParentAbort);
 					onHook?.("subagentStop", { subagent: title });
 				});
@@ -517,6 +530,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				logError("task.foreground", e, { subagent: subagentName, callId });
 				return `(subagent failed: ${e instanceof Error ? e.message : String(e)})`;
 			} finally {
+				releaseAbort();
 				parentSig.removeEventListener("abort", onParentAbort);
 				onHook?.("subagentStop", { subagent: subagentName || "subagent" });
 			}
@@ -1227,14 +1241,16 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 					finishUi(i);
 					return;
 				}
-				for (const candidate of [input.path, input.target_notebook, input.downloadPath, input.working_directory, input.target_directory, ...(Array.isArray(input.paths) ? input.paths : []), ...(Array.isArray(input.target_directories) ? input.target_directories : [])]) {
+				// Rg operands resolve against its working directory.
+				const rgPaths = resolvedName === "Rg" ? rgPathOperands(input.args).map(p => typeof input.working_directory === "string" && !nodePath.isAbsolute(p) ? nodePath.join(input.working_directory, p) : p) : [];
+				for (const candidate of [input.path, input.target_notebook, input.downloadPath, input.working_directory, input.target_directory, ...rgPaths, ...(Array.isArray(input.paths) ? input.paths : []), ...(Array.isArray(input.target_directories) ? input.target_directories : [])]) {
 					if (typeof candidate === "string") {
 						try { assertExecutionPath(candidate); }
 						catch (error) { results[i] = { status: "error", output: `error: ${error instanceof Error ? error.message : String(error)}` }; return; }
 					}
 				}
 				if (enableWorkspaceContext !== false) {
-					const paths = [input.path, input.target_notebook, input.downloadPath, input.working_directory, ...(Array.isArray(input.paths) ? input.paths : [])].filter((p): p is string => typeof p === "string");
+					const paths = [input.path, input.target_notebook, input.downloadPath, input.working_directory, ...rgPaths, ...(Array.isArray(input.paths) ? input.paths : [])].filter((p): p is string => typeof p === "string");
 					const discovered = (await scopedInstructionsForPaths(paths)).filter(rule => !instructionFingerprints.has(rule.fingerprint));
 					if (discovered.length) {
 						deferScopedMutations = true;
@@ -1306,7 +1322,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 					const limitMs = parsed[i].timeoutMs ?? toolTimeoutMs("CallMcpTool");
 					const toolAc = new AbortController();
 					const killTool = () => { try { toolAc.abort(); } catch { /* ignore */ } };
-					if (registerSubagentAbort) registerSubagentAbort(call.id, () => killTool());
+					const releaseAbort = registerReleasable(registerSubagentAbort, call.id, killTool);
 					emit({
 						type: "tool-call-started",
 						callId: call.id,
@@ -1351,6 +1367,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 						};
 						finishUi(i);
 					} finally {
+						releaseAbort();
 						signal.removeEventListener("abort", onParentAbort);
 					}
 					return;
@@ -1436,9 +1453,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 						try { toolAc.abort(reason); } catch { /* ignore */ }
 					};
 					// Register so UI countdown-0 / cancelSubagent can kill any tool.
-					if (registerSubagentAbort) {
-						registerSubagentAbort(call.id, () => killTool());
-					}
+					const releaseAbort = registerReleasable(registerSubagentAbort, call.id, () => killTool());
 					// Countdown clock starts now (not when the card was announced).
 					emit({
 						type: "tool-call-started",
@@ -1490,6 +1505,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 							};
 						}
 					} finally {
+						releaseAbort();
 						signal.removeEventListener("abort", onParentAbort);
 					}
 					// Timeout path already set results + finishUi; don't overwrite with a late success.
@@ -1542,32 +1558,32 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 
 			// Cap parallel RO tools so a burst of Grep/Glob/Task can't thrash CPU/IO.
 			// Worker pool (not batch-wait): a long Task doesn't block the next free slot.
+			// Emission order is preserved: only contiguous read-only runs between
+			// mutating calls run in parallel, so a read after a write sees the write.
 			const RO_CONCURRENCY = 8;
-			const roIdx: number[] = [];
-			for (let i = 0; i < parsed.length; i++) {
-				const name = parsed[i].call.name;
+			const isReadOnly = (i: number) => {
+				const name = parsed[i].resolvedName ?? parsed[i].call.name;
 				const tool = TOOLS[name];
-				if (tool && !tool.mutating && !name.startsWith("mcp__")) roIdx.push(i);
-			}
-			if (roIdx.length) {
+				return !!tool && !tool.mutating && !name.startsWith("mcp__");
+			};
+			const runReadOnly = async (idx: number[]) => {
 				let cursor = 0;
 				const workers = Array.from(
-					{ length: Math.min(RO_CONCURRENCY, roIdx.length) },
+					{ length: Math.min(RO_CONCURRENCY, idx.length) },
 					async () => {
-						while (cursor < roIdx.length) {
-							const i = roIdx[cursor++];
+						while (cursor < idx.length) {
+							const i = idx[cursor++];
 							await wrapExec(i);
 						}
 					},
 				);
 				await Promise.all(workers);
-			}
-			for (let i = 0; i < parsed.length; i++) {
-				const name = parsed[i].call.name;
-				const tool = TOOLS[name];
-				if (!tool || tool.mutating || name.startsWith("mcp__")) {
-					await wrapExec(i);
-				}
+			};
+			for (let i = 0; i < parsed.length;) {
+				if (!isReadOnly(i)) { await wrapExec(i++); continue; }
+				const run: number[] = [];
+				while (i < parsed.length && isReadOnly(i)) run.push(i++);
+				await runReadOnly(run);
 			}
 
 			for (let i = 0; i < parsed.length; i++) {

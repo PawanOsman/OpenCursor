@@ -285,3 +285,43 @@ describe("OAuth callback validation and lifecycle", () => {
     } else expect(getStatus().pending).toBeUndefined();
   });
 });
+
+describe("OAuth login hardening", () => {
+  it("binds Antigravity codes to a PKCE verifier and requires state for pasted callbacks", async () => {
+    fetchMock.mockImplementation(async (url: string) => String(url).includes("loadCodeAssist")
+      ? Response.json({ cloudaicompanionProject: "fixture-project" })
+      : String(url).includes("userinfo") ? Response.json({ email: "user@example.test" }) : tokenResponse());
+    await login("antigravity");
+    const url = authURL();
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+    const challenge = url.searchParams.get("code_challenge")!;
+    expect(challenge).toMatch(/^[\w-]{43}$/);
+    await expect(completeManual("antigravity", "authorization-code-fixture")).rejects.toThrow(/state/);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await completeManual("antigravity", `http://localhost:8723${callbackURL(url.searchParams.get("state")!, "/callback")}`);
+    const [, init] = fetchMock.mock.calls.find(([target]) => !String(target).includes("loadCodeAssist") && !String(target).includes("userinfo"))!;
+    const verifier = new URLSearchParams(String(init.body)).get("code_verifier")!;
+    expect(createHash("sha256").update(verifier).digest("base64url")).toBe(challenge);
+    expect(listAccounts()).toHaveLength(1);
+  });
+
+  it("closes an abandoned loopback sign-in after ten minutes", async () => {
+    vi.useFakeTimers();
+    try {
+      await login("codex");
+      expect(getStatus().pending).toBe("codex");
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(getStatus().pending).toBeUndefined();
+      expect(getStatus().authorizationUrl).toBeUndefined();
+      expect(getStatus().errors.codex).toMatch(/timed out/);
+      expect(mocks.servers[0].close).toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not echo upstream token-exchange bodies into login errors", async () => {
+    fetchMock.mockImplementation(async () => new Response("invalid_grant code=authorization-code-fixture secret", { status: 400 }));
+    await login("codex");
+    await expect(completeManual("codex", `http://localhost:1455${callbackURL()}`)).rejects.toThrow("Codex token exchange failed (HTTP 400)");
+    expect(getStatus().errors.codex).toBe("Codex token exchange failed (HTTP 400)");
+  });
+});

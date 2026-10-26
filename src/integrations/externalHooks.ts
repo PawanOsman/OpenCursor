@@ -85,7 +85,19 @@ const isCursor = (s: HookSource) => s.startsWith("cursor");
 function listFrom(source: HookSource): ExternalHook[] {
   const file = fileFor(source);
   if (!file) return [];
-  const data = readJson(file);
+  return listFromData(source, readJson(file));
+}
+
+/** Parse hooks from already-read file contents (used for consent-pinned project files). */
+export function hooksFromContent(source: HookSource, content: string): ExternalHook[] {
+  try {
+    return listFromData(source, JSON.parse(content));
+  } catch {
+    return [];
+  }
+}
+
+function listFromData(source: HookSource, data: any): ExternalHook[] {
   if (!data?.hooks || typeof data.hooks !== "object") return [];
   const out: ExternalHook[] = [];
   for (const [event, arr] of Object.entries<any>(data.hooks)) {
@@ -110,6 +122,24 @@ function listFrom(source: HookSource): ExternalHook[] {
 
 export function listExternalHooks(): ExternalHook[] {
   return (["cursor-user", "cursor-project", "claude-user", "claude-project"] as HookSource[]).flatMap(listFrom);
+}
+
+export const PROJECT_HOOK_SOURCES: readonly HookSource[] = ["cursor-project", "claude-project"];
+
+export function isProjectHookSource(source: HookSource): boolean {
+  return PROJECT_HOOK_SOURCES.includes(source);
+}
+
+/** Raw contents of a workspace-level hook file, read once so consent and execution see the same bytes. */
+export function readProjectHookFile(source: HookSource): { workspace: string; file: string; content: string } | undefined {
+  const workspace = getWorkspaceRoot();
+  const file = isProjectHookSource(source) ? fileFor(source) : undefined;
+  if (!workspace || !file) return undefined;
+  try {
+    return { workspace, file, content: fs.readFileSync(file, "utf8") };
+  } catch {
+    return undefined;
+  }
 }
 
 function removeAt(source: HookSource, data: any, ref: string): void {

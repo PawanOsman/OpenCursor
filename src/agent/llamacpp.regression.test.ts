@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} } }));
 vi.mock("child_process", () => ({ spawn: vi.fn(), execFile: vi.fn() }));
 vi.mock("../runtimeDeps", () => ({ importRuntimeDep: vi.fn() }));
-import { downloadGguf, importGguf, initLlamacpp, loadModel, ensureLoaded, unloadModel, disposeLlamacpp, isRunning, getStatus, parseExtraArgs, validateServerConfig, type LlamacppModel } from "./llamacpp";
+import { downloadGguf, importGguf, initLlamacpp, loadModel, ensureLoaded, unloadModel, disposeLlamacpp, isRunning, getStatus, parseExtraArgs, validateServerConfig, llamacppInstallPlan, isLoopbackHost, exposedWithoutApiKey, type LlamacppModel } from "./llamacpp";
 
 let temporaryRoot: string;
 let procs: (EventEmitter & { stdout: PassThrough; stderr: PassThrough; kill: ReturnType<typeof vi.fn> })[];
@@ -162,5 +162,24 @@ describe("local server lifetime", () => {
     vi.mocked(fetch).mockResolvedValueOnce(Response.json({ status: "unrelated" }));
     await expect(loadModel(model)).rejects.toThrow("unexpected payload");
     expect(isRunning(model.id)).toBe(false);
+  });
+});
+
+describe("llama.cpp install and exposure safety", () => {
+  it("installs through package managers instead of piping remote scripts", () => {
+    expect(llamacppInstallPlan("win32", false)).toEqual({ command: "winget install llama.cpp", shellPath: "powershell.exe" });
+    expect(llamacppInstallPlan("darwin", false)).toEqual({ command: "brew install llama.cpp" });
+    expect(llamacppInstallPlan("linux", true)).toEqual({ command: "brew install llama.cpp" });
+    expect(llamacppInstallPlan("linux", false)).toBeUndefined();
+  });
+
+  it("flags non-loopback binds that have no API key", () => {
+    for (const host of [undefined, "127.0.0.1", "127.1.2.3", "localhost", "::1", "[::1]"]) expect(isLoopbackHost(host)).toBe(true);
+    for (const host of ["0.0.0.0", "::", "192.168.1.5"]) expect(isLoopbackHost(host)).toBe(false);
+    expect(exposedWithoutApiKey({ host: "0.0.0.0" }, {})).toBe(true);
+    expect(exposedWithoutApiKey({ host: "0.0.0.0", extraArgs: "--api-key secret" }, {})).toBe(false);
+    expect(exposedWithoutApiKey({ host: "0.0.0.0", extraArgs: "--api-key-file key.txt" }, {})).toBe(false);
+    expect(exposedWithoutApiKey({ host: "0.0.0.0" }, { LLAMA_API_KEY: "x" })).toBe(false);
+    expect(exposedWithoutApiKey({ host: "127.0.0.1" }, {})).toBe(false);
   });
 });

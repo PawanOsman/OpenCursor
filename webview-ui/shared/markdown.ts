@@ -30,16 +30,82 @@ const marked = new Marked({
   },
 });
 
-// Drop dangerous nodes/attributes. AI output is semi-trusted; the webview CSP
-// also blocks inline scripts, but defence in depth is cheap here.
-function sanitize(html: string): string {
-  // Inspect markup only: escaped examples of attributes inside code are text.
-  return html.replace(/<\/?[a-z](?:[^"'>]|"[^"]*"|'[^']*')*>/gi, tag => {
-    if (/^<\/?(?:script|style|iframe|object|embed|link|meta|base)\b/i.test(tag)) return "";
-    return tag
-      .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
-      .replace(/(href|src)\s*=\s*("|')\s*javascript:[^"']*\2/gi, '$1="#"');
-  });
+// Allowlist sanitiser. AI output is semi-trusted and marked passes raw HTML
+// through, so rebuild the DOM keeping only markdown's own elements and safe
+// attributes. Parsing through a <template> never runs scripts or loads images.
+const ALLOWED_TAGS = new Set([
+  "p", "a", "code", "pre", "em", "strong", "del", "s", "b", "i", "u", "mark", "small", "sub", "sup", "kbd",
+  "ul", "ol", "li", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "br", "img", "span", "div",
+  "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col", "details", "summary", "input",
+  // Inline icons inside mention pills.
+  "svg", "path", "circle", "rect", "line", "polyline", "polygon", "g", "ellipse",
+]);
+/** Removed together with their content; any other unknown tag is unwrapped to its text. */
+const DROPPED_TAGS = new Set([
+  "script", "style", "iframe", "frame", "frameset", "object", "embed", "applet", "link", "meta", "base", "form",
+  "button", "textarea", "select", "option", "optgroup", "noscript", "template", "math", "video", "audio", "source",
+  "track", "canvas", "dialog", "portal", "foreignobject", "title", "head", "xmp", "plaintext", "noembed", "noframes",
+]);
+const COMMON_ATTRS = new Set(["title", "class", "dir", "align"]);
+const TAG_ATTRS: Record<string, Set<string>> = {
+  a: new Set(["href"]), img: new Set(["src", "alt", "width", "height"]), ol: new Set(["start"]),
+  th: new Set(["colspan", "rowspan"]), td: new Set(["colspan", "rowspan"]), col: new Set(["span"]),
+  input: new Set(["type", "checked", "disabled"]), details: new Set(["open"]),
+  span: new Set(["data-kind", "data-path"]), code: new Set(["data-language"]),
+};
+const SVG_ATTRS = new Set(["xmlns", "viewbox", "width", "height", "fill", "stroke", "stroke-width", "stroke-linecap",
+  "stroke-linejoin", "fill-rule", "clip-rule", "d", "cx", "cy", "r", "rx", "ry", "x", "y", "x1", "y1", "x2", "y2",
+  "points", "transform", "aria-hidden", "focusable", "opacity"]);
+const SVG_TAGS = new Set(["svg", "path", "circle", "rect", "line", "polyline", "polygon", "g", "ellipse"]);
+
+/** Scheme after browser-style normalization (entities are already decoded by the parser). */
+function scheme(value: string): string | undefined {
+  const compact = value.replace(/[\u0000-\u0020\u007f-\u009f]+/g, "");
+  return /^([a-z][a-z0-9+.-]*):/i.exec(compact)?.[1].toLowerCase();
+}
+function safeHref(value: string): boolean {
+  const found = scheme(value);
+  return found === undefined ? !/^[\\/]{2}/.test(value.trim()) : found === "http" || found === "https" || found === "mailto";
+}
+function safeSrc(value: string): boolean {
+  const found = scheme(value);
+  return found === "https" || (found === "data" && /^\s*data:image\/(?:png|gif|jpe?g|webp|avif|bmp);/i.test(value));
+}
+
+function cleanNode(node: Node): void {
+  for (const child of Array.from(node.childNodes)) {
+    if (child.nodeType === 3) continue; // text
+    if (child.nodeType !== 1) { child.remove(); continue; } // comments, processing instructions
+    const element = child as Element;
+    const tag = element.localName.toLowerCase();
+    if (DROPPED_TAGS.has(tag)) { element.remove(); continue; }
+    if (!ALLOWED_TAGS.has(tag) || (tag === "input" && element.getAttribute("type")?.toLowerCase() !== "checkbox")) {
+      if (tag === "input") { element.remove(); continue; }
+      cleanNode(element);
+      element.replaceWith(...Array.from(element.childNodes));
+      continue;
+    }
+    const svg = SVG_TAGS.has(tag);
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase();
+      const allowed = svg ? SVG_ATTRS.has(name) || name === "class" : COMMON_ATTRS.has(name) || !!TAG_ATTRS[tag]?.has(name);
+      if (!allowed) { element.removeAttribute(attribute.name); continue; }
+      if (name === "href" && !safeHref(attribute.value)) element.setAttribute(attribute.name, "#");
+      else if (name === "src" && !safeSrc(attribute.value)) element.removeAttribute(attribute.name);
+      else if (svg && /url\s*\(|javascript:/i.test(attribute.value)) element.removeAttribute(attribute.name);
+    }
+    // Task-list checkboxes are display only.
+    if (tag === "input") element.setAttribute("disabled", "");
+    if (tag === "a" && element.hasAttribute("href")) element.setAttribute("rel", "noopener noreferrer");
+    cleanNode(element);
+  }
+}
+
+export function sanitizeHtml(html: string): string {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  cleanNode(template.content);
+  return template.innerHTML;
 }
 
 /** Resolve each prose block independently so mixed-language replies stay readable. */
@@ -91,7 +157,7 @@ export function renderMarkdown(srcIn: string): string {
   return cached(src, () => {
     try {
       highlightRemaining = HIGHLIGHT_BUDGET;
-      return textDirections(sanitize(marked.parse(src, { async: false }) as string));
+      return textDirections(sanitizeHtml(marked.parse(src, { async: false }) as string));
     } catch {
       // Fallback: render as escaped plain text on parser failure.
       return '<p dir="auto">' + src.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") + "</p>";

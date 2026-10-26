@@ -486,8 +486,65 @@ function parentTaskCallId(turns: Turn[], nestedCallId: string): string | undefin
   return undefined;
 }
 
-const AssistantContent = React.memo(function AssistantContent({ turn, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals }: {
-  turn: AssistantTurn; running: boolean; phase?: string;
+/** Per-conversation "Allow editing model output" state for the visible chat. */
+const ModelOutputEditContext = React.createContext<{ enabled: boolean; disabled: boolean;
+  save: (turnIndex: number, blockIndex: number, kind: "text" | "thinking", previousText: string, text: string) => void } | null>(null);
+
+/** Index of a rendered block in the stored turn (presentation may re-split the final text). */
+function sourceIndex(turn: AssistantTurn, block: AssistantBlock): number {
+  const exact = turn.blocks.indexOf(block);
+  if (exact >= 0 || block.kind !== "text") return exact;
+  for (let i = turn.blocks.length - 1; i >= 0; i--) if (turn.blocks[i].kind === "text") return i;
+  return -1;
+}
+
+export function OutputEditor({ initialText, label, onSave, onCancel }: { initialText: string; label: string; onSave: (text: string) => void; onCancel: () => void }) {
+  const [text, setText] = React.useState(initialText);
+  const ref = React.useRef<HTMLTextAreaElement>(null);
+  React.useLayoutEffect(() => {
+    const field = ref.current;
+    if (!field) return;
+    field.style.height = "auto";
+    field.style.height = `${field.scrollHeight}px`;
+  }, [text]);
+  React.useEffect(() => { ref.current?.focus(); }, []);
+  return <div className="output-editor">
+    <textarea ref={ref} className="output-editor-input" aria-label={label} value={text} onChange={(event) => setText(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") { event.preventDefault(); onCancel(); }
+        else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); onSave(text); }
+      }} />
+    <div className="output-editor-actions">
+      <span className="output-editor-hint">Esc to cancel · Ctrl+Enter to save</span>
+      <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+      <button type="button" className="btn-primary" disabled={text === initialText} onClick={() => onSave(text)}>Save</button>
+    </div>
+  </div>;
+}
+
+function EditableOutput({ turnIndex, blockIndex, kind, children }: { turnIndex?: number; blockIndex: number; kind: "text" | "thinking"; children: React.ReactNode }) {
+  const edit = React.useContext(ModelOutputEditContext);
+  const turns = React.useContext(OutputTurnsContext);
+  const [editing, setEditing] = React.useState(false);
+  const turn = turnIndex === undefined ? undefined : turns?.[turnIndex];
+  const source = turn?.role === "assistant" ? turn.blocks[blockIndex] : undefined;
+  const original = source && source.kind === kind ? source.text : undefined;
+  React.useEffect(() => { if (edit?.disabled || !edit?.enabled) setEditing(false); }, [edit?.disabled, edit?.enabled]);
+  if (!edit?.enabled || turnIndex === undefined || original === undefined) return <>{children}</>;
+  const label = kind === "text" ? "Edit response text" : "Edit thinking";
+  if (editing && !edit.disabled) return <OutputEditor initialText={original} label={label} onCancel={() => setEditing(false)}
+    onSave={(text) => { setEditing(false); if (text !== original) edit.save(turnIndex, blockIndex, kind, original, text); }} />;
+  return <div className={`editable-output editable-${kind}`}>
+    {children}
+    <button type="button" className="message-action output-edit-action" aria-label={label} title={edit.disabled ? "Wait for the run to finish to edit" : label}
+      disabled={edit.disabled} onClick={() => setEditing(true)}><Icon name="edit" size={14} /></button>
+  </div>;
+}
+/** Stored turns of the visible chat, so editors start from the exact saved block text. */
+const OutputTurnsContext = React.createContext<Turn[] | null>(null);
+
+const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals }: {
+  turn: AssistantTurn; turnIndex?: number; running: boolean; phase?: string;
   onImplement?: (path: string) => void; onOpenSubagent?: (callId: string) => void;
   approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
 }) {
@@ -501,8 +558,10 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
     return items.map((block, index) => {
       if (block.kind === "explore-group") return <ExploringSection key={index} tools={block.tools}
         live={live && index === items.length - 1} onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvals} />;
-      if (block.kind === "text") return <div className="block-group" key={index}><Markdown text={block.text} /></div>;
-      if (block.kind === "thinking") return <ThinkingCard key={index} block={block} />;
+      if (block.kind === "text") return <div className="block-group" key={index}>
+        <EditableOutput turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="text"><Markdown text={block.text} /></EditableOutput>
+      </div>;
+      if (block.kind === "thinking") return <EditableOutput key={index} turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="thinking"><ThinkingCard block={block} /></EditableOutput>;
       if (block.kind === "error") return <div className="block-group" key={index}><ErrorCard block={block} /></div>;
       if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} /></div>;
       if (block.kind === "max-steps") return <div className="block-group" key={index}><MaxStepsCard block={block} running={running} /></div>;
@@ -850,6 +909,25 @@ export function App() {
   const turns = active.turns;
   const isRunning = active.running;
   const status = active.status;
+  const allowOutputEdits = !!activeId && conversations.some((c) => c.id === activeId && c.allowModelOutputEdits);
+  const setOutputEditing = (enabled: boolean) => {
+    if (!activeId) return;
+    setConversations((list) => list.map((c) => c.id === activeId ? { ...c, allowModelOutputEdits: enabled } : c));
+    post({ type: "setModelOutputEditing", convId: activeId, enabled });
+  };
+  const saveOutputEdit = React.useCallback((turnIndex: number, blockIndex: number, kind: "text" | "thinking", previousText: string, text: string) => {
+    const convId = activeIdRef.current;
+    const s = convId ? sessionsRef.current.get(convId) : undefined;
+    if (!convId || !s || s.running) return;
+    const turn = s.turns[turnIndex];
+    if (turn?.role === "assistant" && turn.blocks[blockIndex]?.kind === kind) {
+      // Optimistic; the host replies with its authoritative transcript.
+      s.turns = s.turns.map((t, i) => i !== turnIndex || t.role !== "assistant" ? t : { ...t, blocks: t.blocks.map((b, bi) => bi === blockIndex ? { ...b, text } as AssistantBlock : b) });
+      force();
+    }
+    post({ type: "editModelOutput", convId, turnIndex, blockIndex, kind, previousText, text });
+  }, []);
+  const outputEdit = React.useMemo(() => ({ enabled: allowOutputEdits, disabled: isRunning, save: saveOutputEdit }), [allowOutputEdits, isRunning, saveOutputEdit]);
   // The host supplies a fresh transcript whenever a conversation is selected.
   // Keep only the visible chat and live background runs instead of retaining
   // every transcript (including attachments and tool output) ever opened.
@@ -1068,24 +1146,9 @@ export function App() {
   });
 
 
-  // Auto-scroll already handled below; persistence happens on settle per session.
-
-  // Throttled per-conversation persistence of live turns (max ~1/sec each) so the
-  // host store stays close to the on-screen state during a run.
-  const persistTimers = React.useRef(new Map<string, number>());
-  const schedulePersist = (id: string, s: ChatSession) => {
-    if (!id || persistTimers.current.has(id)) return;
-    // While a run is live the HOST owns turns and persists them itself; it drops
-    // webview snapshots for such conversations. Sending them anyway would
-    // structured-clone the whole transcript (tool results included) across the
-    // bridge every 800ms just to be discarded.
-    if (s.running) return;
-    const t = window.setTimeout(() => {
-      persistTimers.current.delete(id);
-      post({ type: "persistTurns", convId: id, turns: s.turns });
-    }, 800);
-    persistTimers.current.set(id, t);
-  };
+  // The host owns and persists every transcript (live and settled). The
+  // webview never sends turn snapshots back: after a reload its copy may be
+  // partial, and a late snapshot would overwrite a background run's result.
 
   // Reconcile each session's `running` flag with the host's authoritative set of
   // in-flight runs (after a webview reload the agent may still be working).
@@ -1243,6 +1306,12 @@ export function App() {
           if (msg.activeId) setOpenTabs((t) => t.includes(msg.activeId!) ? t : [...t, msg.activeId!]);
           markRunning(msg.runningConvIds);
           break;
+        case "modelOutputEdited": {
+          const s = sessionsRef.current.get(msg.convId);
+          if (s && !s.running) s.turns = msg.turns;
+          if (msg.convId === activeIdRef.current) force();
+          break;
+        }
         case "loadConversation":
           setWorkspaceRoot(msg.workspaceRoot);
           if (!msg.activeId) sessionsRef.current.set("", { turns: [], running: false, status: { text: "" } });
@@ -1327,7 +1396,6 @@ export function App() {
                 closeTrailingThinking(s.turns),
                 ev.status === "error" ? "error" : "cancelled",
               );
-              post({ type: "persistTurns", convId: msg.convId, turns: s.turns });
             }
           } else {
             s.turns = applyEvent(s.turns, ev);
@@ -1335,9 +1403,6 @@ export function App() {
               pendingSteeringRef.current.get(msg.convId)?.delete(ev.requestId);
               queueRef.current.set(msg.convId, (queueRef.current.get(msg.convId) ?? []).filter(item => item.id !== ev.requestId));
             }
-            // Throttle-persist live turns so a pane move / remount (which destroys
-            // the webview without a reliable pagehide) restores the in-flight chat.
-            schedulePersist(msg.convId, s);
             if (ev.type === "thinking-delta") s.status = { text: "Thinking" };
             else if (ev.type === "text-delta") s.status = { text: "Generating" };
             else if (ev.type === "tool-call-started") s.status = { text: capitalize(toolLabel(ev.name)) };
@@ -1348,9 +1413,8 @@ export function App() {
             else if (ev.type === "compaction") s.status = { text: ev.status === "running" ? "Summarizing conversation" : "Planning next moves" };
             else if (ev.type === "shell-notify") s.status = { text: ev.message };
             else if (ev.type === "error") {
-              // Keep the rendered error block; persist so the chat survives reloads.
+              // The host records the error block in its own transcript.
               s.status = { text: "Error: " + ev.message, error: true };
-              post({ type: "persistTurns", convId: msg.convId, turns: s.turns });
             }             else if (ev.type === "mode-changed") {
               setMode(ev.mode);
               post({ type: "setMode", mode: ev.mode });
@@ -1377,25 +1441,10 @@ export function App() {
       }
     };
     window.addEventListener("message", handler);
-    // Last-chance flush: if the webview is torn down (window close / extension
-    // reload) mid-run, persist every session's current turns so reopening shows
-    // the live state instead of a stale/blank chat.
-    const flush = () => {
-      for (const [id, s] of sessionsRef.current) {
-        if (id && s.turns.length) post({ type: "persistTurns", convId: id, turns: s.turns });
-      }
-    };
-    window.addEventListener("pagehide", flush);
-    window.addEventListener("beforeunload", flush);
     post({ type: "ready" });
     return () => {
       if (raf) cancelAnimationFrame(raf);
-      flush();
-      for (const timer of persistTimers.current.values()) window.clearTimeout(timer);
-      persistTimers.current.clear();
       window.removeEventListener("message", handler);
-      window.removeEventListener("pagehide", flush);
-      window.removeEventListener("beforeunload", flush);
     };
   }, []);
 
@@ -1681,6 +1730,11 @@ export function App() {
                 <button disabled={!isRunning || !activeId} onClick={() => { setMoreOpen(false); setWorkflowDialog("steer"); }}><Icon name="edit" size={13} /> Update active task</button>
                 <button disabled={!activeId || isRunning} onClick={() => { setMoreOpen(false); if (activeId) post({ type: "forkConversation", id: activeId }); }}><Icon name="plus" size={13} /> Fork conversation</button>
                 <button disabled={!activeId || isRunning} onClick={() => { setMoreOpen(false); if (activeId) post({ type: "archiveConversation", id: activeId, archived: true }); }}><Icon name="history" size={13} /> Archive conversation</button>
+                <button role="menuitemcheckbox" aria-checked={allowOutputEdits} disabled={!activeId}
+                  title="Show an edit button on this conversation's assistant text and thinking. Edits change what the model sees next."
+                  onClick={() => { setMoreOpen(false); setOutputEditing(!allowOutputEdits); }}>
+                  <Icon name={allowOutputEdits ? "check" : "edit"} size={13} /> Allow editing model output
+                </button>
                 <button onClick={() => { setMoreOpen(false); post({ type: "openBrowserTab" }); }}>
                   <Icon name="globe" size={13} /> Open Browser Tab
                 </button>
@@ -1724,6 +1778,8 @@ export function App() {
 
       <div className={"chat-messages" + (!subBlock && hasProviders && turns.length === 0 ? " is-empty" : "")} data-running={isRunning} ref={scrollRef} onScroll={onScroll} tabIndex={0} role="region" aria-label="Conversation">
         <TaskActivityContext.Provider value={isRunning}>
+        <ModelOutputEditContext.Provider value={outputEdit}>
+        <OutputTurnsContext.Provider value={turns}>
         {subBlock ? (
           <SubagentChat block={subBlock} approvals={approvalsByCall} />
         ) : !hasProviders ? (
@@ -1858,7 +1914,7 @@ export function App() {
                       <Icon name="bot" /> Agent
                     </div>
                     <div className="bubble">
-                      <AssistantContent turn={turn} running={isRunning && (turn === turns[turns.length - 1] || hasLiveWork(turn.blocks))}
+                      <AssistantContent turn={turn} turnIndex={index} running={isRunning && (turn === turns[turns.length - 1] || hasLiveWork(turn.blocks))}
                         phase={isRunning && turn === turns[turns.length - 1] && !status.error ? status.text : undefined}
                         onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask} />
                     </div>
@@ -1871,6 +1927,8 @@ export function App() {
             </div>
           ))
         )}
+        </OutputTurnsContext.Provider>
+        </ModelOutputEditContext.Provider>
         </TaskActivityContext.Provider>
       </div>
 

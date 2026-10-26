@@ -47,6 +47,10 @@ const PATTERN_THINKING: ProtocolValue[] = [
     { provider: "codex", pattern: "*gpt-5.6-terra*", levels: [...CODEX_GPT_5_6_LEVELS, "ultra"] },
     { provider: "codex", pattern: "*gpt-5.6-luna*", levels: CODEX_GPT_5_6_LEVELS },
     { pattern: "*codex*", levels: ["low", "medium", "high", "xhigh"] }, // codex cannot disable thinking
+    // Gemini 4 (Argon): thinkingLevel LOW/MEDIUM/HIGH only — no "minimal", no budget.
+    { pattern: "*gemini-4*", levels: ["low", "medium", "high"] },
+    // Kimi K3.1 Pro: reasoning_effort low|high|max, thinking always on.
+    { pattern: "*kimi-k3.1*", levels: ["low", "high", "max"] },
     { pattern: "*mimo*v2.6*", levels: ["none", "low", "medium", "high", "xhigh"] },
     // DeepSeek v4.* (Alibaba MaaS, probed live): effort low|medium|high|xhigh|max
     // all 200 via output_config.effort; "none" is a 400 on the anthropic route

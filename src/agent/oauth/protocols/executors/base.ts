@@ -138,7 +138,9 @@ export class BaseExecutor {
       }
       retryAttemptsByUrl[urlIndex]++;
       log?.debug?.("RETRY", `${reason} retry ${retryAttemptsByUrl[urlIndex]}/${attempts} after ${waitMs / 1000}s`);
-      await new Promise((resolve: ProtocolValue) => setTimeout(resolve, waitMs));
+      // The response is being discarded: release its connection before waiting.
+      if (response) discardBody(response);
+      await abortableSleep(waitMs, signal);
       return true;
     };
 
@@ -175,6 +177,7 @@ export class BaseExecutor {
         if (this.shouldRetry(response.status, urlIndex)) {
           log?.debug?.("RETRY", `${response.status} on ${url}, trying fallback ${urlIndex + 1}`);
           lastStatus = response.status;
+          discardBody(response);
           continue;
         }
 
@@ -182,6 +185,8 @@ export class BaseExecutor {
       } catch ( caught) {
 const error = caught as ProtocolError;
         clearTimeout(connectTimer);
+        // The caller cancelled (including during a retry wait): never retry or fall back.
+        if (signal?.aborted) throw error;
         lastError = error;
         const isConnectTimeout = connectCtrl.signal.aborted && error.name === "AbortError";
         dbg("FETCH", `${this.provider.toUpperCase()} ✖ ${error.name}: ${error.message}${isConnectTimeout ? " (connect timeout)" : ""}`);
@@ -201,6 +206,21 @@ const error = caught as ProtocolError;
 
     throw lastError || new Error(`All ${fallbackCount} URLs failed with status ${lastStatus}`);
   }
+}
+
+/** Cancel an unread response body so its socket returns to the pool. */
+function discardBody(response: Response): void {
+  try { void response.body?.cancel().catch(() => {}); } catch { /* already consumed or locked */ }
+}
+
+/** setTimeout that rejects with the signal's reason when the caller aborts. */
+export function abortableSleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason ?? new DOMException("Aborted", "AbortError")); return; }
+    const onAbort = () => { clearTimeout(timer); reject(signal!.reason ?? new DOMException("Aborted", "AbortError")); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export default BaseExecutor;

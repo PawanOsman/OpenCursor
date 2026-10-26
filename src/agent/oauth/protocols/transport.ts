@@ -96,18 +96,21 @@ export async function performProviderRequest({providerId, model:requestedModel, 
   // (model, headers, sessions) can never bleed between concurrently used accounts.
   const executor = new Executor(providerId);
   const creds: ProtocolCredentials & { providerSpecificData: ProtocolRecord } = {...credentials, providerSpecificData:{...credentials.providerSpecificData, kiroToolCallRepair:false}};
+  let copilotMinted = false;
+  const mintCopilotToken = async (github: GithubExecutor) => {
+    const refreshed = await withAuthSignal(signal, () => github.refreshCopilotToken(creds.accessToken ?? "", undefined));
+    signal?.throwIfAborted();
+    if (!refreshed?.token) throw Object.assign(new Error('GitHub Copilot could not authorize this account session.'), {status:401});
+    copilotMinted = true;
+    creds.copilotToken = refreshed.token;
+    creds.copilotTokenExpiresAt = refreshed.expiresAt;
+    creds.providerSpecificData = {...creds.providerSpecificData,copilotToken:refreshed.token,copilotTokenExpiresAt:refreshed.expiresAt};
+    await onCredentialsRefresh?.({providerSpecificData:{copilotToken:refreshed.token,copilotTokenExpiresAt:refreshed.expiresAt}});
+  };
   if (executor instanceof GithubExecutor) {
     creds.copilotToken = creds.providerSpecificData.copilotToken;
     creds.copilotTokenExpiresAt = creds.providerSpecificData.copilotTokenExpiresAt;
-    if (executor.needsRefresh(creds)) {
-      const refreshed = await withAuthSignal(signal, () => executor.refreshCopilotToken(creds.accessToken ?? "", undefined));
-      signal?.throwIfAborted();
-      if (!refreshed?.token) throw Object.assign(new Error('GitHub Copilot could not authorize this account session.'), {status:401});
-      creds.copilotToken = refreshed.token;
-      creds.copilotTokenExpiresAt = refreshed.expiresAt;
-      creds.providerSpecificData = {...creds.providerSpecificData,copilotToken:refreshed.token,copilotTokenExpiresAt:refreshed.expiresAt};
-      await onCredentialsRefresh?.({providerSpecificData:{copilotToken:refreshed.token,copilotTokenExpiresAt:refreshed.expiresAt}});
-    }
+    if (executor.needsRefresh(creds)) await mintCopilotToken(executor);
   }
   if (info.transport) creds.runtimeTransport = {...info.transport};
   executor.config = {...executor.config, ...(info.transport || {}), retry:{429:0,500:0,502:0,503:0,504:0}};
@@ -139,7 +142,19 @@ export async function performProviderRequest({providerId, model:requestedModel, 
     if (requestedModel.endsWith('-max')) translated.reasoning_effort = 'max';
     else delete translated.reasoning_effort;
   }
-  const result = await withAuthSignal(signal, () => executor.execute({model:info.intentModel, body:translated, stream:true, credentials:creds, signal}), {timeoutMs:0});
+  const execute = () => withAuthSignal(signal, () => executor.execute({model:info.intentModel, body:translated, stream:true, credentials:creds, signal}), {timeoutMs:0});
+  let result = await execute();
+  // A cached Copilot session token can be revoked before its stated expiry.
+  // Forget it, mint a new one from the GitHub credential, and replay once.
+  if (executor instanceof GithubExecutor && result.response?.status === 401 && !copilotMinted) {
+    await result.response.body?.cancel().catch(() => {});
+    creds.copilotToken = undefined;
+    creds.copilotTokenExpiresAt = undefined;
+    creds.providerSpecificData = {...creds.providerSpecificData, copilotToken:undefined, copilotTokenExpiresAt:undefined};
+    await onCredentialsRefresh?.({providerSpecificData:{copilotToken:undefined, copilotTokenExpiresAt:undefined}});
+    await mintCopilotToken(executor);
+    result = await execute();
+  }
   return {...result, model:info.model, format:result.responseFormat || (normalized.has(providerId) ? 'openai' : info.format),
     toolNameMap:takeRenamedToolNames() ?? undefined};
 }

@@ -24,6 +24,27 @@ describe("Anthropic supported thinking and effort settings", () => {
     expect(body.output_config).toEqual({ effort: reasoningEffort });
   });
 
+  it.each(["low", "medium", "high"])("sends between_tools instead of disabled for Sonnet 5.5 at %s effort", (reasoningEffort) => {
+    const { body } = configure("claude-sonnet-5-5", { thinking: "disabled", reasoningEffort });
+    expect(body.thinking).toEqual({ type: "between_tools" });
+    expect(body.output_config).toEqual({ effort: reasoningEffort });
+  });
+
+  it.each(["xhigh", "max"])("clamps Sonnet 5.5 between_tools to high when saved effort is %s", (reasoningEffort) => {
+    const { body } = configure("claude-sonnet-5-5", { thinking: "disabled", reasoningEffort });
+    expect(body.thinking).toEqual({ type: "between_tools" });
+    expect(body.output_config).toEqual({ effort: "high" });
+  });
+
+  it("requests summarized thinking for Sonnet 5.5 by default so between-tool notes stream", () => {
+    expect(configure("claude-sonnet-5-5").body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+  });
+
+  it("treats Haiku 5.5 as adaptive-only with effort and a low-effort disable rule", () => {
+    expect(configure("claude-haiku-5-5", { thinking: "enabled", reasoningEffort: "max" }).body).toMatchObject({ thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: "max" } });
+    expect(configure("claude-haiku-5-5", { thinking: "disabled", reasoningEffort: "xhigh" }).body).toMatchObject({ thinking: { type: "disabled" }, output_config: { effort: "high" } });
+  });
+
   it.each(["xhigh", "max"])("keeps Opus 5 disabled thinking valid with saved %s effort", (reasoningEffort) => {
     const { body } = configure("claude-opus-5", { thinking: "disabled", reasoningEffort });
     expect(body.thinking).toEqual({ type: "disabled" });

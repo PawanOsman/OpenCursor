@@ -39,8 +39,9 @@ export class RunJournal {
       finally { await file.close(); }
       await syncDirectory(this.directory);
     }));
-    // Preserve failure: unrecorded side effects must not continue in this journal.
-    this.queue = next;
+    // The caller sees this append's failure (and stops the action it guards),
+    // but a later append must not inherit a stale rejection forever.
+    this.queue = next.catch(() => {});
     return next;
   }
   private async recoverTail(): Promise<void> {
@@ -80,4 +81,15 @@ export class RunJournal {
     });
   }
   flush(): Promise<void> { return this.queue; }
+  /** Remove this conversation's evidence (and preserved torn tails) once the conversation is deleted. */
+  async delete(): Promise<void> {
+    await this.queue;
+    await serialize(this.file, async () => {
+      const base = path.basename(this.file);
+      let names: string[] = [];
+      try { names = await fs.readdir(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      await Promise.all(names.filter(name => name === base || name.startsWith(`${base}.torn-`)).map(name => fs.rm(path.join(this.directory, name), { force: true })));
+      this.prepared = false;
+    });
+  }
 }

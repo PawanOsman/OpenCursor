@@ -428,7 +428,15 @@ export async function resolveAntigravityProject(token: string, options: {
     aborted(options.signal);
     const response = await doFetch(url, { method: "POST", headers: antigravityHeaders(token, { purpose: "project" }),
       body: JSON.stringify(body), signal: options.signal });
-    if (!response.ok) throw new AntigravityProtocolError(response.status, `Antigravity project setup ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    if (!response.ok) {
+      // The raw body can echo request details; surface only Google's structured error message.
+      let detail = "";
+      try {
+        const message = (JSON.parse((await response.text()).slice(0, 64 * 1024)) as any)?.error?.message;
+        if (typeof message === "string" && message.trim()) detail = `: ${message.slice(0, 300)}`;
+      } catch { /* not JSON */ }
+      throw new AntigravityProtocolError(response.status, `Antigravity project setup ${response.status}${detail}`);
+    }
     let data: any;
     try { data = await response.json(); } catch { throw new AntigravityProtocolError(502, "Antigravity project setup returned invalid JSON."); }
     aborted(options.signal);

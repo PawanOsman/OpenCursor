@@ -18,6 +18,8 @@ import type { SubagentRunner, QuestionAsker } from "./types";
 import type { ToolOutcome } from "../toolOutcome";
 import type { ContextReadInput } from "../contextArchive";
 import { spawnExecutionCommand, cleanupExecutionProcess, currentExecutionProfile } from "../execution";
+import { isOutsideWorkspace } from "../approvalPolicy";
+import { getWorkspaceRoot } from "../../context/workspaceUtils";
 
 // Directories never walked/listed (tools + indexing).
 export { IGNORE, BINARY_EXTS, NOISE_FILES, isNoisePath } from "./ignore";
@@ -717,12 +719,15 @@ export function killShellProcess(proc: ChildProcess): Promise<boolean> {
  * Carry `cd` across calls without keeping a live shell: a command that is only
  * a directory change updates the session cwd for subsequent commands.
  */
-export function applyCwdSideEffect(session: ShellSession, command: string): void {
+export function applyCwdSideEffect(session: ShellSession, command: string, root = getWorkspaceRoot()): void {
   const m = /^\s*cd\s+(?:\/d\s+)?("([^"]+)"|'([^']+)'|[^\s&|;]+)\s*$/i.exec(command);
   if (!m) return;
   const target = (m[2] ?? m[3] ?? m[1]).trim();
   if (!target || target === "-") return;
   const next = path.isAbsolute(target) ? target : path.resolve(session.cwd, target);
+  // Later commands inherit this cwd without passing the outside-workspace gate,
+  // so never carry it beyond the workspace root.
+  if (isOutsideWorkspace(next, root)) return;
   session.cwd = next;
 }
 

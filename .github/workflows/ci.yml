@@ -23,13 +23,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Version comes from package.json "packageManager".
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-
-      - name: Install pnpm
-        run: npm install -g pnpm
+          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -92,15 +94,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install -g pnpm
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
         env:
           ONNXRUNTIME_NODE_INSTALL: skip
       - run: pnpm run check-types
-      - run: pnpm exec vitest run src/agent/evaluations.test.ts src/stores/fileMutations.test.ts src/stores/recovery.test.ts src/agent/execution.test.ts src/agent/provider/deadlines.test.ts src/agent/tools/pty.integration.test.ts src/integrations/worktrees.test.ts src/worker/worker.test.ts
+      - run: pnpm run lint
+      - run: pnpm exec vitest run src/integrations/hooksRunner.test.ts src/integrations/hookConsent.test.ts src/integrations/mcpClient.test.ts src/integrations/gitSync.test.ts src/runtimeInstaller.test.ts src/runtimeDeps.test.ts src/agent/evaluations.test.ts src/stores/fileMutations.test.ts src/stores/recovery.test.ts src/agent/execution.test.ts src/agent/provider/deadlines.test.ts src/agent/tools/pty.integration.test.ts src/integrations/worktrees.test.ts src/worker/worker.test.ts
       - run: pnpm run test:worker
 
   security-scan:

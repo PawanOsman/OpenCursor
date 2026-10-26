@@ -36,46 +36,8 @@ function fileUriFor(relPath: string): vscode.Uri | undefined {
   }
 }
 
-/**
- * VS Code's own diff editor is the only way to get real full-width
- * inserted/deleted rows — the extension API has no view-zone/line-widget
- * capability, so decorations can never add rows to a document. Forcing
- * `renderSideBySide: false` turns it into the single-column inline diff.
- */
-const INLINE_SETTINGS: Record<string, boolean> = {
-  renderSideBySide: false,
-};
-let settingApplied = false;
-const previousValues = new Map<string, boolean | undefined>();
-
-async function applyInlineDiffSetting() {
-  if (settingApplied) return;
-  settingApplied = true;
-  const cfg = vscode.workspace.getConfiguration("diffEditor");
-  for (const [key, value] of Object.entries(INLINE_SETTINGS)) {
-    previousValues.set(key, cfg.inspect<boolean>(key)?.workspaceValue);
-    if (cfg.get<boolean>(key) === value) continue;
-    try {
-      await cfg.update(key, value, vscode.ConfigurationTarget.Workspace);
-    } catch {
-      // No workspace to write to (single loose file) — the diff still opens, just unstyled.
-    }
-  }
-}
-
-async function restoreInlineDiffSetting() {
-  if (!settingApplied) return;
-  settingApplied = false;
-  const cfg = vscode.workspace.getConfiguration("diffEditor");
-  for (const [key, previous] of previousValues) {
-    try {
-      await cfg.update(key, previous, vscode.ConfigurationTarget.Workspace);
-    } catch {
-      // best-effort
-    }
-  }
-  previousValues.clear();
-}
+// The review opens VS Code's normal diff editor and honours the user's own
+// `diffEditor.renderSideBySide` preference; we never write editor settings.
 
 /** Push the latest "before" text into an already-open diff without touching tabs. */
 function changeForDiff(entry: DiffEntry) {
@@ -114,7 +76,6 @@ async function showInlineDiff(relPath: string, preserveFocus = true, scope?: Cha
   }
   if (!refreshOriginal(entry)) return;
   const before = beforeUriFor(entry);
-  await applyInlineDiffSetting();
   await vscode.commands.executeCommand(
     "vscode.diff",
     before,
@@ -195,8 +156,6 @@ const openDiffs = new Map<string, DiffEntry>();
  * repaint changed-line highlights in already-visible editors.
  */
 async function sync() {
-  const live = new Set(pendingChanges.list().map((c) => c.path));
-
   for (const [key, entry] of [...openDiffs]) {
     if (!changeForDiff(entry)) {
       openDiffs.delete(key);
@@ -207,7 +166,6 @@ async function sync() {
       refreshOriginal(entry);
     }
   }
-  if (!live.size) await restoreInlineDiffSetting();
 
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document.uri.scheme === "file") refreshEditor(editor);
@@ -232,7 +190,6 @@ export function registerInlineReview(context: vscode.ExtensionContext) {
     addedDecoration,
     originalsChanged,
     { dispose: () => refreshTimer && clearTimeout(refreshTimer) },
-    { dispose: () => void restoreInlineDiffSetting() },
     { dispose: pendingChanges.onChange(scheduleSync) },
     vscode.window.onDidChangeVisibleTextEditors(() => {
       for (const editor of vscode.window.visibleTextEditors) {

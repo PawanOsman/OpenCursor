@@ -33,20 +33,35 @@ import { workspaceStorageDirectory } from './ui/sidebar/storage';
 import * as path from 'node:path';
 import { registerPluginManagement } from './ui/pluginCommands';
 import { registerRemoteJobs } from './ui/remoteCommands';
+import { initHookConsent } from './integrations/hookConsent';
 
 let activeSidebar: SidebarProvider | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
   registerRemoteJobs(context);
+  initHookConsent(context);
   const log = initLog(context);
   log.appendLine(`[${new Date().toISOString()}] OpenCursor activated`);
 
   // Heavy native deps (onnxruntime, sharp, transformers) are not shipped in the
   // VSIX; they are downloaded to globalStorage on first use.
   initRuntimeDeps(context.globalStorageUri.fsPath);
-  const durableStorage = workspaceStorageDirectory(context)!;
-  await configureFileMutationStorage(path.join(durableStorage, 'mutations'));
-  await pendingChanges.initialize(path.join(durableStorage, 'mutations'));
+  // Storage problems must never prevent the chat view and commands from registering.
+  try {
+    const durableStorage = workspaceStorageDirectory(context);
+    if (!durableStorage) throw new Error('No extension storage location is available.');
+    await configureFileMutationStorage(path.join(durableStorage, 'mutations'));
+    const recovery = await pendingChanges.initialize(path.join(durableStorage, 'mutations'));
+    if (recovery.error) {
+      logError('startup.pending-edits', new Error(recovery.error), { quarantined: recovery.quarantined });
+      void vscode.window.showWarningMessage(recovery.quarantined
+        ? `OpenCursor: the pending-edit review journal was unreadable and has been moved to ${recovery.quarantined}. Earlier agent edits can no longer be undone from the review bar; your files were not changed.`
+        : `OpenCursor: the pending-edit review journal could not be loaded (${recovery.error}).`);
+    }
+  } catch (error) {
+    logError('startup.storage', error);
+    void vscode.window.showWarningMessage(`OpenCursor: edit review storage is unavailable (${error instanceof Error ? error.message : String(error)}). Agent edits will not be tracked for undo in this session.`);
+  }
 
   const settingsManager = new SettingsManager(context);
   const featureStore = new FeatureStore(context);
@@ -106,12 +121,18 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   // Ctrl+L: add the current selection (or file) to chat as a mention.
+  const todoLensesChanged = new vscode.EventEmitter<void>();
   context.subscriptions.push(
     vscode.commands.registerCommand('ocursor.addToChat', () => sidebarProvider.addSelectionToChat()),
     vscode.commands.registerCommand('ocursor.newChat', () => sidebarProvider.newChat()),
     vscode.commands.registerCommand('ocursor.reviewChanges', () => sidebarProvider.startReview()),
-    vscode.commands.registerCommand('ocursor.implementTodo', (uri: vscode.Uri, line: number) => sidebarProvider.implementTodo(uri, line)),
+    vscode.commands.registerCommand('ocursor.implementTodo', (uri?: vscode.Uri, line?: number) => sidebarProvider.implementTodo(uri, line)),
+    todoLensesChanged,
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('ocursor.todoCodeLensEnabled')) todoLensesChanged.fire();
+    }),
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, {
+      onDidChangeCodeLenses: todoLensesChanged.event,
       provideCodeLenses(document, token) {
         if (!vscode.workspace.getConfiguration('ocursor').get<boolean>('todoCodeLensEnabled', true)) return [];
         const lenses: vscode.CodeLens[] = [];

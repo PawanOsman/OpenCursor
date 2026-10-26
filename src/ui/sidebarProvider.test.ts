@@ -29,9 +29,9 @@ vi.mock("../agent/ollama", () => ({ ollamaOpenAIBase: () => "http://ollama" }));
 vi.mock("../agent/oauth", () => ({ isConnected: vi.fn(() => true), OAUTH_LABEL: { codex: "Codex" } }));
 vi.mock("../stores/usageStore", () => ({ recordUsage: vi.fn() }));
 vi.mock("../integrations/hooksRunner", () => ({ runHooks: vi.fn(), runBlockingHooks: vi.fn(async () => undefined) }));
-vi.mock("../context/workspaceUtils", () => ({ getWorkspaceRoot: () => "/workspace", safePath: (p: string) => p, withWorkspaceRoot: (_root: string | undefined, work: () => unknown) => work() }));
+vi.mock("../context/workspaceUtils", () => ({ getWorkspaceRoot: () => "/workspace", findWorkspaceRoot: () => "/workspace", safePath: (p: string) => p, withWorkspaceRoot: (_root: string | undefined, work: () => unknown) => work() }));
 vi.mock("../agent/personas", () => ({}));
-vi.mock("../stores/pendingChanges", () => ({ pendingChanges: { rejectAll: vi.fn(), list: vi.fn(() => []), get: vi.fn() } }));
+vi.mock("../stores/pendingChanges", () => ({ pendingChanges: { rejectAll: vi.fn(), list: vi.fn(() => []), get: vi.fn(), has: vi.fn(() => false) } }));
 vi.mock("./fileIcons", () => ({}));
 vi.mock("../context/mentions", () => ({ resolveMentions: vi.fn() }));
 vi.mock("../logging", () => ({ getLog: () => ({ appendLine: vi.fn() }), logError: vi.fn() }));
@@ -851,5 +851,52 @@ describe("durable host-owned follow-up queue", () => {
     expect(store.get(a.id)?.steeringQueue).toEqual([]);
     expect(store.get(a.id)?.queue?.map(item => [item.id, item.status])).toEqual([["main", "interrupted"], ["attached", "queued"], ["pending", "queued"]]);
     expect(runAgent).toHaveBeenCalledOnce();
+  });
+});
+
+describe("host-owned transcripts and model output edits", () => {
+  const signedTurn = () => ({
+    turns: [{ role: "user" as const, text: "Explain" }, { role: "assistant" as const, blocks: [{ kind: "thinking" as const, text: "Think" }, { kind: "text" as const, text: "Old answer" }] }],
+    steps: [{ kind: "user" as const, text: "Explain" }, { kind: "assistant" as const, text: "Old answer", thinking: "Think", calls: [],
+      responsesReasoning: { model: "m", provider: "openai" as const, items: [{ type: "reasoning" as const, id: "r", summary: [], encrypted_content: "enc" }] } }],
+  });
+
+  it("updates both the transcript and the model history, dropping signed reasoning", async () => {
+    const { host, store, a } = await fixture();
+    await store.update(a.id, { ...signedTurn(), allowModelOutputEdits: true });
+    await host._editModelOutput({ convId: a.id, turnIndex: 1, blockIndex: 0, kind: "thinking", previousText: "Think", text: "Better thinking" });
+    const saved = store.get(a.id)!;
+    expect((saved.turns[1] as any).blocks[0].text).toBe("Better thinking");
+    expect(saved.steps[1]).toMatchObject({ thinking: "Better thinking", text: "Old answer" });
+    expect((saved.steps[1] as any).responsesReasoning).toBeUndefined();
+    expect(host._view.webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "modelOutputEdited", convId: a.id }));
+    // The next request is built from the edited history.
+    vi.mocked(runAgent).mockResolvedValueOnce(undefined as any);
+    await host._handleMessage("Next", undefined, { convId: a.id });
+    expect(vi.mocked(runAgent).mock.calls[0][0].history[1]).toMatchObject({ thinking: "Better thinking" });
+  });
+
+  it("refuses edits when the conversation has not opted in or is running", async () => {
+    const { host, store, a } = await fixture();
+    await store.update(a.id, signedTurn());
+    await expect(host._editModelOutput({ convId: a.id, turnIndex: 1, blockIndex: 1, kind: "text", previousText: "Old answer", text: "x" })).rejects.toThrow("Allow editing");
+    await store.update(a.id, { allowModelOutputEdits: true });
+    host._sessions.set(a.id, session());
+    await expect(host._editModelOutput({ convId: a.id, turnIndex: 1, blockIndex: 1, kind: "text", previousText: "Old answer", text: "x" })).rejects.toThrow("active run");
+    expect((store.get(a.id)!.steps[1] as any).text).toBe("Old answer");
+  });
+
+  it("queues Ctrl+L mentions until the webview reports ready", async () => {
+    const { host } = await fixture();
+    (vscode as any).window.activeTextEditor = { selection: { isEmpty: true }, document: { uri: { fsPath: "/workspace/a.ts" } } };
+    (vscode as any).workspace = { asRelativePath: () => "a.ts" };
+    vi.mocked(vscode.commands.executeCommand).mockResolvedValue(undefined);
+    host.addSelectionToChat();
+    expect(host._view.webview.postMessage).not.toHaveBeenCalled();
+    expect(host._pendingMentions).toHaveLength(1);
+    host._webviewReady = true;
+    host.addSelectionToChat();
+    expect(host._view.webview.postMessage).toHaveBeenCalledWith({ type: "insertMention", mention: { kind: "file", path: "a.ts", name: "a.ts" } });
+    delete (vscode as any).window.activeTextEditor; delete (vscode as any).workspace;
   });
 });

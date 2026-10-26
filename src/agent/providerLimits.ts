@@ -12,7 +12,7 @@ import type { ModelParams } from "./provider/types";
 
 /** Keep response defaults shared by Anthropic request construction and fitting. */
 export function defaultAnthropicMaxTokens(model: string, effort?: string): number {
-  const adaptive = /claude-(opus-4-[678]|opus-5|sonnet-4-6|sonnet-5|fable-5|mythos)/i;
+  const adaptive = /claude-(opus-4-[678]|opus-5|sonnet-4-6|sonnet-5|haiku-5|fable-5|mythos)/i;
   if (adaptive.test(model)) {
     return effort === "xhigh" || effort === "max" ? 65_536 : 32_768;
   }

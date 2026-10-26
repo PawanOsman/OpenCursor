@@ -127,13 +127,49 @@ export async function withRuntimePublishLock<T>(destination: string, operation: 
   }
 }
 
+/** Stamp folder name of an installed graph for one runtime root. */
+function runtimeStamp(name: string, manifest: RuntimeManifest, platform: RuntimePlatform): string {
+  const selected = runtimePackages(name, manifest, platform);
+  return crypto.createHash("sha256").update(JSON.stringify([manifest.version, name, platform, [...selected]])).digest("hex");
+}
+
+/**
+ * Remove leftovers of earlier publications: `<stamp>.incomplete-*` folders and
+ * stamp folders no current runtime root uses. Never touches `keep`, publish
+ * locks, in-flight installs, or symbolic links (links are only unlinked, never
+ * followed), and leaves stamps younger than `minAgeMs` for other windows that
+ * may still run an older extension version.
+ */
+export async function collectRuntimeGarbage(storage: string, keep: ReadonlySet<string>, minAgeMs = 24 * 60 * 60_000): Promise<string[]> {
+  const removed: string[] = [];
+  const entries = await fs.readdir(storage, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const incomplete = /^[a-f\d]{64}\.incomplete-[\w-]+$/.test(entry.name);
+    const staleStamp = /^[a-f\d]{64}$/.test(entry.name) && !keep.has(entry.name);
+    if (!incomplete && !staleStamp) continue;
+    const target = path.join(storage, entry.name);
+    if (inFlight.has(target) || inFlight.has(path.join(storage, entry.name.slice(0, 64)))) continue;
+    try {
+      const info = await fs.lstat(target);
+      if (info.isSymbolicLink()) continue;
+      if (!info.isDirectory()) continue;
+      if (staleStamp && Date.now() - info.mtimeMs < minAgeMs) continue;
+      if (staleStamp && await fs.access(`${target}.publish-lock`).then(() => true, () => false)) continue;
+      // fs.rm removes links inside the tree without following them.
+      await fs.rm(target, { recursive: true, force: true });
+      removed.push(entry.name);
+    } catch { /* in use (EBUSY on Windows) or already gone: retry on a later publish */ }
+  }
+  return removed;
+}
+
 const inFlight = new Map<string, Promise<string>>();
 export async function installRuntime(name: string, storage: string, options: {
   manifest?: RuntimeManifest; platform?: RuntimePlatform; fetch?: typeof fetch; report?: (message: string) => void;
 } = {}): Promise<string> {
   const manifest: RuntimeManifest = options.manifest ?? runtimeManifest; const platform = options.platform ?? runtimePlatform();
   const selected = runtimePackages(name, manifest, platform);
-  const stamp = crypto.createHash("sha256").update(JSON.stringify([manifest.version, name, platform, [...selected]])).digest("hex");
+  const stamp = runtimeStamp(name, manifest, platform);
   const destination = path.join(storage, stamp);
   const pending = inFlight.get(destination); if (pending) return pending;
   const work = (async () => {
@@ -184,6 +220,14 @@ export async function installRuntime(name: string, storage: string, options: {
         await fs.rename(destination, `${destination}.incomplete-${crypto.randomUUID()}`).catch((error: any) => { if (error.code !== "ENOENT") throw error; });
         await fs.rename(stage, destination);
         return rootPath;
+      }).then(async (published) => {
+        // Keep every stamp the current manifest can use on this platform.
+        const keep = new Set<string>([stamp]);
+        for (const root of Object.keys(manifest.roots)) {
+          try { keep.add(runtimeStamp(root, manifest, platform)); } catch { /* unsupported on this platform */ }
+        }
+        await collectRuntimeGarbage(storage, keep).catch(() => {});
+        return published;
       });
     } finally { await fs.rm(stage, { recursive: true, force: true }); }
   })();

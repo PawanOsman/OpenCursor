@@ -17,6 +17,7 @@
 	"engines": {
 		"vscode": "^1.96.0"
 	},
+	"packageManager": "pnpm@12.6.0",
 	"categories": [
 		"AI",
 		"Chat",
@@ -31,6 +32,13 @@
 	],
 	"activationEvents": [],
 	"main": "./dist/extension.js",
+	"capabilities": {
+		"untrustedWorkspaces": {
+			"supported": "limited",
+			"description": "In untrusted workspaces, project-level hooks from .cursor/hooks.json and .claude/settings.json are disabled. Trust the workspace (and approve its hook file) to run them."
+		},
+		"virtualWorkspaces": false
+	},
 	"contributes": {
 		"commands": [
 			{
@@ -70,6 +78,14 @@
 				"when": "editorTextFocus"
 			}
 		],
+		"menus": {
+			"commandPalette": [
+				{
+					"command": "ocursor.implementTodo",
+					"when": "false"
+				}
+			]
+		},
 		"viewsContainers": {
 			"activitybar": [
 				{
@@ -213,10 +229,6 @@
 		"typescript": "^6.0.3",
 		"typescript-eslint": "^8.61.1",
 		"vitest": "^2.1.9"
-	},
-	"overrides": {
-		"diff": "^8.0.4",
-		"serialize-javascript": "^7.0.6"
 	},
 	"dependencies": {
 		"@huggingface/hub": "^2.13.2",

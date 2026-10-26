@@ -10,17 +10,21 @@
 import type { ModelParams } from "./types";
 
 /** Supported settings verified against Anthropic's effort/thinking docs. */
-const ANTHROPIC_EFFORT = /claude-(opus-4-[5678]|opus-5|sonnet-4-6|sonnet-5|fable-5|mythos)/i;
-const ANTHROPIC_MAX_EFFORT = /claude-(opus-4-[678]|opus-5|sonnet-4-6|sonnet-5|fable-5|mythos)/i;
-const ANTHROPIC_XHIGH_EFFORT = /claude-(opus-4-[78]|opus-5|sonnet-5|fable-5|mythos-5)/i;
+const ANTHROPIC_EFFORT = /claude-(opus-4-[5678]|opus-5|sonnet-4-6|sonnet-5|haiku-5|fable-5|mythos)/i;
+const ANTHROPIC_MAX_EFFORT = /claude-(opus-4-[678]|opus-5|sonnet-4-6|sonnet-5|haiku-5|fable-5|mythos)/i;
+const ANTHROPIC_XHIGH_EFFORT = /claude-(opus-4-[78]|opus-5|sonnet-5|haiku-5|fable-5|mythos-5)/i;
 const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 /** Models that support adaptive thinking (no budget_tokens). */
-const ANTHROPIC_ADAPTIVE = /claude-(opus-4-[678]|opus-5|sonnet-4-6|sonnet-5|fable-5|mythos)/i;
+const ANTHROPIC_ADAPTIVE = /claude-(opus-4-[678]|opus-5|sonnet-4-6|sonnet-5|haiku-5|fable-5|mythos)/i;
 /** Models that reject manual `thinking:{type:enabled,budget_tokens}` with a 400.
- * Per docs: Opus 5, Opus 4.8/4.7, Sonnet 5, Fable 5, Mythos 5 → adaptive only. */
-const ANTHROPIC_NO_MANUAL = /claude-(opus-4-[78]|opus-5|sonnet-5|fable-5|mythos-5)/i;
-/** Opus 5 rejects `thinking:{type:disabled}` when effort is xhigh/max (400). */
-const ANTHROPIC_DISABLE_NEEDS_LOW_EFFORT = /claude-opus-5/i;
+ * Per docs: Opus 5, Opus 4.8/4.7, Sonnet 5, Haiku 5, Fable 5, Mythos 5 → adaptive only. */
+const ANTHROPIC_NO_MANUAL = /claude-(opus-4-[78]|opus-5|sonnet-5|haiku-5|fable-5|mythos-5)/i;
+/** Opus 5 / Haiku 5.5 reject `thinking:{type:disabled}` when effort is xhigh/max (400). */
+const ANTHROPIC_DISABLE_NEEDS_LOW_EFFORT = /claude-(opus-5|haiku-5)/i;
+/** Sonnet 5.5 rejects `disabled`; its lowest setting is `between_tools`, which is
+ * accepted only at high effort or below and takes no other thinking field.
+ * https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5 */
+const ANTHROPIC_BETWEEN_TOOLS = /claude-sonnet-5-5/i;
 /** Opus 5.5 / Fable 5 / Mythos: thinking is always on; disabled returns 400.
  * https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5 */
 const ANTHROPIC_NO_DISABLE = /claude-(opus-5-5|fable-5|mythos)/i;
@@ -66,10 +70,15 @@ export function applyAnthropicReasoning(
   if (mode === "disabled" && ANTHROPIC_NO_DISABLE.test(model)) {
     mode = "adaptive";
   }
+  // Sonnet 5.5 returns its notes between tool calls as thinking blocks, which
+  // are empty at the default display: request summaries so the UI isn't silent.
+  if (!mode && ANTHROPIC_BETWEEN_TOOLS.test(model)) {
+    mode = "adaptive";
+  }
 
   // Opus 5 rejects thinking:{disabled} above `high` effort. Clamp rather than
   // sending a request we know will 400.
-  if (mode === "disabled" && effort && ANTHROPIC_DISABLE_NEEDS_LOW_EFFORT.test(model)
+  if (mode === "disabled" && effort && (ANTHROPIC_DISABLE_NEEDS_LOW_EFFORT.test(model) || ANTHROPIC_BETWEEN_TOOLS.test(model))
     && (effort === "xhigh" || effort === "max")) {
     effort = "high";
   }
@@ -81,7 +90,7 @@ export function applyAnthropicReasoning(
   // Both Opus 5 and Sonnet 5 default to thinking. Omitting the field when the
   // user selects disabled leaves their default thinking behavior enabled.
   if (mode === "disabled") {
-    body.thinking = { type: "disabled" };
+    body.thinking = { type: ANTHROPIC_BETWEEN_TOOLS.test(model) ? "between_tools" : "disabled" };
   }
 
   if (mode && mode !== "disabled") {

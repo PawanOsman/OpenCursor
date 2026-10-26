@@ -167,6 +167,18 @@ describe("provider stream and credential boundaries", () => {
     expect((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].headers).toMatchObject({ Authorization: "token original-github" });
     expect((fetch.mock.calls[1] as unknown as [string, RequestInit])[1].headers).toMatchObject({ Authorization: "Bearer fresh-copilot" });
   });
+  it("forgets a revoked cached Copilot session token and replays once with a fresh one", async () => {
+    const save = vi.fn(); let chats = 0;
+    const fetch = vi.fn(async (url: string) => url.includes("copilot_internal") ? json({ token: "fresh-copilot", expires_at: Math.floor(Date.now() / 1000) + 3600 })
+      : ++chats === 1 ? new Response("unauthorized", { status: 401 }) : completed());
+    vi.stubGlobal("fetch", fetch);
+    await collect({ ...base(), providerId: "github", model: "gpt-4o", credentials: { id: "account", accessToken: "original-github", providerSpecificData: { copilotToken: "cached", copilotTokenExpiresAt: Math.floor(Date.now() / 1000) + 3600 } }, onCredentialsRefresh: save });
+    expect(save.mock.calls).toEqual([[{ providerSpecificData: { copilotToken: undefined, copilotTokenExpiresAt: undefined } }], [{ providerSpecificData: { copilotToken: "fresh-copilot", copilotTokenExpiresAt: expect.any(Number) } }]]);
+    const chatCalls = fetch.mock.calls.filter(([url]) => !String(url).includes("copilot_internal")) as unknown as [string, RequestInit][];
+    expect(chatCalls).toHaveLength(2);
+    expect(chatCalls[0][1].headers).toMatchObject({ Authorization: "Bearer cached" });
+    expect(chatCalls[1][1].headers).toMatchObject({ Authorization: "Bearer fresh-copilot" });
+  });
   it("does not claim static catalogs verify credentials", async () => {
     const fetch = mockFetch(); const result = await listProviderAdapterModels("kiro", { accessToken: "x" }); expect(result.verified).toBe(false); expect(result.models.length).toBeGreaterThan(0); expect(fetch).not.toHaveBeenCalled();
   });

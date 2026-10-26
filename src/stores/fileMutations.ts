@@ -165,7 +165,7 @@ export async function mutateFile<T>(input: string, options: MutationOptions, upd
       }
       // Write-ahead ownership: even a host crash between replacement and UI
       // delivery retains the original bytes and exact expected new digest.
-      const prepared = pendingChanges.recordCanonicalBytes(canonical, snapshot.data, next.data, options.owner, backupPath, snapshot.mode, true);
+      const prepared = await pendingChanges.prepareCanonicalBytes(canonical, snapshot.data, next.data, options.owner, backupPath, snapshot.mode);
       try { await atomicReplace(canonical, next.data, snapshot.mode, options.signal, async () => {
         if (await canonicalFilePath(input) !== canonical) throw new Error("File destination changed before mutation; newer path was preserved.");
         assertExecutionPath(canonical);
@@ -176,7 +176,7 @@ export async function mutateFile<T>(input: string, options: MutationOptions, upd
         let committed = false;
         try { committed = fileDigest((await readSnapshot(canonical)).data) === fileDigest(next.data); } catch { committed = true; }
         if (committed) backupPath = undefined;
-        else pendingChanges.cancelPrepared(prepared);
+        else await pendingChanges.cancelPrepared(prepared).catch(() => { /* recovery drops an unapplied preparation */ });
         throw error;
       }
       backupPath = undefined; // owned by pendingChanges until accept/reject

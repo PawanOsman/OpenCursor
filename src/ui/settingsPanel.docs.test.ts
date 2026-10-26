@@ -23,7 +23,7 @@ vi.mock("vscode", () => ({
 vi.mock("../agent/oauth", () => ({ onOAuthStatus: () => ({ dispose() {} }) }));
 vi.mock("../stores/settingsManager", () => ({ DEFAULT_SETTINGS: {} }));
 vi.mock("../agent/provider", () => ({}));
-vi.mock("./webviewHtml", () => ({ renderWebviewHtml: () => "<html></html>" }));
+vi.mock("./webviewHtml", () => ({ renderWebviewHtml: () => "<html></html>", webviewResourceRoots: () => [] }));
 vi.mock("../stores/featureStore", () => ({ MODEL_CATALOG: [] }));
 vi.mock("../context/workspaceContext", () => ({}));
 vi.mock("../integrations/mcpClient", () => ({ mcpManager: {} }));
@@ -34,7 +34,7 @@ vi.mock("../agent/docsIndex", () => ({
   indexDocSource: fixture.index, cancelDocIndex: fixture.cancel, deleteDocIndex: fixture.remove,
 }));
 vi.mock("../agent/docsPlanner", () => ({ createDocsPageSelector: () => fixture.selector }));
-vi.mock("../context/workspaceUtils", () => ({}));
+vi.mock("../context/workspaceUtils", () => ({ findWorkspaceRoot: () => undefined }));
 vi.mock("../agent/llamacpp", () => ({ onLlamacppStatus: () => ({ dispose() {} }) }));
 vi.mock("../agent/ollama", () => ({ onOllamaStatus: () => ({ dispose() {} }) }));
 vi.mock("../stores/usageStore", () => ({ onUsageChanged: () => () => {} }));

@@ -125,6 +125,24 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "kind": "anthropic"
   },
   {
+    "id": "gemini-4-argon-high",
+    "name": "Gemini 4 Argon (High)",
+    "kind": "antigravity",
+    "upstreamModelId": "gemini-4-argon-high(high)"
+  },
+  {
+    "id": "gemini-4-argon-medium",
+    "name": "Gemini 4 Argon (Medium)",
+    "kind": "antigravity",
+    "upstreamModelId": "gemini-4-argon-medium(medium)"
+  },
+  {
+    "id": "gemini-4-argon-low",
+    "name": "Gemini 4 Argon (Low)",
+    "kind": "antigravity",
+    "upstreamModelId": "gemini-4-argon-low(low)"
+  },
+  {
     "id": "gemini-3.8-flash-high",
     "name": "Gemini 3.8 Flash (High)",
     "kind": "antigravity",
@@ -205,6 +223,12 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "kind": "antigravity"
   },
   {
+    "id": "gemini-3.1-pro-high",
+    "name": "Gemini 3.1 Pro (High)",
+    "kind": "antigravity",
+    "upstreamModelId": "gemini-pro-agent"
+  },
+  {
     "id": "gemini-pro-agent",
     "name": "Gemini 3.1 Pro (High)",
     "kind": "antigravity"
@@ -213,6 +237,54 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "id": "gemini-3.1-pro-low",
     "name": "Gemini 3.1 Pro (Low)",
     "kind": "antigravity"
+  },
+  {
+    "id": "claude-sonnet-5-5-high",
+    "name": "Claude Sonnet 5.5 (High)",
+    "kind": "antigravity",
+    "upstreamModelId": "claude-sonnet-5-5-high(high)"
+  },
+  {
+    "id": "claude-sonnet-5-5-medium",
+    "name": "Claude Sonnet 5.5 (Medium)",
+    "kind": "antigravity",
+    "upstreamModelId": "claude-sonnet-5-5-medium(medium)"
+  },
+  {
+    "id": "claude-sonnet-5-5-low",
+    "name": "Claude Sonnet 5.5 (Low)",
+    "kind": "antigravity",
+    "upstreamModelId": "claude-sonnet-5-5-low(low)"
+  },
+  {
+    "id": "claude-sonnet-5-5",
+    "name": "Claude Sonnet 5.5 (Thinking)",
+    "kind": "antigravity",
+    "upstreamModelId": "claude-sonnet-5-5-high(high)"
+  },
+  {
+    "id": "claude-opus-5-5-high",
+    "name": "Claude Opus 5.5 (High)",
+    "kind": "antigravity",
+    "upstreamModelId": "claude-opus-5-5-high(high)"
+  },
+  {
+    "id": "claude-opus-5-5-medium",
+    "name": "Claude Opus 5.5 (Medium)",
+    "kind": "antigravity",
+    "upstreamModelId": "claude-opus-5-5-medium(medium)"
+  },
+  {
+    "id": "claude-opus-5-5-low",
+    "name": "Claude Opus 5.5 (Low)",
+    "kind": "antigravity",
+    "upstreamModelId": "claude-opus-5-5-low(low)"
+  },
+  {
+    "id": "claude-opus-5-5",
+    "name": "Claude Opus 5.5 (Thinking)",
+    "kind": "antigravity",
+    "upstreamModelId": "claude-opus-5-5-high(high)"
   },
   {
     "id": "claude-sonnet-4-6",
@@ -380,8 +452,18 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "kind": "claude-code"
   },
   {
+    "id": "claude-sonnet-5-5",
+    "name": "Claude Sonnet 5.5",
+    "kind": "claude-code"
+  },
+  {
     "id": "claude-sonnet-5",
     "name": "Claude Sonnet 5",
+    "kind": "claude-code"
+  },
+  {
+    "id": "claude-haiku-5-5",
+    "name": "Claude Haiku 5.5",
     "kind": "claude-code"
   },
   {
@@ -610,8 +692,23 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "kind": "codebuddy-cn"
   },
   {
+    "id": "gpt-6.1-sol",
+    "name": "GPT 6.1 Sol",
+    "kind": "codex"
+  },
+  {
     "id": "gpt-6-astra",
     "name": "GPT 6.0 Astra",
+    "kind": "codex"
+  },
+  {
+    "id": "gpt-6-sol",
+    "name": "GPT 6.0 Sol",
+    "kind": "codex"
+  },
+  {
+    "id": "gpt-6-luna",
+    "name": "GPT 6.0 Luna",
     "kind": "codex"
   },
   {
@@ -720,6 +817,11 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
   {
     "id": "deepseek/deepseek-v4-flash",
     "name": "DeepSeek V4 Flash",
+    "kind": "commandcode"
+  },
+  {
+    "id": "moonshotai/Kimi-K3.1-Pro",
+    "name": "Kimi K3.1 Pro",
     "kind": "commandcode"
   },
   {
@@ -1020,6 +1122,11 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "kind": "gemini-cli"
   },
   {
+    "id": "gemini-4-argon",
+    "name": "Gemini 4 Argon",
+    "kind": "google"
+  },
+  {
     "id": "gemini-3.8-flash",
     "name": "Gemini 3.8 Flash",
     "kind": "google"
@@ -1100,6 +1207,46 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "kind": "github"
   },
   {
+    "id": "gpt-5.5",
+    "name": "GPT-5.5",
+    "kind": "github"
+  },
+  {
+    "id": "gpt-5.6-luna",
+    "name": "GPT-5.6 Luna",
+    "kind": "github"
+  },
+  {
+    "id": "gpt-5.6-sol",
+    "name": "GPT-5.6 Sol",
+    "kind": "github"
+  },
+  {
+    "id": "gpt-5.6-terra",
+    "name": "GPT-5.6 Terra",
+    "kind": "github"
+  },
+  {
+    "id": "gpt-6-astra",
+    "name": "GPT-6 Astra",
+    "kind": "github"
+  },
+  {
+    "id": "gpt-6-luna",
+    "name": "GPT-6 Luna",
+    "kind": "github"
+  },
+  {
+    "id": "gpt-6-sol",
+    "name": "GPT-6 Sol",
+    "kind": "github"
+  },
+  {
+    "id": "gpt-6.1-sol",
+    "name": "GPT-6.1 Sol",
+    "kind": "github"
+  },
+  {
     "id": "claude-haiku-4.5",
     "name": "Claude Haiku 4.5",
     "kind": "github"
@@ -1130,6 +1277,51 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "kind": "github"
   },
   {
+    "id": "claude-fable-5",
+    "name": "Claude Fable 5",
+    "kind": "github"
+  },
+  {
+    "id": "claude-fable-5.1",
+    "name": "Claude Fable 5.1",
+    "kind": "github"
+  },
+  {
+    "id": "claude-haiku-5.5",
+    "name": "Claude Haiku 5.5",
+    "kind": "github"
+  },
+  {
+    "id": "claude-opus-4.8",
+    "name": "Claude Opus 4.8",
+    "kind": "github"
+  },
+  {
+    "id": "claude-opus-4.8-fast",
+    "name": "Claude Opus 4.8 (Fast)",
+    "kind": "github"
+  },
+  {
+    "id": "claude-opus-5",
+    "name": "Claude Opus 5",
+    "kind": "github"
+  },
+  {
+    "id": "claude-opus-5.5",
+    "name": "Claude Opus 5.5",
+    "kind": "github"
+  },
+  {
+    "id": "claude-sonnet-5",
+    "name": "Claude Sonnet 5",
+    "kind": "github"
+  },
+  {
+    "id": "claude-sonnet-5.5",
+    "name": "Claude Sonnet 5.5",
+    "kind": "github"
+  },
+  {
     "id": "gemini-2.5-pro",
     "name": "Gemini 2.5 Pro",
     "kind": "github"
@@ -1145,6 +1337,21 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "kind": "github"
   },
   {
+    "id": "gemini-3.7-flash",
+    "name": "Gemini 3.7 Flash",
+    "kind": "github"
+  },
+  {
+    "id": "gemini-3.8-flash",
+    "name": "Gemini 3.8 Flash",
+    "kind": "github"
+  },
+  {
+    "id": "gemini-4-argon",
+    "name": "Gemini 4 Argon",
+    "kind": "github"
+  },
+  {
     "id": "grok-code-fast-1",
     "name": "Grok Code Fast 1",
     "kind": "github"
@@ -1157,6 +1364,16 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
   {
     "id": "goldeneye-free-auto",
     "name": "GoldenEye",
+    "kind": "github"
+  },
+  {
+    "id": "kimi-k3",
+    "name": "Kimi K3",
+    "kind": "github"
+  },
+  {
+    "id": "mai-code-1.1-flash",
+    "name": "MAI-Code-1.1-Flash",
     "kind": "github"
   },
   {
@@ -1254,6 +1471,11 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "name": "Grok Build",
     "kind": "grok-cli",
     "contextLength": 500000
+  },
+  {
+    "id": "grok-4.7",
+    "name": "Grok 4.7",
+    "kind": "grok-cli"
   },
   {
     "id": "grok-4.5",
@@ -1467,6 +1689,26 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "id": "kimi-latest",
     "name": "Kimi Latest",
     "kind": "kimi"
+  },
+  {
+    "id": "claude-opus-5.5",
+    "name": "Claude Opus 5.5",
+    "kind": "kiro"
+  },
+  {
+    "id": "claude-opus-5.5-thinking",
+    "name": "Claude Opus 5.5 (Thinking)",
+    "kind": "kiro"
+  },
+  {
+    "id": "claude-opus-5.5-agentic",
+    "name": "Claude Opus 5.5 (Agentic)",
+    "kind": "kiro"
+  },
+  {
+    "id": "claude-opus-5.5-thinking-agentic",
+    "name": "Claude Opus 5.5 (Thinking + Agentic)",
+    "kind": "kiro"
   },
   {
     "id": "claude-opus-5",
@@ -2091,11 +2333,29 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     ]
   },
   {
+    "id": "kimi-k3.1-pro",
+    "name": "Kimi K3.1 Pro",
+    "kind": "opencode-go",
+    "supportedFormats": [
+      "openai"
+    ]
+  },
+  {
     "id": "kimi-k3",
     "name": "Kimi K3",
     "kind": "opencode-go",
     "supportedFormats": [
       "openai"
+    ]
+  },
+  {
+    "id": "deepseek-v4.1-flash",
+    "name": "DeepSeek V4.1 Flash",
+    "kind": "opencode-go",
+    "supportedFormats": [
+      "openai",
+      "claude",
+      "openai-responses"
     ]
   },
   {
@@ -2131,6 +2391,22 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
   {
     "id": "longcat-2.0",
     "name": "LongCat 2.0",
+    "kind": "opencode-go",
+    "supportedFormats": [
+      "openai"
+    ]
+  },
+  {
+    "id": "mimo-v2.6-flash",
+    "name": "MiMo V2.6 Flash",
+    "kind": "opencode-go",
+    "supportedFormats": [
+      "openai"
+    ]
+  },
+  {
+    "id": "mimo-v2.6-pro",
+    "name": "MiMo V2.6 Pro",
     "kind": "opencode-go",
     "supportedFormats": [
       "openai"
@@ -2241,8 +2517,26 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     ]
   },
   {
+    "id": "grok-4.7",
+    "name": "Grok 4.7",
+    "kind": "opencode-go",
+    "targetFormat": "openai-responses",
+    "supportedFormats": [
+      "openai-responses"
+    ]
+  },
+  {
     "id": "grok-4.6",
     "name": "Grok 4.6",
+    "kind": "opencode-go",
+    "targetFormat": "openai-responses",
+    "supportedFormats": [
+      "openai-responses"
+    ]
+  },
+  {
+    "id": "gpt-6-luna",
+    "name": "GPT 6 Luna",
     "kind": "opencode-go",
     "targetFormat": "openai-responses",
     "supportedFormats": [
@@ -2256,6 +2550,15 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "targetFormat": "openai-responses",
     "supportedFormats": [
       "openai-responses"
+    ]
+  },
+  {
+    "id": "claude-haiku-5-5",
+    "name": "Claude Haiku 5.5",
+    "kind": "opencode-go",
+    "targetFormat": "claude",
+    "supportedFormats": [
+      "claude"
     ]
   },
   {
@@ -3209,6 +3512,11 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "kind": "vertex-partner"
   },
   {
+    "id": "gemini-4-argon",
+    "name": "Gemini 4 Argon",
+    "kind": "vertex"
+  },
+  {
     "id": "gemini-3.1-pro-preview",
     "name": "Gemini 3.1 Pro Preview",
     "kind": "vertex"
@@ -3272,6 +3580,11 @@ export const PROVIDER_MODELS: ProviderModelSpec[] = [
     "id": "Kimi-K2.6",
     "name": "Kimi-K2.6",
     "kind": "volcengine-ark"
+  },
+  {
+    "id": "grok-4.7",
+    "name": "Grok 4.7",
+    "kind": "xai"
   },
   {
     "id": "grok-4.6",

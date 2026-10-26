@@ -8,10 +8,9 @@
  */
 
 import * as fs from "fs/promises";
-import * as syncFs from "node:fs";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { syncDirectorySync } from "./durableFiles";
+import { durableWrite } from "./durableFiles";
 import { safePath } from "../context/workspaceUtils";
 import { computeHunks, type Hunk } from "../shared/lineDiff";
 import { withPathLock, assertCurrentFile, readSnapshot, atomicReplace, canonicalFilePathSync } from "./fileMutations";
@@ -52,63 +51,138 @@ function matches(record: EditRecord, scope?: ChangeScope): boolean {
     (scope.fromTurnIndex === undefined || (record.owner?.turnIndex ?? -1) >= scope.fromTurnIndex);
 }
 
+/** Journal writes still in flight, so a restarted store reads the latest snapshot. */
+const inflightWrites = new Map<string, Promise<void>>();
+function trackWrite(file: string, write: Promise<void>): void {
+  const settled = write.catch(() => {});
+  inflightWrites.set(file, settled);
+  void settled.then(() => { if (inflightWrites.get(file) === settled) inflightWrites.delete(file); });
+}
+export interface PendingChangesInitResult { quarantined?: string; error?: string }
+
 /** Ordered immutable edit snapshots, scoped to their originating chat and turn. */
 export class PendingChangesStore {
   private changes = new Map<string, EditRecord[]>();
   private storageFile?: string;
   private garbage: string[] = [];
-  async initialize(directory: string): Promise<void> {
+  /** Incremented on every in-memory commit; a failed save only rolls back the latest. */
+  private version = 0;
+  private scheduled?: Promise<void>;
+  private chain: Promise<void> = Promise.resolve();
+  /** A corrupt journal is quarantined rather than blocking extension activation. */
+  async initialize(directory: string): Promise<PendingChangesInitResult> {
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });
     const file = path.join(directory, "pending-edits.json");
+    await inflightWrites.get(file);
+    let result: PendingChangesInitResult = {};
     try {
-      const saved = JSON.parse(await fs.readFile(file, "utf8"));
-      if (saved.version !== 1 || !Array.isArray(saved.records)) throw new Error("Unsupported pending edit journal");
-      const recovered = new Map<string, EditRecord[]>();
-      for (const row of saved.records) {
-        if (typeof row.path !== "string" || !path.isAbsolute(row.path) || !(row.afterDigest === null || /^[a-f0-9]{64}$/.test(row.afterDigest))) throw new Error("Invalid pending edit journal; existing file preserved");
-        if (row.backupPath !== undefined) {
-          const relative = typeof row.backupPath === "string" ? path.relative(path.join(directory, "edit-backups"), row.backupPath) : "..";
-          if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || !/^[0-9a-f-]{36}$/.test(relative)) throw new Error("Invalid pending edit backup path; existing file preserved");
-        }
-        const record = { ...row, beforeBytes: row.beforeBytes === null ? null : typeof row.beforeBytes === "string" ? Buffer.from(row.beforeBytes, "base64") : undefined } as EditRecord;
-        if (record.prepared && record.beforeDigest !== undefined) {
-          let current: Buffer | null;
-          try { current = await fs.readFile(record.path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; current = null; }
-          // A write-ahead entry may have been saved before replacement happened.
-          // Do not present an unapplied edit as something the user must undo.
-          if (fileDigest(current) === record.beforeDigest) { if (record.backupPath) this.garbage.push(record.backupPath); continue; }
-          if (fileDigest(current) === record.afterDigest) record.prepared = false;
-        }
-        const key = this.key(record.path);
-        recovered.set(key, [...recovered.get(key) ?? [], record]);
+      this.changes = await this.load(directory, file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.changes = new Map();
+        this.garbage = [];
+        const quarantined = `${file}.corrupt-${Date.now()}`;
+        const message = error instanceof Error ? error.message : String(error);
+        try { await fs.rename(file, quarantined); result = { quarantined, error: message }; }
+        catch (renameError) { result = { error: `${message}; the journal could not be preserved: ${renameError instanceof Error ? renameError.message : String(renameError)}` }; }
       }
-      this.changes = recovered;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
     this.storageFile = file;
-    this.emit();
+    // Settle recovery (migrated backups, dropped preparations) before callers proceed.
+    await this.emit().catch(() => { /* retried on the next change; surfaced by flush() */ });
+    return result;
   }
-  private persist(): void {
-    if (!this.storageFile) return;
-    const records = [...this.changes.values()].flat().map(row => ({ ...row, beforeBytes: row.beforeBytes === null ? null : row.beforeBytes?.toString("base64") }));
-    const temporary = `${this.storageFile}.${randomUUID()}.tmp`;
-    const handle = syncFs.openSync(temporary, "wx", 0o600);
-    try { syncFs.writeFileSync(handle, JSON.stringify({ version: 1, records })); syncFs.fsyncSync(handle); }
-    finally { syncFs.closeSync(handle); }
-    try { syncFs.renameSync(temporary, this.storageFile); syncDirectorySync(path.dirname(this.storageFile)); }
-    finally { try { syncFs.rmSync(temporary, { force: true }); } catch { /* retain primary error */ } }
+  private async load(directory: string, file: string): Promise<Map<string, EditRecord[]>> {
+    const saved = JSON.parse(await fs.readFile(file, "utf8"));
+    if (saved.version !== 1 || !Array.isArray(saved.records)) throw new Error("Unsupported pending edit journal");
+    const recovered = new Map<string, EditRecord[]>();
+    for (const row of saved.records) {
+      if (typeof row.path !== "string" || !path.isAbsolute(row.path) || !(row.afterDigest === null || /^[a-f0-9]{64}$/.test(row.afterDigest))) throw new Error("Invalid pending edit journal; existing file preserved");
+      if (row.backupPath !== undefined) {
+        const relative = typeof row.backupPath === "string" ? path.relative(path.join(directory, "edit-backups"), row.backupPath) : "..";
+        if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || !/^[0-9a-f-]{36}$/.test(relative)) throw new Error("Invalid pending edit backup path; existing file preserved");
+      }
+      // Older journals stored original bytes inline (base64); the next save moves them to backup files.
+      const record = { ...row, beforeBytes: row.beforeBytes === null ? null : typeof row.beforeBytes === "string" ? Buffer.from(row.beforeBytes, "base64") : undefined } as EditRecord;
+      if (record.prepared && record.beforeDigest !== undefined) {
+        let current: Buffer | null;
+        try { current = await fs.readFile(record.path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; current = null; }
+        // A write-ahead entry may have been saved before replacement happened.
+        // Do not present an unapplied edit as something the user must undo.
+        if (fileDigest(current) === record.beforeDigest) { if (record.backupPath) this.garbage.push(record.backupPath); continue; }
+        if (fileDigest(current) === record.afterDigest) record.prepared = false;
+      }
+      const key = this.key(record.path);
+      recovered.set(key, [...recovered.get(key) ?? [], record]);
+    }
+    return recovered;
   }
-  async flush(): Promise<void> { this.persist(); }
+  /** Coalesce journal saves: at most one queued write behind the one in progress. */
+  private schedulePersist(): Promise<void> {
+    if (!this.storageFile) return Promise.resolve();
+    if (this.scheduled) return this.scheduled;
+    const run = this.chain.catch(() => {}).then(() => { this.scheduled = undefined; return this.writeJournal(); });
+    this.scheduled = run;
+    this.chain = run;
+    trackWrite(this.storageFile, run);
+    return run;
+  }
+  /** Metadata-only journal written atomically; original bytes live in durable backup files. */
+  private async writeJournal(): Promise<void> {
+    const file = this.storageFile!;
+    const garbage = this.garbage.splice(0);
+    try {
+      const backups = path.join(path.dirname(file), "edit-backups");
+      for (const row of [...this.changes.values()].flat()) {
+        if (row.backupPath || !row.beforeBytes) continue;
+        const bytes = row.beforeBytes;
+        await fs.mkdir(backups, { recursive: true, mode: 0o700 });
+        const target = path.join(backups, randomUUID());
+        await durableWrite(target, bytes);
+        const live = this.changes.get(this.key(row.path))?.includes(row);
+        if (live && row.beforeBytes === bytes && !row.backupPath) { row.backupPath = target; row.beforeBytes = undefined; }
+        else garbage.push(target);
+      }
+      // Rows added while backups were written keep their bytes until the next save.
+      const records = [...this.changes.values()].flat().filter(row => row.backupPath || !row.beforeBytes)
+        .map(({ beforeBytes, ...row }) => beforeBytes === null ? { ...row, beforeBytes: null } : row);
+      await durableWrite(file, JSON.stringify({ version: 1, records }));
+      if ([...this.changes.values()].flat().some(row => !row.backupPath && row.beforeBytes)) void this.schedulePersist().catch(() => {});
+    } catch (error) {
+      // The journal on disk still references these backups.
+      this.garbage.unshift(...garbage);
+      throw error;
+    }
+    for (const backup of garbage) void fs.rm(backup, { force: true }).catch(() => {});
+  }
+  /** Resolves once every change made so far is durable; rejects if the latest save failed. */
+  async flush(): Promise<void> { await this.chain; if (this.scheduled) await this.scheduled; }
   private listeners = new Set<() => void>();
   onChange(fn: () => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
-  private emit() {
-    this.persist();
-    for (const backup of this.garbage.splice(0)) void fs.rm(backup, { force: true }).catch(() => {});
+  private notify() {
     for (const listener of this.listeners) { try { listener(); } catch { /* observers cannot break a committed edit */ } }
   }
-  private commitState(change: () => void): void {
+  /** Notify observers now and save in the background; failures surface through the returned promise and flush(). */
+  private emit(): Promise<void> {
+    this.version++;
+    this.notify();
+    const saved = this.schedulePersist();
+    void saved.catch(() => {});
+    return saved;
+  }
+  /** Apply a state change, save it, and roll it back if that save fails and nothing newer superseded it. */
+  private commitState(change: () => void): Promise<void> {
     const previous = new Map([...this.changes].map(([key, rows]) => [key, [...rows]]));
     const garbage = [...this.garbage];
-    try { change(); this.emit(); } catch (error) { this.changes = previous; this.garbage = garbage; throw error; }
+    try { change(); } catch (error) { this.changes = previous; this.garbage = garbage; throw error; }
+    const saved = this.emit();
+    const version = this.version;
+    const committed = saved.catch((error) => {
+      if (this.version === version) { this.changes = previous; this.garbage = garbage; this.version++; this.notify(); }
+      throw error;
+    });
+    void committed.catch(() => {});
+    return committed;
   }
   private key(file: string) { const abs = safePath(file); return process.platform === "win32" ? abs.toLowerCase() : abs; }
   private lookupKey(file: string): string {
@@ -127,6 +201,27 @@ export class PendingChangesStore {
   }
   /** Record the destination captured under a path lock, without following a later symlink retarget. */
   recordCanonicalBytes(file: string, before: Buffer | null, after: Buffer | null, owner?: ChangeOwner, backupPath?: string, originalMode?: number, prepareOnly = false) {
+    const record = this.addRecord(file, before, after, owner, backupPath, originalMode, prepareOnly);
+    if (prepareOnly) { const saved = this.schedulePersist(); void saved.catch(() => {}); }
+    else this.emit();
+    return record;
+  }
+  /**
+   * Write-ahead ownership: resolves only once the prepared record (and its
+   * original bytes) is durable, so the caller may then replace the file.
+   */
+  async prepareCanonicalBytes(file: string, before: Buffer | null, after: Buffer | null, owner?: ChangeOwner, backupPath?: string, originalMode?: number): Promise<EditRecord> {
+    const record = this.addRecord(file, before, after, owner, backupPath, originalMode, true);
+    try { await this.schedulePersist(); }
+    catch (error) {
+      const key = this.key(file);
+      const rows = this.changes.get(key)?.filter(item => item !== record) ?? [];
+      if (rows.length) this.changes.set(key, rows); else this.changes.delete(key);
+      throw error;
+    }
+    return record;
+  }
+  private addRecord(file: string, before: Buffer | null, after: Buffer | null, owner?: ChangeOwner, backupPath?: string, originalMode?: number, prepareOnly = false): EditRecord {
     const previous = textView(before), next = textView(after);
     const record: EditRecord = {
       path: file, before: previous.text, after: next.text, existedBefore: before !== null,
@@ -138,10 +233,9 @@ export class PendingChangesStore {
     const key = this.key(file);
     const records = this.changes.get(key) ?? [];
     records.push(record); this.changes.set(key, records);
-    try { if (prepareOnly) this.persist(); else this.emit(); } catch (error) { records.pop(); if (!records.length) this.changes.delete(key); throw error; }
     return record;
   }
-  cancelPrepared(record: EditRecord): void { this.commitState(() => this.discard(this.key(record.path), record)); }
+  cancelPrepared(record: EditRecord): Promise<void> { return this.commitState(() => this.discard(this.key(record.path), record)); }
   publishPrepared(record: EditRecord): void { record.prepared = false; this.emit(); }
   list(scope?: ChangeScope): PendingChange[] {
     const out: PendingChange[] = [];
@@ -173,11 +267,11 @@ export class PendingChangesStore {
     if (records.length) this.changes.set(key, records); else this.changes.delete(key);
     if (record.backupPath) this.garbage.push(record.backupPath);
   }
-  accept(file: string, scope?: ChangeScope) {
+  accept(file: string, scope?: ChangeScope): Promise<void> {
     const key = this.lookupKey(file);
-    this.commitState(() => { for (const record of [...this.changes.get(key) ?? []]) if (matches(record, scope)) this.discard(key, record); });
+    return this.commitState(() => { for (const record of [...this.changes.get(key) ?? []]) if (matches(record, scope)) this.discard(key, record); });
   }
-  acceptAll(scope?: ChangeScope) { for (const c of this.list(scope)) this.accept(c.path, scope); }
+  async acceptAll(scope?: ChangeScope): Promise<void> { await Promise.all(this.list(scope).map(c => this.accept(c.path, scope))); }
   private async original(record: EditRecord): Promise<Buffer | null> {
     if (!record.existedBefore) return null;
     const bytes = record.backupPath ? await fs.readFile(record.backupPath) : record.beforeBytes ? Buffer.from(record.beforeBytes) : undefined;
@@ -197,7 +291,7 @@ export class PendingChangesStore {
         const snapshot = await readSnapshot(canonical);
         if (record.beforeDigest !== undefined && fileDigest(snapshot.data) === record.beforeDigest) {
           // Recovery after the file was restored but the journal save failed.
-          this.commitState(() => this.discard(this.key(record.path), record)); continue;
+          await this.commitState(() => this.discard(this.key(record.path), record)); continue;
         }
         if (fileDigest(snapshot.data) !== record.afterDigest) {
           throw new Error(`Cannot undo ${file}: it changed after this agent edit. Save or reconcile the newer changes first; no conflicting content was overwritten.`);
@@ -207,7 +301,7 @@ export class PendingChangesStore {
           await assertCurrentFile(snapshot);
           if (!this.changes.get(key)?.includes(record)) throw new Error(`Cannot undo ${file}: the change was already accepted or replaced.`);
         });
-        this.commitState(() => this.discard(this.key(record.path), record));
+        await this.commitState(() => this.discard(this.key(record.path), record));
       }
     });
   }
@@ -249,9 +343,10 @@ export class PendingChangesStore {
       const after = Buffer.from(afterLines.join("\n"));
       await assertCurrentFile(snapshot);
       if (reject) await atomicReplace(canonical, after, snapshot.mode, undefined, () => assertCurrentFile(snapshot));
-      for (const record of records) this.discard(key, record);
-      if (!before.equals(after)) this.recordCanonicalBytes(canonical, first.existedBefore ? before : null, after, first.owner);
-      this.emit();
+      await this.commitState(() => {
+        for (const record of [...records]) this.discard(key, record);
+        if (!before.equals(after)) this.addRecord(canonical, first.existedBefore ? before : null, after, first.owner);
+      });
     });
   }
 }

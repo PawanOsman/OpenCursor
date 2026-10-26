@@ -75,7 +75,10 @@ interface LoginAttempt {
   callbackError?: string;
   browserError?: string;
   completing?: boolean;
+  /** Abandoned sign-ins must not keep a loopback port open forever. */
+  deadline?: ReturnType<typeof setTimeout>;
 }
+const LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** In-flight login state stays local; only its browser link is exposed to the UI. */
 const pending = new Map<OAuthKind, LoginAttempt>();
 /** Single-flight refresh lock per account id (Codex rotates refresh tokens). */
@@ -107,18 +110,70 @@ export function initOAuth(context: vscode.ExtensionContext) {
   accounts.clear(); accountCooldowns.clear(); rrCursor.clear(); refreshing.clear(); resolvingProjects.clear(); antigravityCatalogs.clear();
   for (const key of Object.keys(loginErrors)) delete loginErrors[key as OAuthKind];
   ctx = context;
+  secretWatch?.dispose();
+  // Another VS Code window may add, refresh, toggle or remove an account.
+  secretWatch = context.secrets?.onDidChange?.((event) => {
+    if (!event.key.startsWith(SECRET_PREFIX)) return;
+    // Let this window's queued writes land first; then the store holds the newest value.
+    void persistence.then(() => syncStoredAccount(context, generation, event.key.slice(SECRET_PREFIX.length)));
+  });
+  if (secretWatch) context.subscriptions?.push(secretWatch);
   const ids = context.globalState.get<string[]>(INDEX_KEY, []) ?? [];
   void Promise.all(ids.map(async (id) => {
     const raw = await Promise.resolve(context.secrets.get(SECRET_KEY(id))).catch(() => undefined);
     if (ctx !== context || generation !== contextGeneration) return;
-    if (!raw) return;
-    try {
-      const acc = JSON.parse(raw) as OAuthAccount;
-      if (acc.id === id && isOAuthProviderKind(acc.kind) && typeof acc.accessToken === "string") accounts.set(acc.id, acc);
-    } catch {
-      /* skip corrupt */
-    }
+    const acc = parseStoredAccount(id, raw);
+    if (acc) accounts.set(acc.id, acc);
   })).then(() => { if (ctx === context && generation === contextGeneration) emit(); });
+}
+
+const SECRET_PREFIX = "ocursor.oauth.acct.";
+let secretWatch: vscode.Disposable | undefined;
+
+function parseStoredAccount(id: string, raw: string | undefined): OAuthAccount | undefined {
+  if (!raw) return undefined;
+  try {
+    const acc = JSON.parse(raw) as OAuthAccount;
+    if (acc.id === id && isOAuthProviderKind(acc.kind) && typeof acc.accessToken === "string") return acc;
+  } catch {
+    /* skip corrupt */
+  }
+  return undefined;
+}
+
+/** Re-read one account from SecretStorage (undefined: missing or unreadable). */
+async function readStoredAccount(id: string): Promise<{ account?: OAuthAccount; ok: boolean }> {
+  const context = ctx;
+  if (!context?.secrets?.get) return { ok: false };
+  try {
+    return { account: parseStoredAccount(id, await Promise.resolve(context.secrets.get(SECRET_KEY(id)))), ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function syncStoredAccount(context: vscode.ExtensionContext, generation: number, id: string): Promise<void> {
+  if (ctx !== context || generation !== contextGeneration) return;
+  const { account, ok } = await readStoredAccount(id);
+  if (!ok || ctx !== context || generation !== contextGeneration) return;
+  const current = accounts.get(id);
+  if (!account) {
+    if (!current) return;
+    accounts.delete(id); accountCooldowns.delete(id); antigravityCatalogs.delete(id);
+    emit(); return;
+  }
+  if (current && JSON.stringify(current) === JSON.stringify(account)) return;
+  if (!current || current.accessToken !== account.accessToken || current.refreshToken !== account.refreshToken) accountCooldowns.delete(id);
+  if (!current || antigravityCatalogIdentity(current) !== antigravityCatalogIdentity(account)) antigravityCatalogs.delete(id);
+  accounts.set(id, account);
+  emit();
+}
+
+/** Merge this window's account ids with the stored index so concurrent windows never drop each other's accounts. */
+function mergedIndex(context: vscode.ExtensionContext | undefined, removed?: string): string[] {
+  const stored = context?.globalState.get<string[]>(INDEX_KEY, []) ?? [];
+  const ids = [...new Set([...stored, ...accounts.keys()])];
+  return removed ? ids.filter(id => id !== removed) : ids;
 }
 
 function info(acc: OAuthAccount): OAuthAccountInfo {
@@ -242,11 +297,10 @@ async function saveAccount(acc: OAuthAccount) {
   }
   accounts.set(acc.id, acc);
   const context = ctx;
-  const ids = [...accounts.keys()];
   const raw = JSON.stringify(acc);
   const write = persistence.then(async () => {
     await context?.secrets.store(SECRET_KEY(acc.id), raw);
-    await context?.globalState.update(INDEX_KEY, ids);
+    await context?.globalState.update(INDEX_KEY, [...new Set([...mergedIndex(context), acc.id])]);
   });
   persistence = write.catch(() => {});
   await write;
@@ -259,10 +313,9 @@ export async function disconnect(id: string) {
   antigravityCatalogs.delete(id);
   if (kind && !enabledOfKind(kind).length) rrCursor.delete(kind);
   const context = ctx;
-  const ids = [...accounts.keys()];
   const write = persistence.then(async () => {
     await context?.secrets.delete(SECRET_KEY(id));
-    await context?.globalState.update(INDEX_KEY, ids);
+    await context?.globalState.update(INDEX_KEY, mergedIndex(context, id));
   });
   persistence = write.catch(() => {});
   await write;
@@ -340,6 +393,14 @@ export async function login(kind: OAuthKind, options?: OAuthLoginOptions) {
   const attempt: LoginAttempt = { verifier, state, server, authorizationUrl: buildAuthUrl(kind, challenge, state) };
   pending.set(kind, attempt);
   pendingKind = kind;
+  attempt.deadline = setTimeout(() => {
+    if (pending.get(kind) !== attempt || attempt.completing) return;
+    cancelLogin(kind);
+    closeLoginServer(attempt);
+    loginErrors[kind] = "Sign-in timed out after 10 minutes. Add the account again to retry.";
+    emit();
+  }, LOGIN_TIMEOUT_MS);
+  attempt.deadline.unref?.();
   emit();
 
   // A failed local listener must not prevent browser sign-in or manual callback entry.
@@ -376,6 +437,7 @@ export async function login(kind: OAuthKind, options?: OAuthLoginOptions) {
 }
 
 function closeLoginServer(attempt: LoginAttempt) {
+  if (attempt.deadline) { clearTimeout(attempt.deadline); attempt.deadline = undefined; }
   try { attempt.server.close(); } catch { /* A failed listener may never have started. */ }
 }
 
@@ -470,31 +532,46 @@ export async function completeManual(kind: OAuthKind, pasted: string): Promise<v
   if (!p) throw new Error("No login in progress — click Add account first");
   let code = "";
   let retState = p.state;
+  let explicitState = false;
   const text = pasted.trim();
   try {
     const url = new URL(text);
     code = url.searchParams.get("code") || "";
     retState = url.searchParams.get("state") || "";
+    explicitState = true;
   } catch {
     // Not a URL — accept "code#state" (Anthropic's copy box) or a bare code.
     const [c, s] = text.split("#");
     code = c;
-    if (s !== undefined) retState = s;
+    if (s !== undefined) { retState = s; explicitState = true; }
+  }
+  // A bare code is only safe when PKCE binds it to this attempt's verifier;
+  // Google's callback always carries state, so require it there as well.
+  if (!explicitState && (!PKCE_LOGIN_KINDS.has(kind) || kind === "antigravity")) {
+    loginErrors[kind] = "Paste the full callback URL from your browser, including its state parameter.";
+    emit();
+    throw new Error(loginErrors[kind]);
   }
   await finishLoginAttempt(kind, p, code, retState);
 }
+
+/** Built-in loopback flows that send an S256 code_challenge. */
+const PKCE_LOGIN_KINDS: ReadonlySet<OAuthKind> = new Set<OAuthKind>(["claude-code", "codex", "antigravity"]);
 
 function buildAuthUrl(kind: OAuthKind, challenge: string, state: string): string {
   if (kind === "claude-code") {
     return buildClaudeAuthorizationUrl({ challenge, state, redirectUri: redirectUri(kind) });
   }
   if (kind === "antigravity") {
-    // Standard Google OAuth2 code flow (no PKCE; uses client secret).
+    // Google OAuth2 code flow with PKCE (S256) in addition to the client secret,
+    // so an intercepted authorization code cannot be redeemed elsewhere.
     const params = new URLSearchParams({
       client_id: ANTIGRAVITY.clientId,
       response_type: "code",
       redirect_uri: redirectUri(kind),
       scope: ANTIGRAVITY.scopes.join(" "),
+      code_challenge: challenge,
+      code_challenge_method: "S256",
       state,
       access_type: "offline",
       prompt: "consent",
@@ -521,7 +598,7 @@ async function completeLogin(kind: OAuthKind, code: string, retState: string, ex
   if (retState !== expectState) throw new Error("OAuth state mismatch");
   const acc = kind === "claude-code" ? await exchangeAnthropic(code, verifier, expectState)
     : kind === "codex" ? await exchangeCodex(code, verifier)
-    : await exchangeAntigravity(code);
+    : await exchangeAntigravity(code, verifier);
   if (!isCurrent()) throw new Error("This sign-in attempt was cancelled or replaced. Use the current sign-in link.");
   await saveAccount(acc);
 }
@@ -578,7 +655,7 @@ async function exchangeAnthropic(code: string, verifier: string, state: string):
       state,
     }),
   });
-  if (!r.ok) throw new Error(`Anthropic token exchange ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  if (!r.ok) throw await upstreamFailure("Anthropic token exchange", r);
   const d: any = await r.json();
   const acctUuid = d.account?.uuid;
   return {
@@ -606,7 +683,7 @@ async function exchangeCodex(code: string, verifier: string): Promise<OAuthAccou
     signal: AbortSignal.timeout(30_000),
     body: body.toString(),
   });
-  if (!r.ok) throw new Error(`Codex token exchange ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  if (!r.ok) throw await upstreamFailure("Codex token exchange", r);
   const d: any = await r.json();
   const identity = codexIdentity(d);
   return {
@@ -621,7 +698,7 @@ async function exchangeCodex(code: string, verifier: string): Promise<OAuthAccou
   };
 }
 
-async function exchangeAntigravity(code: string): Promise<OAuthAccount> {
+async function exchangeAntigravity(code: string, verifier: string): Promise<OAuthAccount> {
   const r = await fetch(ANTIGRAVITY.tokenUrl, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
@@ -631,10 +708,11 @@ async function exchangeAntigravity(code: string): Promise<OAuthAccount> {
       client_id: ANTIGRAVITY.clientId,
       client_secret: ANTIGRAVITY.clientSecret,
       code,
+      code_verifier: verifier,
       redirect_uri: redirectUri("antigravity"),
     }).toString(),
   });
-  if (!r.ok) throw new Error(`Antigravity token exchange ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  if (!r.ok) throw await upstreamFailure("Antigravity token exchange", r);
   const d: any = await r.json();
   const expiresAt = tokenExpiry(d);
   const token = d.access_token as string;
@@ -665,6 +743,21 @@ async function refreshAccount(acc: OAuthAccount): Promise<OAuthAccount> {
   const existing = refreshing.get(acc.id);
   if (existing) return existing;
   const p = (async () => {
+    // Another window may already have rotated this account's tokens. Using our
+    // stale refresh token could revoke theirs, so adopt the stored copy instead.
+    await persistence; // our own queued writes are not "another window"
+    const { account: stored } = await readStoredAccount(acc.id);
+    if (generation !== contextGeneration) throw new Error("The account context changed while refreshing.");
+    if (stored && (stored.accessToken !== acc.accessToken || stored.refreshToken !== acc.refreshToken)) {
+      const current = accounts.get(acc.id);
+      if (!current) throw new Error(`Account ${acc.id} is no longer connected`);
+      if (current.accessToken === acc.accessToken && current.refreshToken === acc.refreshToken) {
+        accounts.set(acc.id, stored); accountCooldowns.delete(acc.id);
+      }
+      const adopted = accounts.get(acc.id)!;
+      if (adopted.accessToken && Number.isFinite(adopted.expiresAt) && Date.now() < adopted.expiresAt - 5 * 60 * 1000) return adopted;
+      acc = adopted;
+    }
     if (!acc.refreshToken) throw new Error(`${OAUTH_LABEL[acc.kind]} needs to be reconnected: no refresh token`);
     let next: OAuthAccount;
     if (acc.kind === "claude-code") {
@@ -674,7 +767,7 @@ async function refreshAccount(acc: OAuthAccount): Promise<OAuthAccount> {
         signal: AbortSignal.timeout(30_000),
         body: JSON.stringify({ client_id: ANTHROPIC.clientId, grant_type: "refresh_token", refresh_token: acc.refreshToken }),
       });
-      if (!r.ok) throw new Error(`Anthropic refresh ${r.status}: ${(await r.text()).slice(0, 200)}`);
+      if (!r.ok) throw await upstreamFailure("Anthropic refresh", r);
       const d: any = await r.json();
       next = { ...acc, accessToken: d.access_token, refreshToken: d.refresh_token || acc.refreshToken, expiresAt: tokenExpiry(d) };
     } else if (acc.kind === "antigravity") {
@@ -684,7 +777,7 @@ async function refreshAccount(acc: OAuthAccount): Promise<OAuthAccount> {
         signal: AbortSignal.timeout(30_000),
         body: new URLSearchParams({ grant_type: "refresh_token", client_id: ANTIGRAVITY.clientId, client_secret: ANTIGRAVITY.clientSecret, refresh_token: acc.refreshToken }).toString(),
       });
-      if (!r.ok) throw new Error(`Antigravity refresh ${r.status}: ${(await r.text()).slice(0, 200)}`);
+      if (!r.ok) throw await upstreamFailure("Antigravity refresh", r);
       const d: any = await r.json();
       next = { ...acc, accessToken: d.access_token, refreshToken: d.refresh_token || acc.refreshToken, expiresAt: tokenExpiry(d) };
     } else if (acc.kind === "codex") {
@@ -694,7 +787,7 @@ async function refreshAccount(acc: OAuthAccount): Promise<OAuthAccount> {
         signal: AbortSignal.timeout(30_000),
         body: JSON.stringify({ client_id: CODEX.clientId, grant_type: "refresh_token", refresh_token: acc.refreshToken }),
       });
-      if (!r.ok) throw new Error(`Codex refresh ${r.status}: ${(await r.text()).slice(0, 200)}`);
+      if (!r.ok) throw await upstreamFailure("Codex refresh", r);
       const d: any = await r.json();
       const identity = codexIdentity(d);
       next = { ...acc, accessToken: d.access_token, refreshToken: d.refresh_token || acc.refreshToken, idToken: d.id_token || acc.idToken,
@@ -1138,8 +1231,31 @@ function pauseAccount(id: string, error: unknown): void {
   accountCooldowns.set(id, Date.now() + (Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 86_400_000) : fallback));
 }
 
+/** Upstream auth bodies may echo codes or tokens: report the status only. */
+async function upstreamFailure(label: string, response: Response): Promise<Error> {
+  await response.body?.cancel().catch(() => {});
+  return new Error(`${label} failed (HTTP ${response.status})`);
+}
+
+/**
+ * A model-request failure keeps only the provider's structured error message
+ * (JSON error.message / message), never the raw body, which may echo request
+ * content or credentials.
+ */
+async function upstreamErrorSummary(response: Response): Promise<string> {
+  const text = (await response.text().catch(() => "")).slice(0, 64 * 1024);
+  try {
+    const parsed = JSON.parse(text);
+    const message = parsed?.error?.message ?? parsed?.message ?? (typeof parsed?.error === "string" ? parsed.error : undefined);
+    if (typeof message === "string" && message.trim()) {
+      return `: ${message.replace(/\b(?:Bearer\s+)?[A-Za-z0-9._~+/=-]{32,}\b/g, "[redacted]").slice(0, 300)}`;
+    }
+  } catch { /* not JSON */ }
+  return "";
+}
+
 async function oauthStreamError(label: string, response: Response): Promise<ChatHTTPError> {
-  const error = new ChatHTTPError(response.ok ? 502 : response.status, `${label} ${response.status}: ${(await response.text().catch(() => "")).slice(0, 500)}`);
+  const error = new ChatHTTPError(response.ok ? 502 : response.status, `${label} ${response.status}${await upstreamErrorSummary(response)}`);
   const retry = response.headers.get("retry-after");
   if (retry) {
     const delay = /^\d+(?:\.\d+)?$/.test(retry.trim()) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();

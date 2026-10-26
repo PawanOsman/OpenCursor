@@ -7,6 +7,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
+import { createHash } from "crypto";
 import type { ProtocolRecord, ProtocolValue, ProtocolCredentials, ProtocolError } from "../wireTypes.js";
 import type { ExecutorConfig, ExecutorRequest, ExecutorResult, ExecutorLogger, TokenRefreshResult } from "./types.js";
 import { BaseExecutor } from "./base.js";
@@ -16,6 +17,28 @@ import { proxyAwareFetch } from "../utils/proxyFetch.js";
 
 // Cache project IDs resolved from raw API keys { apiKey → projectId }
 const projectIdCache = new Map();
+
+// ADC authorized_user access tokens { sha256(client_id + refresh_token) → token },
+// so each request does not hit Google's token endpoint. Keyed by hash to keep
+// the refresh token itself out of long-lived memory structures.
+const adcTokenCache = new Map<string, { accessToken: string; expiresAt: number }>();
+const ADC_EXPIRY_SKEW_MS = 60_000;
+
+export async function authorizedUserToken(adcJson: { refresh_token: string; client_id: string; client_secret: string }, log?: ExecutorLogger, now = Date.now): Promise<string> {
+  const key = createHash("sha256").update(`${adcJson.client_id}\0${adcJson.refresh_token}`).digest("hex");
+  const cached = adcTokenCache.get(key);
+  if (cached && now() < cached.expiresAt) return cached.accessToken;
+  const result = await refreshGoogleToken(adcJson.refresh_token, adcJson.client_id, adcJson.client_secret, log);
+  if (!result?.accessToken) {
+    adcTokenCache.delete(key);
+    throw new Error("Vertex: failed to refresh access token from ADC JSON (authorized_user)");
+  }
+  const seconds = Number(result.expiresIn);
+  const lifetimeMs = (Number.isFinite(seconds) && seconds > 0 ? seconds : 3600) * 1000;
+  if (lifetimeMs > ADC_EXPIRY_SKEW_MS) adcTokenCache.set(key, { accessToken: result.accessToken, expiresAt: now() + lifetimeMs - ADC_EXPIRY_SKEW_MS });
+  if (adcTokenCache.size > 100) adcTokenCache.delete(adcTokenCache.keys().next().value!);
+  return result.accessToken;
+}
 
 /**
  * Parse Google ADC user credential JSON from apiKey string.
@@ -153,14 +176,7 @@ export class VertexExecutor extends BaseExecutor {
 
     // ADC user credential flow: refresh Bearer token via Google OAuth2 token endpoint
     if (adcJson) {
-      const result = await refreshGoogleToken(
-        adcJson.refresh_token,
-        adcJson.client_id,
-        adcJson.client_secret,
-        log
-      );
-      if (!result?.accessToken) throw new Error("Vertex: failed to refresh access token from ADC JSON (authorized_user)");
-      credentials.accessToken = result.accessToken;
+      credentials.accessToken = await authorizedUserToken(adcJson, log);
     }
 
     // vertex-partner with raw key: auto-resolve project_id if not provided

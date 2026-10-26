@@ -14,10 +14,10 @@ import { join } from "path";
 
 vi.mock("../context/workspaceUtils", () => ({ getWorkspaceRoot: () => undefined }));
 vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} }, workspace: { getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }) } }));
-vi.mock("./externalHooks", () => ({ listExternalHooks: vi.fn(() => []) }));
+vi.mock("./externalHooks", async (importOriginal) => ({ ...(await importOriginal<typeof import("./externalHooks")>()), listExternalHooks: vi.fn(() => []) }));
 
 import { listExternalHooks } from "./externalHooks";
-import { runBlockingHooks } from "./hooksRunner";
+import { runBlockingHooks, envFor, HOOK_ENV_VALUE_LIMIT } from "./hooksRunner";
 
 // Keep the actual process and stdin protocol, with quoting valid in both shells.
 function nodeCommand(code: string): string {
@@ -108,5 +108,15 @@ describe("native hook decisions", () => {
       if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("caps env copies of large context values while stdin keeps the full value", async () => {
+    const prompt = "p".repeat(200_000);
+    const env = envFor({ prompt, command: "short" });
+    expect(env.OPENCURSOR_PROMPT!.length).toBe(HOOK_ENV_VALUE_LIMIT);
+    expect(env.OPENCURSOR_PROMPT).toContain("truncated");
+    expect(env.OPENCURSOR_COMMAND).toBe("short");
+    const code = 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s);if(p.prompt.length!==200000||process.env.OPENCURSOR_PROMPT.length>8192){process.stderr.write("bad");process.exitCode=2}})';
+    expect(await runBlockingHooks([{ id: "fixture", enabled: true, event: "beforeSubmit", command: nodeCommand(code) }], "beforeSubmit", { prompt })).toBeUndefined();
   });
 });

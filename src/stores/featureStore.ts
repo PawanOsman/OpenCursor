@@ -151,6 +151,9 @@ export function parseContextLabel(v?: string): number {
 const CURATED_MODEL_CATALOG: ModelDef[] = [
 	// OpenAI: Astra cannot disable reasoning. GPT-5.6's public API supports max,
 	// while Codex-specific orchestration modes are not public API effort levels.
+	// GPT-6.1 (2026-10): Sol cannot disable reasoning; Terra adds "none". Codex serves Sol only.
+	{ id: "gpt-6.1-sol", name: "GPT-6.1 Sol", kind: ["openai", "codex"], options: [effort("medium", ["low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
+	{ id: "gpt-6.1-terra", name: "GPT-6.1 Terra", kind: "openai", options: [effort("medium", ["none", "low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
 	{ id: "gpt-6-astra", name: "GPT-6 Astra", kind: ["openai", "codex"], options: [effort("medium", ["low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
 	{ id: "gpt-6-sol", name: "GPT-6 Sol", kind: ["openai", "codex"], options: [effort("medium", ["none", "low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
 	{ id: "gpt-6-luna", name: "GPT-6 Luna", kind: ["openai", "codex"], options: [effort("medium", ["none", "low", "medium", "high", "xhigh", "max"]), ctx(["128k", "256k", "400k", "1.05m"], "1.05m")] },
@@ -168,6 +171,10 @@ const CURATED_MODEL_CATALOG: ModelDef[] = [
 	// high effort (optionsFor applies that dependent restriction).
 	{ id: "claude-opus-5-5", name: "Claude Opus 5.5", kind: ["anthropic", "claude-code"], options: [thinking("adaptive", ["adaptive"]), effort("medium", ["low", "medium", "high", "xhigh", "max"]), ctx(["300k", "1m"], "1m")] },
 	{ id: "claude-fable-5-1", name: "Claude Fable 5.1", kind: ["anthropic", "claude-code"], options: [thinking("adaptive", ["adaptive"]), effort("high", ["low", "medium", "high", "xhigh", "max"]), ctx(["300k", "1m"], "1m")] },
+	// Sonnet 5.5 rejects thinking "disabled" (its off switch, "between_tools", is not sent);
+	// Haiku 5.5 can disable thinking only at high effort or below (optionsFor applies that).
+	{ id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", kind: ["anthropic", "claude-code"], options: [thinking("adaptive", ["adaptive"]), effort("high", ["low", "medium", "high", "xhigh", "max"]), ctx(["300k", "1m"], "1m")] },
+	{ id: "claude-haiku-5-5", name: "Claude Haiku 5.5", kind: ["anthropic", "claude-code"], options: [thinking("adaptive", ["disabled", "adaptive"]), effort("medium", ["low", "medium", "high", "xhigh", "max"]), ctx(["100k", "300k", "1m"], "1m")] },
 	{ id: "claude-opus-5", name: "Claude Opus 5", kind: ["anthropic", "claude-code"], options: [thinking("adaptive", ["disabled", "adaptive"]), effort("high", ["low", "medium", "high", "xhigh", "max"]), ctx(["300k", "1m"], "1m")] },
 	{ id: "claude-sonnet-5", name: "Claude Sonnet 5", kind: ["anthropic", "claude-code"], options: [thinking("adaptive", ["disabled", "adaptive"]), effort("high", ["low", "medium", "high", "xhigh", "max"]), ctx(["300k", "1m"], "1m")] },
 	{ id: "claude-haiku-4-5", name: "Claude Haiku 4.5", kind: ["anthropic", "claude-code"], options: [thinking("disabled", ["disabled", "enabled"]), ctx(["200k"], "200k")] },
@@ -182,6 +189,7 @@ const CURATED_MODEL_CATALOG: ModelDef[] = [
 	// Google public API: 1,048,576 input tokens; 1m is a conservative local budget.
 	// Gemini 3.7/3.8 and Pro do not support minimal or fully disabled reasoning.
 	// Retired gemini-3-pro-preview is intentionally absent (shutdown 2026-03-09).
+	{ id: "gemini-4-argon", name: "Gemini 4 Argon", kind: "google", options: [effort("high", ["low", "medium", "high"]), ctx(["128k", "256k", "1m"], "1m")] },
 	{ id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", kind: "google", options: [effort("medium", ["low", "medium", "high"]), ctx(["128k", "256k", "1m"], "1m")] },
 	{ id: "gemini-3.7-flash", name: "Gemini 3.7 Flash", kind: "google", options: [effort("medium", ["low", "medium", "high"]), ctx(["128k", "256k", "1m"], "1m")] },
 	{ id: "gemini-3.6-flash", name: "Gemini 3.6 Flash", kind: "google", options: [effort("medium", ["minimal", "low", "medium", "high"]), ctx(["128k", "256k", "1m"], "1m")] },
@@ -202,6 +210,8 @@ const CURATED_MODEL_CATALOG: ModelDef[] = [
 	{ id: "grok-4.7", name: "Grok 4.7", kind: "xai", options: [effort("high", ["low", "medium", "high", "xhigh"]), ctx(["128k", "256k", "500k"], "500k")] },
 	{ id: "deepseek-flash", name: "DeepSeek V4.1 Flash", kind: "deepseek", options: [thinking("enabled", ["disabled", "enabled"]), effort("high", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
 	{ id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", kind: "deepseek", options: [thinking("enabled", ["disabled", "enabled"]), effort("high", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
+	{ id: "kimi-k3.1-pro", name: "Kimi K3.1 Pro", kind: "moonshot", options: [effort("max", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
+	{ id: "kimi-k3.1-pro-highspeed", name: "Kimi K3.1 Pro Highspeed", kind: "moonshot", options: [effort("max", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
 	{ id: "kimi-k3", name: "Kimi K3", kind: "moonshot", options: [effort("max", ["low", "high", "max"]), ctx(["128k", "256k", "1m"], "1m")] },
 	{ id: "kimi-k2.7-code", name: "Kimi K2.7 Code", kind: "moonshot", options: [ctx(["128k", "256k"], "256k")] },
 	{ id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", kind: "moonshot", options: [ctx(["128k", "256k"], "256k")] },
@@ -509,8 +519,8 @@ export class FeatureStore {
 			const speed = saved?.find(option => option.key === "speed")?.value;
 			base.push({ key: "speed", label: "Speed", description: MODEL_SPEED_DESCRIPTION, type: "select", values: ["standard", "fast"], value: speed === "fast" ? "fast" : "standard" });
 		}
-		// Opus 5's two controls are dependent: higher effort cannot disable thinking.
-		if (/^claude-opus-5(?:$|-)/.test(modelId.slice(modelId.lastIndexOf("/") + 1)) && base.some((o) => o.key === "thinking" && o.value === "disabled")) {
+		// Opus 5's and Haiku 5.5's two controls are dependent: higher effort cannot disable thinking.
+		if (/^claude-(?:opus-5|haiku-5)(?:$|-)/.test(modelId.slice(modelId.lastIndexOf("/") + 1)) && base.some((o) => o.key === "thinking" && o.value === "disabled")) {
 			const option = base.find((o) => o.key === "reasoning_effort");
 			if (option) {
 				option.values = ["low", "medium", "high"];

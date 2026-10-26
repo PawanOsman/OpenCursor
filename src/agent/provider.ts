@@ -67,8 +67,10 @@ function applyOpenAISampling(body: Record<string, unknown>, s?: SamplingParams) 
 export { applyAnthropicReasoning, needsContext1mBeta } from "./provider/anthropicReasoning";
 
 /** Models that reject temperature / top_p / top_k with a 400. */
-const ANTHROPIC_NO_SAMPLING = /claude-(opus-4-[678]|opus-5|sonnet-4-6|sonnet-5|fable-5|mythos)/i;
-const ANTHROPIC_DEFAULT_THINKING = /claude-(opus-5|sonnet-5|fable-5|mythos)/i;
+const ANTHROPIC_NO_SAMPLING = /claude-(opus-4-[678]|opus-5|sonnet-4-6|sonnet-5|haiku-5|fable-5|mythos)/i;
+const ANTHROPIC_DEFAULT_THINKING = /claude-(opus-5|sonnet-5|haiku-5|fable-5|mythos)/i;
+/** Sonnet 5.5 rejects forced tool_choice (`any` / `tool`) with a 400. */
+const ANTHROPIC_NO_FORCED_TOOL = /claude-sonnet-5-5/i;
 
 function applyAnthropicSampling(body: Record<string, unknown>, model: string, s?: SamplingParams) {
   if (!s || ANTHROPIC_NO_SAMPLING.test(model)) return;
@@ -412,12 +414,14 @@ export async function generateTitle(apiBaseUrl: string, apiKey: string, model: s
         max_tokens: 200,
         stream: false,
         tools: [{ name: "set_title", description: "Set the chat title.", input_schema: { type: "object", properties: { title: { type: "string", description: "3-6 word title" } }, required: ["title"] } }],
-        tool_choice: { type: "tool", name: "set_title" },
+        tool_choice: ANTHROPIC_NO_FORCED_TOOL.test(model) ? { type: "auto" } : { type: "tool", name: "set_title" },
       }),
     });
     const d = await auxiliaryResponse(r, model, true, "title", options, apiKey);
     const use = (d?.content ?? []).find((b: any) => b?.type === "tool_use");
-    return cleanTitle(use?.input?.title ?? "");
+    if (use) return cleanTitle(use.input?.title ?? "");
+    const text = (d?.content ?? []).filter((b: any) => b?.type === "text").map((b: any) => b.text).join("");
+    return cleanTitle(parseTitle(text) || text);
   }
   const msgs = [{ role: "system", content: sys }, { role: "user", content: prompt }];
   const call = async (body: Record<string, unknown>) => {

@@ -1,0 +1,32 @@
+# Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+#
+# This file is part of OpenCursor — AI coding agent chat inside VS Code.
+# https://github.com/PawanOsman/OpenCursor
+#
+# Licensed under the MIT License. See LICENSE file in the project root.
+
+# Normalize text to LF in the repository; generated files (src/runtimeManifest.ts)
+# and checks compare LF content.
+* text=auto eol=lf
+
+# Binary assets: never convert line endings or diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.gguf binary
+*.onnx binary
+*.node binary
+*.wasm binary
+*.zip binary
+*.tgz binary
+*.gz binary
+*.vsix binary
+*.pdf binary

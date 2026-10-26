@@ -16,3 +16,9 @@ onlyBuiltDependencies:
   - onnxruntime-node
   - protobufjs
   - sharp
+
+# Security floors for transitive dev dependencies (mocha via @vscode/test-cli).
+# pnpm ignores package.json "overrides"; it reads them from here.
+overrides:
+  diff: ^8.0.4
+  serialize-javascript: ^7.0.6

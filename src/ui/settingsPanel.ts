@@ -8,9 +8,9 @@
  */
 
 import * as vscode from "vscode";
-import { SettingsManager, Settings, DEFAULT_SETTINGS } from "../stores/settingsManager";
+import { SettingsManager, Settings } from "../stores/settingsManager";
 import { listModels } from "../agent/provider";
-import { renderWebviewHtml } from "./webviewHtml";
+import { renderWebviewHtml, webviewResourceRoots } from "./webviewHtml";
 import { FeatureStore, MODEL_CATALOG, getProviderApiKeys } from "../stores/featureStore";
 import { ProviderKeyStore, type ProviderKeyAction } from "../stores/providerKeys";
 import { PROVIDER_PRESETS } from "../shared/providerCatalog";
@@ -22,7 +22,8 @@ import { indexDocSource, cancelDocIndex, deleteDocIndex, onDocsStatus, getDocsSt
 import { createDocsPageSelector } from "../agent/docsPlanner";
 import { createDocPolicy } from "../agent/docsDiscovery";
 import { docIndexSettingsChanged, normalizeDocSourceSettings } from "../shared/docSourceSettings";
-import { getWorkspaceRoot } from "../context/workspaceUtils";
+import { findWorkspaceRoot } from "../context/workspaceUtils";
+import * as path from "node:path";
 import * as llama from "../agent/llamacpp";
 import type { LlamacppModel } from "../agent/llamacpp";
 import * as ollama from "../agent/ollama";
@@ -31,6 +32,23 @@ import * as oauth from "../agent/oauth";
 import { getUsage, resetUsage, flushUsage, onUsageChanged } from "../stores/usageStore";
 import { listExternalHooks, saveExternalHook, deleteExternalHook } from "../integrations/externalHooks";
 import { getAllModels, onAllModels, refreshAllModels, applyEmbedModel } from "../stores/modelRegistry";
+
+/** External links from webviews may only open ordinary web pages. */
+export function isWebUrl(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  try { const url = new URL(value); return url.protocol === "http:" || url.protocol === "https:"; } catch { return false; }
+}
+function samePath(a: string | undefined, b: unknown): boolean {
+  if (!a || typeof b !== "string" || !b) return false;
+  const left = path.resolve(a), right = path.resolve(b);
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+/** A skill folder must sit beneath a `skills` (or `skills-cursor`) directory, never be one. */
+function isInsideSkillsDirectory(folder: string): boolean {
+  const parts = path.resolve(folder).split(/[\\/]+/);
+  const index = parts.findIndex(part => part === "skills" || part === "skills-cursor");
+  return index >= 0 && index < parts.length - 1;
+}
 
 export class SettingsPanel {
   public static currentPanel: SettingsPanel | undefined;
@@ -63,7 +81,7 @@ export class SettingsPanel {
       column || vscode.ViewColumn.One,
       {
         enableScripts: true,
-        localResourceRoots: [context.extensionUri],
+        localResourceRoots: webviewResourceRoots(context.extensionUri),
         retainContextWhenHidden: true,
       }
     );
@@ -74,6 +92,12 @@ export class SettingsPanel {
   }
 
   private _pendingSection?: string;
+
+  /** Resolve a webview-supplied path only if it is a currently listed rule or skill file. */
+  private async _listedInstructionFile(candidate: unknown): Promise<string | undefined> {
+    const [rules, skills] = await Promise.all([listRules(), listSkills()]);
+    return [...rules.map(rule => rule.path), ...skills.map(skill => skill.path)].find((file): file is string => samePath(file, candidate));
+  }
 
   private constructor(
     panel: vscode.WebviewPanel,
@@ -175,7 +199,9 @@ export class SettingsPanel {
           // ---- Rules / Skills files ----
           case "openWorkspaceFile": {
             try {
-              const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(String(message.path)));
+              const target = await this._listedInstructionFile(message.path);
+              if (!target) throw new Error("only listed rule and skill files can be opened here");
+              const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
               await vscode.window.showTextDocument(doc, { preview: false });
             } catch (e: any) {
               vscode.window.showErrorMessage(`OpenCursor: could not open file: ${e?.message || e}`);
@@ -183,7 +209,7 @@ export class SettingsPanel {
             break;
           }
           case "createRule": {
-            const root = getWorkspaceRoot();
+            const root = findWorkspaceRoot();
             if (!root) { vscode.window.showErrorMessage("OpenCursor: open a workspace first."); break; }
             const name = await vscode.window.showInputBox({ prompt: "Rule name", placeHolder: "my-rule" });
             if (!name) break;
@@ -202,7 +228,7 @@ export class SettingsPanel {
             break;
           }
           case "createSkill": {
-            const root = getWorkspaceRoot();
+            const root = findWorkspaceRoot();
             if (!root) { vscode.window.showErrorMessage("OpenCursor: open a workspace first."); break; }
             const name = await vscode.window.showInputBox({ prompt: "Skill name", placeHolder: "my-skill" });
             if (!name) break;
@@ -221,10 +247,12 @@ export class SettingsPanel {
             break;
           }
           case "deleteRule": {
+            const target = (await listRules()).find(rule => samePath(rule.path, message.path))?.path;
+            if (!target) { vscode.window.showErrorMessage("OpenCursor: that rule is no longer listed."); await this._sendFeatures(); break; }
             const ok = await vscode.window.showWarningMessage(`Delete rule "${message.name}"?`, { modal: true }, "Delete");
             if (ok !== "Delete") break;
             try {
-              await vscode.workspace.fs.delete(vscode.Uri.file(String(message.path)), { useTrash: true });
+              await vscode.workspace.fs.delete(vscode.Uri.file(target), { useTrash: true });
             } catch (e: any) {
               vscode.window.showErrorMessage(`OpenCursor: could not delete rule: ${e?.message || e}`);
             }
@@ -232,12 +260,15 @@ export class SettingsPanel {
             break;
           }
           case "deleteSkill": {
+            // Only a currently listed, non-plugin SKILL.md may be removed, and only
+            // its own folder: never an arbitrary path supplied by the webview.
+            const skill = (await listSkills()).find(item => !item.pluginId && samePath(item.path, message.path));
+            const folder = skill && path.basename(skill.path) === "SKILL.md" ? path.dirname(skill.path) : undefined;
+            if (!folder || !isInsideSkillsDirectory(folder)) { vscode.window.showErrorMessage("OpenCursor: that skill is no longer listed."); await this._sendFeatures(); break; }
             const ok = await vscode.window.showWarningMessage(`Delete skill "${message.name}"?`, { modal: true }, "Delete");
             if (ok !== "Delete") break;
             try {
-              // message.path points at SKILL.md — delete the whole skill folder.
-              const dir = vscode.Uri.joinPath(vscode.Uri.file(String(message.path)), "..");
-              await vscode.workspace.fs.delete(dir, { recursive: true, useTrash: true });
+              await vscode.workspace.fs.delete(vscode.Uri.file(folder), { recursive: true, useTrash: true });
             } catch (e: any) {
               vscode.window.showErrorMessage(`OpenCursor: could not delete skill: ${e?.message || e}`);
             }
@@ -245,7 +276,7 @@ export class SettingsPanel {
             break;
           }
           case "openUrl":
-            if (message.url) await vscode.env.openExternal(vscode.Uri.parse(String(message.url)));
+            if (isWebUrl(message.url)) await vscode.env.openExternal(vscode.Uri.parse(String(message.url)));
             break;
           case "openVsCodeSettings":
             await vscode.commands.executeCommand("workbench.action.openSettings", message.query || "");
@@ -255,10 +286,6 @@ export class SettingsPanel {
             break;
           case "openEditorSettings":
             await vscode.commands.executeCommand("workbench.action.openSettings", "@id:editor.fontSize @id:editor.fontFamily @id:editor.formatOnSave @id:editor.minimap.enabled @id:files.autoSave");
-            break;
-          // TEMPORARY: dev-only full reset. Remove before publishing.
-          case "resetStorage":
-            await this._resetStorage();
             break;
           case "providerKeyAction":
             await this._handleProviderKeyAction(message);
@@ -310,11 +337,13 @@ export class SettingsPanel {
             } catch (error) { this._panel.webview.postMessage({ type: "mcpAuthError", error: String(error) }); }
             await this._sendFeatures();
             break;
-          case "getIndexStatus":
-            await warmIndex(getWorkspaceRoot());
-            this._panel.webview.postMessage({ type: "indexStatus", status: getStatus(getWorkspaceRoot()), models: EMBED_MODELS });
+          case "getIndexStatus": {
+            const root = findWorkspaceRoot();
+            if (root) await warmIndex(root);
+            if (root) this._panel.webview.postMessage({ type: "indexStatus", status: getStatus(root), models: EMBED_MODELS });
             this._sendDocs();
             break;
+          }
           case "addDoc":
           case "editDoc":
           case "reindexDoc":
@@ -329,10 +358,11 @@ export class SettingsPanel {
             this._panel.webview.postMessage({ type: "docLogs", id: message.id, lines: getDocLogs(message.id) });
             break;
           case "openExternal":
-            if (/^https?:\/\//.test(message.url || "")) await vscode.env.openExternal(vscode.Uri.parse(message.url));
+            if (isWebUrl(message.url)) await vscode.env.openExternal(vscode.Uri.parse(String(message.url)));
             break;
           case "openCursorignore": {
-            const root = getWorkspaceRoot();
+            const root = findWorkspaceRoot();
+            if (!root) { vscode.window.showErrorMessage("OpenCursor: open a workspace first."); break; }
             const uri = vscode.Uri.file(`${root}/.cursorignore`);
             try {
               await vscode.workspace.fs.stat(uri);
@@ -344,17 +374,18 @@ export class SettingsPanel {
           }
           case "syncIndex":
             if (this.featureStore.get().indexingEnabled === false) break;
-            buildIndex(getWorkspaceRoot()).catch(() => {});
+            { const root = findWorkspaceRoot(); if (root) buildIndex(root).catch(() => {}); }
             break;
           case "deleteIndex":
-            await deleteIndex(getWorkspaceRoot());
+            { const root = findWorkspaceRoot(); if (root) await deleteIndex(root); }
             break;
           case "setEmbedModel": {
             const f = this.featureStore.get();
             await this.featureStore.set({ ...f, embedModel: message.modelId });
             await applyEmbedModel(message.modelId);
-            this._panel.webview.postMessage({ type: "indexStatus", status: getStatus(getWorkspaceRoot()), models: EMBED_MODELS });
-            if (f.indexingEnabled !== false) buildIndex(getWorkspaceRoot()).catch(() => {});
+            const root = findWorkspaceRoot();
+            if (root) this._panel.webview.postMessage({ type: "indexStatus", status: getStatus(root), models: EMBED_MODELS });
+            if (root && f.indexingEnabled !== false) buildIndex(root).catch(() => {});
             break;
           }
           case "localHardwareGet": {
@@ -708,40 +739,6 @@ export class SettingsPanel {
     } catch (err: any) {
       this._panel.webview.postMessage({ type: "modelsFetched", models: [], providerId, ...(requestId ? { requestId } : {}), error: String(err?.message || err) });
     }
-  }
-
-  /**
-   * TEMPORARY (dev-only): wipe all persisted extension state so the extension
-   * behaves like a fresh install, then reload the window. Remove before publishing.
-   */
-  private async _resetStorage() {
-    const confirm = await vscode.window.showWarningMessage(
-      "Reset ALL OpenCursor storage (settings, API keys, providers, conversations, models, MCP servers)?",
-      { modal: true },
-      "Reset"
-    );
-    if (confirm !== "Reset") return;
-
-    // Delete provider API keys (need ids before clearing globalState) + the main key.
-    const features = this.featureStore.get();
-    const providerKeys = new Set(features.providers.flatMap(provider => [provider.id, ...getProviderApiKeys(provider).map(key => key.id)]));
-    await Promise.all([...providerKeys].map(id => this.settingsManager.deleteProviderKey(id)));
-    await this.settingsManager.deleteApiKey();
-
-    // Delete OAuth account secrets, then every globalState key.
-    const oauthIds = this.context.globalState.get<string[]>("ocursor.oauth.accountIds", []) ?? [];
-    await Promise.all(oauthIds.map((id) => this.context.secrets.delete(`ocursor.oauth.acct.${id}`)));
-    for (const key of this.context.globalState.keys()) {
-      await this.context.globalState.update(key, undefined);
-    }
-
-    // Remove all ocursor.* config overrides (undefined reverts to default).
-    const config = vscode.workspace.getConfiguration("ocursor");
-    for (const key of Object.keys(DEFAULT_SETTINGS)) {
-      try { await config.update(key, undefined, vscode.ConfigurationTarget.Global); } catch { /* not writable */ }
-    }
-
-    await vscode.commands.executeCommand("workbench.action.reloadWindow");
   }
 
   /**

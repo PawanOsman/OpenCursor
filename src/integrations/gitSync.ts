@@ -7,6 +7,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
+import * as path from "path";
 import * as vscode from "vscode";
 import { pendingChanges } from "../stores/pendingChanges";
 import { safePath } from "../context/workspaceUtils";
@@ -23,6 +24,30 @@ import { safePath } from "../context/workspaceUtils";
 
 /** Absolute paths we have observed as dirty — only these can be auto-kept. */
 const seenDirty = new Set<string>();
+/** Roots of every open repository, so only the deepest (owning) one decides. */
+const repoRoots = new Set<string>();
+
+function normalize(p: string): string {
+  const resolved = path.resolve(p);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/** True when abs is root itself or below it (separator-bounded, case-insensitive on Windows). */
+export function isInsideRoot(abs: string, root: string): boolean {
+  if (!root) return false;
+  const a = normalize(abs);
+  const r = normalize(root);
+  return a === r || a.startsWith(r.endsWith(path.sep) ? r : r + path.sep);
+}
+
+/** The deepest repository root containing abs (nested repos/submodules own their files). */
+export function owningRoot(abs: string, roots: Iterable<string>): string | undefined {
+  let best: string | undefined;
+  for (const root of roots) {
+    if (isInsideRoot(abs, root) && (!best || normalize(root).length > normalize(best).length)) best = root;
+  }
+  return best;
+}
 
 export function registerGitSync(context: vscode.ExtensionContext) {
   const ext = vscode.extensions.getExtension<any>("vscode.git");
@@ -31,11 +56,18 @@ export function registerGitSync(context: vscode.ExtensionContext) {
     const api = gitExt?.getAPI?.(1);
     if (!api) return;
     const hook = (repo: any) => {
+      const root: string | undefined = repo.rootUri?.fsPath;
+      if (root) repoRoots.add(root);
       sync(repo);
       context.subscriptions.push(repo.state.onDidChange(() => sync(repo)));
     };
+    // Register every root first so the initial sync already knows nested repos.
+    for (const repo of api.repositories) if (repo.rootUri?.fsPath) repoRoots.add(repo.rootUri.fsPath);
     for (const repo of api.repositories) hook(repo);
     context.subscriptions.push(api.onDidOpenRepository(hook));
+    if (api.onDidCloseRepository) {
+      context.subscriptions.push(api.onDidCloseRepository((repo: any) => { if (repo.rootUri?.fsPath) repoRoots.delete(repo.rootUri.fsPath); }));
+    }
   });
 }
 
@@ -57,7 +89,7 @@ function sync(repo: any) {
     } catch {
       continue;
     }
-    if (!abs.startsWith(root)) continue;
+    if (!root || owningRoot(abs, repoRoots) !== root) continue;
     // Never seen dirty => git ignores it (or it predates this session): leave it
     // to the user rather than silently dropping the review.
     if (!seenDirty.has(abs) || dirty.has(abs)) continue;
