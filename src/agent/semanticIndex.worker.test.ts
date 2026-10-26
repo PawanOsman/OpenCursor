@@ -69,6 +69,14 @@ describe("embedding worker", () => {
     expect(await semantic.embedTexts(["a", "b", "c"])).toHaveLength(3);
   });
 
+  it("reports an idle session as the configured device, not as loading", async () => {
+    expect(semantic.getStatus(fixture)).toMatchObject({ embedder: "idle", accelerator: "cpu", deviceLabel: "CPU · idle, loads when needed", device: null });
+    await semantic.embedQuery("load it");
+    expect(semantic.getStatus(fixture)).toMatchObject({ embedder: "ready", accelerator: "cpu", deviceLabel: "CPU", device: "cpu" });
+    await semantic.releaseEmbedder();
+    expect(semantic.getStatus(fixture)).toMatchObject({ embedder: "idle", accelerator: "cpu", deviceLabel: "CPU · idle, loads when needed" });
+  });
+
   it("replaces a crashed worker on the next request", async () => {
     await expect(semantic.embedTexts(["crash"])).rejects.toThrow("exited");
     expect(await semantic.embedQuery("after crash")).toEqual([2, semantic.cpuThreadBudget(), 1, 0]);
@@ -93,6 +101,9 @@ describe.skipIf(!gpuBackend)("embedding device selection", () => {
     expect(status.accelerator).toBe("gpu");
     expect(status.deviceLabel).toContain("Test GPU");
     expect(status.acceleratorError).toBeUndefined();
+    await semantic.releaseEmbedder();
+    expect(semantic.getStatus(fixture)).toMatchObject({ embedder: "idle", accelerator: "gpu" });
+    expect(semantic.getStatus(fixture).deviceLabel).toMatch(/^GPU · Test GPU .* · idle, loads when needed$/);
   });
 
   it("falls back to the CPU and reports why when the GPU cannot load", async () => {

@@ -17,7 +17,7 @@ import { PROVIDER_PRESETS } from "../shared/providerCatalog";
 import { listRules, listSkills } from "../context/workspaceContext";
 import { mcpManager } from "../integrations/mcpClient";
 import { BUILTIN_PERSONAS } from "../agent/personas";
-import { getStatus, onIndexStatus, buildIndex, deleteIndex, warmIndex, EMBED_MODELS, setEmbedAccelerator } from "../agent/semanticIndex";
+import { getStatus, onIndexStatus, buildIndex, deleteIndex, warmIndex, EMBED_MODELS, setEmbedAccelerator, setIndexingPaused } from "../agent/semanticIndex";
 import { listEmbedAccelerators } from "../agent/embedAccelerators";
 import { indexDocSource, cancelDocIndex, deleteDocIndex, onDocsStatus, getDocsStatus, getDocLogs, type DocSource } from "../agent/docsIndex";
 import { createDocsPageSelector } from "../agent/docsPlanner";
@@ -392,6 +392,15 @@ export class SettingsPanel {
             if (this.featureStore.get().indexingEnabled === false) break;
             { const root = findWorkspaceRoot(); if (root) buildIndex(root).catch(() => {}); }
             break;
+          case "pauseIndex":
+            setIndexingPaused(true, findWorkspaceRoot());
+            break;
+          case "resumeIndex": {
+            const root = findWorkspaceRoot();
+            setIndexingPaused(false, root);
+            if (root && this.featureStore.get().indexingEnabled !== false) buildIndex(root).catch(() => {});
+            break;
+          }
           case "deleteIndex":
             { const root = findWorkspaceRoot(); if (root) await deleteIndex(root); }
             break;

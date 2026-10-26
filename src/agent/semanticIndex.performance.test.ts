@@ -40,6 +40,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  semantic.setIndexingPaused(false);
   await semantic.releaseEmbedder();
   semantic.setIndexingEnabled(false);
   vi.useRealTimers();
@@ -115,6 +116,33 @@ describe("semantic indexing resource budgets", () => {
       throw stop;
     })).rejects.toBe(stop);
     expect(allocated).toBeLessThan(1024 * 1024);
+  });
+
+  it("pauses a sync without disabling indexing and resumes where it stopped", async () => {
+    for (const name of ["a", "b", "c", "d", "e"]) await fs.writeFile(path.join(root, `${name}.ts`), `export const ${name} = 1;`);
+    await semantic.buildIndex(root, (done) => { if (done === 1) semantic.setIndexingPaused(true, root); });
+    expect(semantic.getStatus(root)).toMatchObject({ paused: true, indexing: false, files: 1, done: 1, total: 5 });
+    expect(semantic.isIndexingEnabled()).toBe(true);
+    const embedded = run.mock.calls.flatMap(([texts]) => texts as string[]).length;
+    expect(embedded).toBe(1);
+
+    // While paused: automatic syncs and file changes queue, nothing is embedded.
+    await fs.writeFile(path.join(root, "f.ts"), "export const f = 1;");
+    await semantic.buildIndex(root);
+    await semantic.applyFileChanges(root, new Map([["f.ts", "up"]]));
+    await semantic.upsertFile(root, "a.ts");
+    expect(run.mock.calls.flatMap(([texts]) => texts as string[])).toHaveLength(embedded);
+
+    // Search keeps working on what is already indexed.
+    expect(await semantic.search(root, "const")).not.toEqual([]);
+
+    semantic.setIndexingPaused(false, root);
+    await semantic.buildIndex(root);
+    expect(semantic.getStatus(root)).toMatchObject({ paused: false, files: 6 });
+    // Only the five files not finished before the pause were embedded on resume
+    // (the other text is the search query above).
+    const fileTexts = run.mock.calls.flatMap(([texts]) => texts as string[]).filter((t) => t !== "const");
+    expect(fileTexts).toHaveLength(embedded + 5);
   });
 
   it("batches changed files into one embedding pass and one persisted snapshot", async () => {

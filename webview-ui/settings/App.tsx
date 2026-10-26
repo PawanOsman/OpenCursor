@@ -41,6 +41,7 @@ type Section = "general" | "usage" | "agents" | "providers" | "models" | "llamac
 
 interface IndexStatus {
   indexing: boolean;
+  paused?: boolean;
   done: number;
   total: number;
   files: number;
@@ -543,6 +544,8 @@ function IndexingPanel({
           <div className="index-progress-meta">
             {features.indexingEnabled === false
               ? `Disabled - ${status.files} files on disk`
+              : status.paused
+              ? `Paused - ${status.files} files / ${status.chunks || 0} chunks indexed${status.total > status.done ? ` (${status.total - status.done} left in the last sync)` : ""}`
               : status.indexing
               ? `Indexing ${status.done} / ${status.total} files...`
               : `${status.files} files / ${status.chunks || 0} chunks`}
@@ -641,9 +644,19 @@ function IndexingPanel({
             style={{ maxWidth: 260 }}
           />
           <div className="index-actions" style={{ marginTop: 0, marginLeft: "auto" }}>
-            <button className="btn-secondary" disabled={status.indexing || features.indexingEnabled === false} onClick={() => vscode.postMessage({ type: "syncIndex" })}>
-              <Icon name="reset" /> {status.indexing ? "Syncing..." : "Sync"}
-            </button>
+            {status.paused ? (
+              <button className="btn-secondary" disabled={features.indexingEnabled === false} onClick={() => vscode.postMessage({ type: "resumeIndex" })} title="Continue indexing; files already embedded are skipped">
+                <Icon name="play" /> Resume
+              </button>
+            ) : status.indexing ? (
+              <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "pauseIndex" })} title="Stop after the current batch and keep progress. Indexing stays enabled.">
+                <Icon name="stop" /> Pause
+              </button>
+            ) : (
+              <button className="btn-secondary" disabled={features.indexingEnabled === false} onClick={() => vscode.postMessage({ type: "syncIndex" })}>
+                <Icon name="reset" /> Sync
+              </button>
+            )}
             <button className="btn-secondary danger" disabled={status.indexing} onClick={() => vscode.postMessage({ type: "deleteIndex" })}>
               <Icon name="trash" /> Delete Index
             </button>

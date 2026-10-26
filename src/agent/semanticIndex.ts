@@ -427,6 +427,8 @@ async function createInProcessEmbedder(m: EmbedModel, cacheDir: string): Promise
 
 let extractorP: Promise<Embedder | null> | null = null;
 let embedDevice: string | null = null;
+/** True while a session is being created (model download/load), for the status line. */
+let embedderLoading = false;
 let localOperation: Promise<unknown> = Promise.resolve();
 let embedIdleTimer: ReturnType<typeof setTimeout> | null = null;
 /** Set once a worker cannot start at all; later loads go straight to in-process. */
@@ -460,6 +462,8 @@ async function getExtractor(): Promise<Embedder | null> {
   if (!extractorP) {
     const m = activeModel;
     const cacheDir = path.join(storageDir, "models");
+    embedderLoading = true;
+    if (memRoot) emitStatus(memRoot);
     extractorP = (async () => {
       let ex: Embedder | null = null;
       if (!workerUnavailable) {
@@ -474,6 +478,7 @@ async function getExtractor(): Promise<Embedder | null> {
       embedDevice = ex.device;
       acceleratorError = ex.fallbackError ? readableProviderError(ex.fallbackError) : undefined;
       console.log(`[semanticIndex] embedder on ${ex.device} (${m.id})${acceleratorError ? ` (selected GPU unavailable: ${acceleratorError})` : ""}`);
+      embedderLoading = false;
       // UI may already be open; push device once the pipeline is ready.
       if (memRoot) emitStatus(memRoot);
       return ex;
@@ -481,6 +486,8 @@ async function getExtractor(): Promise<Embedder | null> {
       console.error("[semanticIndex] embedder load failed:", e);
       extractorP = null;
       embedDevice = null;
+      embedderLoading = false;
+      if (memRoot) emitStatus(memRoot);
       return null;
     });
   }
@@ -843,9 +850,28 @@ export function isIndexing(): boolean {
   return indexing;
 }
 
+/**
+ * Session-only pause (unlike "Enable Indexing", nothing is persisted or freed):
+ * a running sync stops after its current batch with progress saved, file
+ * changes queue up, and automatic syncs are skipped until resumed. Resume runs
+ * a normal incremental sync, so finished files are not embedded again.
+ */
+let indexingPaused = false;
+export function isIndexingPaused(): boolean {
+  return indexingPaused;
+}
+
+export function setIndexingPaused(paused: boolean, root?: string): void {
+  if (indexingPaused === paused) return;
+  indexingPaused = paused;
+  if (root) emitStatus(root);
+}
+
 // Progress reported to UI subscribers (e.g. settings panel).
 export interface IndexStatus {
   indexing: boolean;
+  /** Sync paused for this session; resumes with an incremental sync. */
+  paused: boolean;
   done: number;
   total: number;
   files: number; // indexed files in store
@@ -859,6 +885,8 @@ export interface IndexStatus {
   accelerator: "gpu" | "cpu" | "remote" | "pending";
   /** Human-readable device label for the UI. */
   deviceLabel: string;
+  /** Local session state: unloaded while idle, loading, or ready. */
+  embedder: "idle" | "loading" | "ready" | "remote";
   /** Selected embedding device id ("cpu", "dml:1", "cuda:0", "coreml"). */
   acceleratorId: string;
   /** Set when the selected GPU failed and embedding runs on CPU instead. */
@@ -883,9 +911,25 @@ export function onIndexStatus(fn: (s: IndexStatus) => void): () => void {
   return () => statusSubs.delete(fn);
 }
 
+/**
+ * The model is loaded on first use and released after a minute idle, so "no
+ * session" is the normal resting state, not a load in progress: report the
+ * configured device then, and "loading" only while a session is starting.
+ */
+function embedderStateOf(device: string | null, backend: "local" | "remote"): IndexStatus["embedder"] {
+  if (backend === "remote") return "remote";
+  if (device) return "ready";
+  return embedderLoading ? "loading" : "idle";
+}
+
 function deviceLabelOf(device: string | null, backend: "local" | "remote"): string {
   if (backend === "remote") return "Remote API";
-  if (!device) return "Not loaded yet";
+  if (!device) {
+    if (embedderLoading) return "Loading model…";
+    const selected = parseAcceleratorId(acceleratorId).backend;
+    const label = acceleratorError || selected === "cpu" ? deviceLabelOf("cpu", backend) : deviceLabelOf(selected, backend);
+    return `${label} · idle, loads when needed`;
+  }
   switch (device) {
     case "dml":
       return `GPU · ${acceleratorName} (DirectML)`;
@@ -904,7 +948,10 @@ function deviceLabelOf(device: string | null, backend: "local" | "remote"): stri
 
 function acceleratorOf(device: string | null, backend: "local" | "remote"): IndexStatus["accelerator"] {
   if (backend === "remote") return "remote";
-  if (!device) return "pending";
+  if (!device) {
+    if (embedderLoading) return "pending";
+    return acceleratorError || parseAcceleratorId(acceleratorId).backend === "cpu" ? "cpu" : "gpu";
+  }
   return device === "cpu" ? "cpu" : "gpu";
 }
 
@@ -914,6 +961,7 @@ export function getStatus(root: string): IndexStatus {
   const device = backend === "remote" ? null : embedDevice;
   return {
     indexing,
+    paused: indexingPaused,
     done: progress.done,
     total: progress.total,
     files: idx ? Object.keys(idx.files).length : 0,
@@ -923,6 +971,7 @@ export function getStatus(root: string): IndexStatus {
     device,
     accelerator: acceleratorOf(device, backend),
     deviceLabel: deviceLabelOf(device, backend),
+    embedder: embedderStateOf(device, backend),
     acceleratorId,
     acceleratorError: backend === "local" ? acceleratorError : undefined,
     modelRepo: backend === "local" ? activeModel.repo : undefined,
@@ -1150,7 +1199,7 @@ export async function upsertFile(root: string, absOrRel: string): Promise<void> 
   if (!rel || rel.startsWith("..") || !isIndexableRel(rel)) return;
   if (await isPathExcluded(root, rel)) { await removeFile(root, rel); return; }
   const key = queueKey(root);
-  if (indexing || drainRunning) {
+  if (indexing || drainRunning || indexingPaused) {
     if (!pendingUpserts.has(key)) pendingUpserts.set(key, new Set());
     pendingUpserts.get(key)!.add(rel);
     pendingDeletes.get(key)?.delete(rel);
@@ -1195,7 +1244,7 @@ export async function removeFile(root: string, absOrRel: string): Promise<void> 
 }
 
 async function drainPending(root: string): Promise<void> {
-  if (drainRunning || indexing || !indexingEnabled) return;
+  if (drainRunning || indexing || !indexingEnabled || indexingPaused) return;
   const key = queueKey(root);
   const ups = pendingUpserts.get(key);
   const dels = pendingDeletes.get(key);
@@ -1221,7 +1270,7 @@ async function drainPending(root: string): Promise<void> {
       const embedder = new BatchEmbedder(idx);
       let done = 0;
       for (const rel of list) {
-        if (!indexingEnabled || idx.fingerprint !== getEmbedFingerprint()) break;
+        if (!indexingEnabled || indexingPaused || idx.fingerprint !== getEmbedFingerprint()) break;
         changed = await embedFileInto(embedder, idx, root, rel) || changed;
         if (indexLimitReason) break;
         done++;
@@ -1229,6 +1278,8 @@ async function drainPending(root: string): Promise<void> {
         emitStatusThrottled(root);
       }
       await embedder.flush();
+      // Paused: keep the files not reached yet queued for the resume.
+      if (indexingPaused) for (const rel of list.slice(done)) if (!pendingDeletes.get(key)?.has(rel)) ups.add(rel);
       indexing = false;
     }
     if (changed && indexingEnabled) await persist(root, idx);
@@ -1245,7 +1296,7 @@ async function drainPending(root: string): Promise<void> {
 
 /** (Re)build the index incrementally. Only re-embeds changed files. No-op if disabled/busy. */
 export async function buildIndex(root: string, onProgress?: (done: number, total: number) => void): Promise<void> {
-  if (!storageDir || !root || indexing || !indexingEnabled) return;
+  if (!storageDir || !root || indexing || !indexingEnabled || indexingPaused) return;
   indexing = true;
   progress = { done: 0, total: 0 };
   indexLimitReason = undefined;
@@ -1288,7 +1339,7 @@ export async function buildIndex(root: string, onProgress?: (done: number, total
     let lastSave = Date.now();
     let lastYield = Date.now();
     for (const rel of targets) {
-      if (!indexingEnabled || idx.fingerprint !== getEmbedFingerprint()) break;
+      if (!indexingEnabled || indexingPaused || idx.fingerprint !== getEmbedFingerprint()) break;
       await embedFileInto(embedder, idx, root, rel);
       if (indexLimitReason) break;
       done++;
