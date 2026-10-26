@@ -306,6 +306,8 @@ export interface FeatureConfig {
   indexingEnabled: boolean;
   indexNewFolders: boolean;
   indexForGrep: boolean;
+  /** Device for local embeddings: "cpu" (default), "dml:<adapter>", "cuda:<index>" or "coreml". */
+  embedAccelerator?: string;
 }
 
 // ---- Approval policy (mirror of src/agent/approvalPolicy.ts) ----

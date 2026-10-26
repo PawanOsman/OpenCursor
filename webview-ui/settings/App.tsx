@@ -50,6 +50,8 @@ interface IndexStatus {
   device?: string | null;
   accelerator?: "gpu" | "cpu" | "remote" | "pending";
   deviceLabel?: string;
+  acceleratorId?: string;
+  acceleratorError?: string;
   modelRepo?: string;
   modelDtype?: string;
   modelPooling?: string;
@@ -426,6 +428,71 @@ function UsagePanel({
 /** Provider models usable for embeddings (id mentions embed/embedding). */
 const isEmbeddingModel = (id: string) => /embed/i.test(id);
 
+interface EmbedAccelerator {
+  id: string;
+  kind: "cpu" | "gpu";
+  backend: string;
+  name: string;
+  memoryBytes?: number;
+}
+
+const BACKEND_LABEL: Record<string, string> = { dml: "DirectML", cuda: "CUDA", coreml: "Core ML" };
+
+function acceleratorLabel(a: EmbedAccelerator): string {
+  if (a.kind === "cpu") return "CPU (recommended)";
+  const vram = a.memoryBytes ? ` · ${Math.round(a.memoryBytes / 1024 ** 3)} GB` : "";
+  return `${a.name}${vram}`;
+}
+
+/** Device picker for local embeddings. GPUs are listed by the host (DXGI / nvidia-smi / Core ML). */
+function EmbedDeviceRow({ status, features }: { status: IndexStatus; features: FeatureConfig }) {
+  const [accelerators, setAccelerators] = React.useState<EmbedAccelerator[] | null>(null);
+  React.useEffect(() => {
+    const listener = (event: MessageEvent) => {
+      if (event.data?.type === "embedAccelerators") setAccelerators(event.data.accelerators || []);
+    };
+    window.addEventListener("message", listener);
+    vscode.postMessage({ type: "embedAcceleratorsGet" });
+    return () => window.removeEventListener("message", listener);
+  }, []);
+  const selected = features.embedAccelerator || status.acceleratorId || "cpu";
+  const list = accelerators ?? [{ id: "cpu", kind: "cpu", backend: "cpu", name: "CPU" }];
+  // A saved GPU that is no longer present stays visible so the setting isn't silently lost.
+  const options = list.some((a) => a.id === selected) ? list : [...list, { id: selected, kind: "gpu", backend: selected.split(":")[0], name: "Saved GPU (not detected)" } as EmbedAccelerator];
+  const remote = status.backend === "remote";
+  return (
+    <Row
+      title="Run Embeddings On"
+      desc={remote
+        ? "The selected embedding model runs on its provider; this applies to local models."
+        : status.acceleratorError
+        ? `The selected GPU could not be used, so embeddings run on the CPU: ${status.acceleratorError}`
+        : "CPU keeps the GPU free and works everywhere. A dedicated GPU is usually much faster; integrated GPUs can be slower than the CPU."}
+    >
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <Select
+          aria-label="Embedding device"
+          value={selected}
+          disabled={remote || status.indexing || accelerators === null}
+          onChange={(event) => vscode.postMessage({ type: "setEmbedAccelerator", id: event.target.value })}
+          style={{ maxWidth: 300 }}
+        >
+          {options.map((a) => <option key={a.id} value={a.id} title={BACKEND_LABEL[a.backend]}>{acceleratorLabel(a)}</option>)}
+        </Select>
+        <button
+          className="btn-ghost sm"
+          title="Detect GPUs again"
+          aria-label="Detect GPUs again"
+          disabled={accelerators === null}
+          onClick={() => { setAccelerators(null); vscode.postMessage({ type: "embedAcceleratorsGet", refresh: true }); }}
+        >
+          <Icon name="reset" />
+        </button>
+      </div>
+    </Row>
+  );
+}
+
 function IndexingPanel({
   status,
   models,
@@ -584,6 +651,7 @@ function IndexingPanel({
         </div>
       </div>
       <div className="index-card rows-card">
+        <EmbedDeviceRow status={status} features={features} />
         <Row title="Index New Folders" desc="Automatically index any new folders added to the workspace">
           <Toggle checked={features.indexNewFolders !== false} onChange={(v) => setFeatures({ indexNewFolders: v })} disabled={features.indexingEnabled === false} />
         </Row>

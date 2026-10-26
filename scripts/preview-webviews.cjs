@@ -82,6 +82,12 @@ function mockHost() {
           case 'getFeatures': send({ type: 'features', features: {} }); break;
           case 'fetchAllModels': send({ type: 'modelsFetched', models: models.map((m) => m.id), modelList: models }); break;
           case 'openSettings': location.href = '/settings' + location.search; break;
+          case 'embedAcceleratorsGet': send({ type: 'embedAccelerators', accelerators: [
+            { id: 'cpu', kind: 'cpu', backend: 'cpu', name: 'CPU' },
+            { id: 'dml:0', kind: 'gpu', backend: 'dml', name: 'Integrated GPU', memoryBytes: 2 * 1024 ** 3 },
+            { id: 'dml:1', kind: 'gpu', backend: 'dml', name: 'Discrete GPU', memoryBytes: 8 * 1024 ** 3 },
+          ] }); break;
+          case 'setEmbedAccelerator': send({ type: 'features', features: { embedAccelerator: message.id } }); break;
           case 'acceptAllChanges': case 'rejectAllChanges': send({ type: 'pendingChanges', changes: [] }); break;
         }
       }, 20);

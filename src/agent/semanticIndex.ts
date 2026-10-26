@@ -29,6 +29,7 @@ import * as crypto from "crypto";
 import { scanFiles, isPathExcluded } from "./tools/fileScan";
 import { Worker } from "worker_threads";
 import { importRuntimeDep, resolveRuntimeDepEntry } from "../runtimeDeps";
+import { parseAcceleratorId, readableProviderError } from "./embedAccelerators";
 import type { ApiKeyPool } from "./provider/apiKeyPool";
 
 // Selectable local embedding models. Add entries here to offer more choices.
@@ -199,29 +200,43 @@ export function setIndexStorageDir(dir: string): void {
 }
 
 // ---- Embedder (lazy, singleton) ----
-// ONNX Runtime Node EPs: Win→dml, Linux x64→cuda, macOS→coreml, then webgpu, then cpu.
-// Quantised (q8) models stay on the CPU EP: DirectML/WebGPU have no kernels for
-// the integer ops, so each layer bounces between GPU and CPU. Measured on
-// all-MiniLM-L6-v2 q8 (24 chunks/batch): DML 5.0 s/batch vs CPU 0.56 s/batch,
-// while also loading the GPU. Float models still try GPU EPs first.
-function preferredEmbedDevices(model: EmbedModel = activeModel): string[] {
-  const order: string[] = [];
-  if (model.dtype !== "q8") {
-    switch (process.platform) {
-      case "win32":
-        order.push("dml"); // DirectML (any DX12 GPU)
-        break;
-      case "linux":
-        if (process.arch === "x64") order.push("cuda"); // needs CUDA 12 + cuDNN
-        break;
-      case "darwin":
-        order.push("coreml");
-        break;
-    }
-    order.push("webgpu");
+// The user picks the device (Settings → Indexing): CPU by default, or one GPU.
+// The choice matters: DirectML on an integrated GPU measured 45.7 s for 20
+// batches of all-MiniLM-L6-v2 q8, ~11 s on CPU, and 1.6–3.1 s on discrete
+// NVIDIA cards in the same machine — so a GPU is never picked implicitly.
+let acceleratorId = "cpu";
+let acceleratorName = "CPU";
+/** Why the selected GPU could not be used (the embedder then runs on CPU). */
+let acceleratorError: string | undefined;
+
+/** One device to try: transformers' `device` plus the ORT provider pinned to the chosen adapter. */
+interface DeviceAttempt { device: string; executionProviders?: Record<string, unknown>[] }
+
+function embedDeviceAttempts(): DeviceAttempt[] {
+  const { backend, deviceId } = parseAcceleratorId(acceleratorId);
+  const cpu: DeviceAttempt = { device: "cpu" };
+  if (backend === "dml" || backend === "cuda") {
+    return [{ device: backend, executionProviders: [{ name: backend, deviceId }] }, cpu];
   }
-  order.push("cpu");
-  return order;
+  if (backend === "coreml") return [{ device: "coreml" }, cpu];
+  return [cpu];
+}
+
+/** Select the embedding device ("cpu", "dml:1", "cuda:0", "coreml"). Reloads the session if it changed. */
+export function setEmbedAccelerator(id: string | undefined, name?: string): void {
+  const next = parseAcceleratorId(id).backend === "cpu" ? "cpu" : id!;
+  acceleratorName = next === "cpu" ? "CPU" : name || acceleratorName;
+  if (next === acceleratorId) return;
+  acceleratorId = next;
+  acceleratorError = undefined;
+  // CUDA's default order is fastest-first; nvidia-smi (the picker) lists PCI order.
+  if (parseAcceleratorId(next).backend === "cuda") process.env.CUDA_DEVICE_ORDER ??= "PCI_BUS_ID";
+  // Vectors stay compatible across devices, so only the session is replaced.
+  void releaseEmbedder();
+}
+
+export function getEmbedAcceleratorId(): string {
+  return acceleratorId;
 }
 
 /**
@@ -242,6 +257,8 @@ function embedSessionOptions(): Record<string, unknown> {
 /** A loaded embedding session, in a worker thread or (fallback) in-process. */
 interface Embedder {
   device: string;
+  /** Set when the selected GPU failed to load and the session fell back to CPU. */
+  fallbackError?: string;
   /** False once a worker crashed or exited; the next call loads a new one. */
   alive(): boolean;
   run(texts: string[]): Promise<number[][]>;
@@ -257,23 +274,24 @@ interface Embedder {
  */
 const EMBED_WORKER_SOURCE = `
 const { parentPort, workerData } = require("worker_threads");
-let pipe = null, device = null;
+let pipe = null, device = null, firstErr;
 const ready = (async () => {
   const t = await import(workerData.entry);
   t.env.allowRemoteModels = true;
   t.env.cacheDir = workerData.cacheDir;
   let lastErr;
-  for (const d of workerData.devices) {
+  for (const a of workerData.devices) {
     try {
-      pipe = await t.pipeline("feature-extraction", workerData.repo, { dtype: workerData.dtype, device: d, session_options: workerData.sessionOptions });
-      device = d;
+      const sessionOptions = a.executionProviders ? { ...workerData.sessionOptions, executionProviders: a.executionProviders } : workerData.sessionOptions;
+      pipe = await t.pipeline("feature-extraction", workerData.repo, { dtype: workerData.dtype, device: a.device, session_options: sessionOptions });
+      device = a.device;
       return;
-    } catch (e) { lastErr = e; }
+    } catch (e) { lastErr = e; firstErr = firstErr || String((e && e.message) || e); }
   }
   throw lastErr || new Error("no embedder device available");
 })();
 ready.then(
-  () => parentPort.postMessage({ type: "ready", device }),
+  () => parentPort.postMessage({ type: "ready", device, fallbackError: device === workerData.devices[0].device ? undefined : firstErr }),
   (e) => parentPort.postMessage({ type: "failed", error: String((e && e.message) || e) }),
 );
 parentPort.on("message", async (m) => {
@@ -300,15 +318,15 @@ async function createWorkerEmbedder(m: EmbedModel, cacheDir: string): Promise<Em
   const entry = await resolveRuntimeDepEntry("@huggingface/transformers");
   const worker = new Worker(EMBED_WORKER_SOURCE, {
     eval: true,
-    workerData: { entry, cacheDir, repo: m.repo, dtype: m.dtype, pooling: m.pooling, devices: preferredEmbedDevices(m), sessionOptions: embedSessionOptions() },
+    workerData: { entry, cacheDir, repo: m.repo, dtype: m.dtype, pooling: m.pooling, devices: embedDeviceAttempts(), sessionOptions: embedSessionOptions() },
   });
   worker.unref();
   const pending = new Map<number, { resolve: (v: number[][]) => void; reject: (e: Error) => void }>();
   let nextId = 0;
   let dead: Error | null = null;
   let onDisposed: (() => void) | null = null;
-  let settleReady!: { resolve: (device: string) => void; reject: (e: Error) => void };
-  const ready = new Promise<string>((resolve, reject) => { settleReady = { resolve, reject }; });
+  let settleReady!: { resolve: (ready: { device: string; fallbackError?: string }) => void; reject: (e: Error) => void };
+  const ready = new Promise<{ device: string; fallbackError?: string }>((resolve, reject) => { settleReady = { resolve, reject }; });
   const fail = (error: Error) => {
     if (dead) return;
     dead = error;
@@ -318,7 +336,7 @@ async function createWorkerEmbedder(m: EmbedModel, cacheDir: string): Promise<Em
     onDisposed?.();
   };
   worker.on("message", (msg: any) => {
-    if (msg?.type === "ready") settleReady.resolve(String(msg.device));
+    if (msg?.type === "ready") settleReady.resolve({ device: String(msg.device), fallbackError: msg.fallbackError ? String(msg.fallbackError) : undefined });
     else if (msg?.type === "failed") fail(new Error(msg.error));
     else if (msg?.type === "disposed") onDisposed?.();
     else if (msg?.type === "result") {
@@ -335,15 +353,16 @@ async function createWorkerEmbedder(m: EmbedModel, cacheDir: string): Promise<Em
   });
   worker.on("error", (e) => fail(e instanceof Error ? e : new Error(String(e))));
   worker.on("exit", (code) => fail(new Error(`embedding worker exited (${code})`)));
-  let device: string;
+  let loaded: { device: string; fallbackError?: string };
   try {
-    device = await ready;
+    loaded = await ready;
   } catch (e) {
     void worker.terminate();
     throw e;
   }
   return {
-    device,
+    device: loaded.device,
+    fallbackError: loaded.fallbackError,
     alive: () => !dead,
     run(texts) {
       if (dead) return Promise.reject(dead);
@@ -376,11 +395,15 @@ async function createInProcessEmbedder(m: EmbedModel, cacheDir: string): Promise
   // ORT often fails hard if a provider's libs are missing, so probe one device
   // at a time instead of device:"auto".
   let lastErr: unknown;
-  for (const device of preferredEmbedDevices(m)) {
+  let firstErr: string | undefined;
+  const attempts = embedDeviceAttempts();
+  for (const { device, executionProviders } of attempts) {
     try {
-      const pipe = await t.pipeline("feature-extraction", m.repo, { dtype: m.dtype, device, session_options: embedSessionOptions() });
+      const sessionOptions = executionProviders ? { ...embedSessionOptions(), executionProviders } : embedSessionOptions();
+      const pipe = await t.pipeline("feature-extraction", m.repo, { dtype: m.dtype, device, session_options: sessionOptions });
       return {
         device,
+        fallbackError: device === attempts[0].device ? undefined : firstErr,
         alive: () => true,
         async run(texts) {
           let out: any;
@@ -395,6 +418,7 @@ async function createInProcessEmbedder(m: EmbedModel, cacheDir: string): Promise
       };
     } catch (e) {
       lastErr = e;
+      firstErr ??= e instanceof Error ? e.message : String(e);
       console.warn(`[semanticIndex] embedder device "${device}" unavailable, trying next…`);
     }
   }
@@ -448,7 +472,8 @@ async function getExtractor(): Promise<Embedder | null> {
       }
       ex ??= await createInProcessEmbedder(m, cacheDir);
       embedDevice = ex.device;
-      console.log(`[semanticIndex] embedder on ${ex.device} (${m.id})`);
+      acceleratorError = ex.fallbackError ? readableProviderError(ex.fallbackError) : undefined;
+      console.log(`[semanticIndex] embedder on ${ex.device} (${m.id})${acceleratorError ? ` (selected GPU unavailable: ${acceleratorError})` : ""}`);
       // UI may already be open; push device once the pipeline is ready.
       if (memRoot) emitStatus(memRoot);
       return ex;
@@ -834,6 +859,10 @@ export interface IndexStatus {
   accelerator: "gpu" | "cpu" | "remote" | "pending";
   /** Human-readable device label for the UI. */
   deviceLabel: string;
+  /** Selected embedding device id ("cpu", "dml:1", "cuda:0", "coreml"). */
+  acceleratorId: string;
+  /** Set when the selected GPU failed and embedding runs on CPU instead. */
+  acceleratorError?: string;
   /** Active local model technical fields (undefined when remote). */
   modelRepo?: string;
   modelDtype?: string;
@@ -859,15 +888,15 @@ function deviceLabelOf(device: string | null, backend: "local" | "remote"): stri
   if (!device) return "Not loaded yet";
   switch (device) {
     case "dml":
-      return "GPU · DirectML";
+      return `GPU · ${acceleratorName} (DirectML)`;
     case "cuda":
-      return "GPU · CUDA";
+      return `GPU · ${acceleratorName} (CUDA)`;
     case "coreml":
       return "GPU · CoreML";
     case "webgpu":
       return "GPU · WebGPU";
     case "cpu":
-      return "CPU";
+      return acceleratorError ? "CPU (selected GPU unavailable)" : "CPU";
     default:
       return device;
   }
@@ -894,6 +923,8 @@ export function getStatus(root: string): IndexStatus {
     device,
     accelerator: acceleratorOf(device, backend),
     deviceLabel: deviceLabelOf(device, backend),
+    acceleratorId,
+    acceleratorError: backend === "local" ? acceleratorError : undefined,
     modelRepo: backend === "local" ? activeModel.repo : undefined,
     modelDtype: backend === "local" ? activeModel.dtype : undefined,
     modelPooling: backend === "local" ? activeModel.pooling : undefined,

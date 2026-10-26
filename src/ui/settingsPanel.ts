@@ -17,7 +17,8 @@ import { PROVIDER_PRESETS } from "../shared/providerCatalog";
 import { listRules, listSkills } from "../context/workspaceContext";
 import { mcpManager } from "../integrations/mcpClient";
 import { BUILTIN_PERSONAS } from "../agent/personas";
-import { getStatus, onIndexStatus, buildIndex, deleteIndex, warmIndex, EMBED_MODELS } from "../agent/semanticIndex";
+import { getStatus, onIndexStatus, buildIndex, deleteIndex, warmIndex, EMBED_MODELS, setEmbedAccelerator } from "../agent/semanticIndex";
+import { listEmbedAccelerators } from "../agent/embedAccelerators";
 import { indexDocSource, cancelDocIndex, deleteDocIndex, onDocsStatus, getDocsStatus, getDocLogs, type DocSource } from "../agent/docsIndex";
 import { createDocsPageSelector } from "../agent/docsPlanner";
 import { createDocPolicy } from "../agent/docsDiscovery";
@@ -370,6 +371,21 @@ export class SettingsPanel {
               await vscode.workspace.fs.writeFile(uri, Buffer.from("# Files to exclude from indexing (gitignore syntax)\n"));
             }
             await vscode.window.showTextDocument(uri);
+            break;
+          }
+          case "embedAcceleratorsGet": {
+            const accelerators = await listEmbedAccelerators(message.refresh === true);
+            this._panel.webview.postMessage({ type: "embedAccelerators", accelerators });
+            break;
+          }
+          case "setEmbedAccelerator": {
+            const accelerators = await listEmbedAccelerators();
+            const picked = accelerators.find((a) => a.id === message.id) ?? accelerators[0];
+            await this.featureStore.set({ ...this.featureStore.get(), embedAccelerator: picked.id });
+            setEmbedAccelerator(picked.id, picked.name);
+            const root = findWorkspaceRoot();
+            if (root) this._panel.webview.postMessage({ type: "indexStatus", status: getStatus(root), models: EMBED_MODELS });
+            await this._sendFeatures();
             break;
           }
           case "syncIndex":

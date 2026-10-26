@@ -17,7 +17,8 @@ import { FeatureStore } from './stores/featureStore';
 import { setToolTimeoutOverrides } from './agent/tools/shared';
 import { mcpManager } from './integrations/mcpClient';
 import { configureMcpAuthentication } from './integrations/mcpHost';
-import { setIndexStorageDir } from './agent/semanticIndex';
+import { setIndexStorageDir, setEmbedAccelerator } from './agent/semanticIndex';
+import { listEmbedAccelerators } from './agent/embedAccelerators';
 import { setDocsStorageDir, setDocSourcesProvider } from './agent/docsIndex';
 import { initIndexWatch } from './agent/indexWatch';
 import { initLlamacpp, checkInstalled, loadModel, disposeLlamacpp } from './agent/llamacpp';
@@ -105,6 +106,17 @@ export async function activate(context: vscode.ExtensionContext) {
   setIndexStorageDir(context.globalStorageUri.fsPath);
   setDocsStorageDir(context.globalStorageUri.fsPath);
   setDocSourcesProvider(() => featureStore.get().docSources ?? []);
+  // Embedding device: CPU unless the user picked a GPU. GPUs are only probed
+  // (a short PowerShell/nvidia-smi call) when one is selected, to label it.
+  const syncEmbedAccelerator = () => {
+    const id = featureStore.get().embedAccelerator || "cpu";
+    if (id === "cpu") { setEmbedAccelerator("cpu"); return; }
+    void listEmbedAccelerators()
+      .then((list) => setEmbedAccelerator(id, list.find((a) => a.id === id)?.name))
+      .catch((error) => logError("startup.embed-accelerator", error));
+  };
+  syncEmbedAccelerator();
+  context.subscriptions.push(featureStore.onDidChange(syncEmbedAccelerator));
   applyEmbedModel(featureStore.get().embedModel || "minilm")
     .catch((error) => logError("startup.embed-model", error))
     .finally(() => initIndexWatch(context, featureStore));

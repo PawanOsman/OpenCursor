@@ -317,6 +317,8 @@ export interface FeatureConfig {
 	autoJudgeModel: string;
 	/** Local embedding model id for the semantic codebase index. */
 	embedModel: string;
+	/** Device for local embeddings: "cpu" (default), "dml:<adapter>", "cuda:<index>" or "coreml". */
+	embedAccelerator: string;
 	hooks: HookDef[];
 	enabledModels: string[];
 	/** Models explicitly disabled by the user (overrides catalog defaults). */
@@ -386,6 +388,7 @@ const DEFAULTS: FeatureConfig = {
 	subagentModel: "",
 	autoJudgeModel: "",
 	embedModel: "minilm",
+	embedAccelerator: "cpu",
 	hooks: [],
 	enabledModels: MODEL_CATALOG.filter((m) => m.enabled !== false).map((m) => m.id),
 	disabledModels: [],
