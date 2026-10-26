@@ -2,7 +2,7 @@
 	"name": "ocursor",
 	"displayName": "OpenCursor Agent",
 	"description": "AI coding agent chat inside VS Code",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"publisher": "pkrd",
 	"license": "MIT",
 	"icon": "media/icon.png",
