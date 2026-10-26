@@ -12,8 +12,16 @@ import type { ProtocolRecord, ProtocolValue, ProtocolCredentials, ProtocolError 
 import type { ExecutorConfig, ExecutorRequest, ExecutorResult, ExecutorLogger, TokenRefreshResult } from "./types.js";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
+import { getProviderModels } from "../config/providerModels.js";
 import { parseVertexSaJson, refreshVertexToken, refreshGoogleToken } from "../services/tokenRefresh.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+
+// Registry entry for a model, ignoring a "(level)" thinking suffix.
+// Mirrors 9router config/providerModels.js getModelMeta.
+function getModelMeta(provider: string, model: string): ProtocolRecord | null {
+  const base = typeof model === "string" ? model.replace(/\([^()]+\)\s*$/, "").trim() : model;
+  return getProviderModels(provider).find((m: ProtocolRecord) => m.id === model || m.id === base) || null;
+}
 
 // Cache project IDs resolved from raw API keys { apiKey → projectId }
 const projectIdCache = new Map();
@@ -126,15 +134,22 @@ export class VertexExecutor extends BaseExecutor {
           "Add quota_project_id to your ADC JSON or set providerSpecificData.projectId."
         );
       }
-      const location = credentials?.providerSpecificData?.location || "us-central1";
+      // Global-only models (registry defaultLocation, e.g. Argon) must not fall back to a regional location.
+      const location = credentials?.providerSpecificData?.location
+        || getModelMeta(this.provider, model)?.defaultLocation
+        || "us-central1";
       let url = `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${model}:${action}`;
       if (stream) url += "?alt=sse";
       return url;
     }
 
-    // Raw API key: use global publishers endpoint with ?key= param
+    // Raw API keys with an explicit project must honor its location (e.g. Argon on global).
+    // Keep the projectless endpoint for existing connections without a configured project.
     // ?alt=sse is required for proper SSE streaming (matches every other Gemini executor)
-    let url = `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:${action}`;
+    const location = credentials?.providerSpecificData?.location || "global";
+    let url = projectId
+      ? `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${model}:${action}`
+      : `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:${action}`;
     if (stream) url += "?alt=sse";
     if (rawKey) url += stream ? `&key=${rawKey}` : `?key=${rawKey}`;
     return url;

@@ -24,6 +24,8 @@ export interface ExecutorRequest {
   log?: ExecutorLogger;
   proxyOptions?: ProtocolRecord | null;
   upstreamExtraHeaders?: Record<string,string>;
+  /** Transport override for the direct (no-proxy) path, e.g. opencode's TLS fingerprint. */
+  directFetch?: (url: string, init: RequestInit) => Promise<Response>;
 }
 export interface ExecutorResult {
   response: Response;

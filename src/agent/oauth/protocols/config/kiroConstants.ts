@@ -47,6 +47,73 @@ export function resolveDefaultProfileArn(authMethod: ProtocolValue) {
 }
 export const KIRO_THINKING_BUDGET_DEFAULT = 16000;
 /**
+ * Anthropic date-suffixed snapshot id, e.g. `claude-sonnet-4-5-20250929`.
+ * Kiro's data plane only accepts the dotted alias (`claude-sonnet-4.5`).
+ */
+const ANTHROPIC_SNAPSHOT_SUFFIX = /-\d{8}$/;
+
+/**
+ * Fold an Anthropic model id onto the Kiro upstream alias.
+ *
+ * Anthropic and Kiro disagree on id spelling: Anthropic ships
+ * `claude-sonnet-4-5-20250929` / `claude-opus-4-5`, while Kiro's
+ * `GenerateAssistantResponse` only accepts `claude-sonnet-4.5` and answers
+ * anything else with `400 INVALID_MODEL_ID`.
+ *
+ * Clients that speak the Anthropic Messages API (Claude Code, cc-switch, …)
+ * send the Anthropic spelling, so the raw id has to be folded onto the Kiro
+ * alias before the request leaves this process. Matching is keyword-based
+ * rather than an exact-id table: snapshot suffixes and future minor revisions
+ * would otherwise fall through and 400 upstream.
+ *
+ * Unknown ids are returned untouched so operators can still pass through
+ * models Kiro adds ahead of this list.
+ *
+ * @param {string} model
+ * @returns {string}
+ */
+export function normalizeKiroUpstreamModelId(model: string): string {
+  if (typeof model !== "string" || model === "") return model;
+
+  const id = model.toLowerCase().replace(ANTHROPIC_SNAPSHOT_SUFFIX, "");
+
+  if (id.includes("sonnet")) {
+    if (id.includes("5.5") || id.includes("5-5")) return "claude-sonnet-5.5";
+    if (id.includes("4.6") || id.includes("4-6")) return "claude-sonnet-4.6";
+    if (id.includes("sonnet-5") || id.includes("sonnet.5")) return "claude-sonnet-5";
+    if (id.includes("4.5") || id.includes("4-5")) return "claude-sonnet-4.5";
+    if (id.includes("sonnet-4") || id.includes("sonnet.4")) return "claude-sonnet-4";
+    return "claude-sonnet-4.5";
+  }
+  if (id.includes("fable")) return "claude-fable-5";
+  if (id.includes("opus")) {
+    if (id.includes("5.5") || id.includes("5-5")) return "claude-opus-5.5";
+    if (id.includes("opus-5") || id.includes("opus.5") || id.includes("opus 5")) return "claude-opus-5";
+    if (id.includes("4.8") || id.includes("4-8")) return "claude-opus-4.8";
+    if (id.includes("4.7") || id.includes("4-7")) return "claude-opus-4.7";
+    if (id.includes("4.5") || id.includes("4-5")) return "claude-opus-4.5";
+    return "claude-opus-4.6";
+  }
+  if (id.includes("haiku")) {
+    return id.includes("5.5") || id.includes("5-5") ? "claude-haiku-5.5" : "claude-haiku-4.5";
+  }
+  if (id === "auto") return "auto";
+  if (id.includes("deepseek")) return "deepseek-3.2";
+  if (id.includes("glm")) return "glm-5";
+  if (id.includes("minimax")) {
+    return id.includes("2.5") || id.includes("2-5") ? "minimax-m2.5" : "minimax-m2.1";
+  }
+  if (id.includes("qwen")) return "qwen3-coder-next";
+  if (id.includes("kimi")) return "kimi-k3";
+  if (id.includes("gpt")) {
+    if (id.includes("terra")) return "gpt-5.6-terra";
+    if (id.includes("luna")) return "gpt-5.6-luna";
+    if (id.includes("sol") || id.includes("5.6") || id.includes("5-6")) return "gpt-5.6-sol";
+    return model;
+  }
+  return model;
+}
+/**
  * Resolve a Kiro model after consuming the generic model(level) suffix.
  * The suffix is a OpenCursor request override, not part of Kiro's upstream model id.
  */
@@ -168,7 +235,22 @@ export function resolveKiroThinkingBudget(body: ProtocolRecord, headers: Protoco
     }
     return null;
 }
-export function extractKiroEffortLevel(body: ProtocolRecord) {
+function parseClaudeVersion(model: ProtocolValue): { major: number; minor: number | null } | null {
+  if (typeof model !== "string") return null;
+  const normalized = model.toLowerCase().replace(/-/g, ".");
+  const match = normalized.match(/(?:^|[/.])claude(?:[/.][a-z]+)*[/.](\d+)(?:[/.](\d+))?(?:[/.]|$)/);
+  if (!match) return null;
+  return { major: Number(match[1]), minor: match[2] === undefined ? null : Number(match[2]) };
+}
+
+// Kiro effort tiers per model (kiro.dev docs + live additionalModelRequestFieldsSchema):
+// 4.6 Claude models cap at low|medium|high|max; 4.7+ add xhigh. Unknown models stay conservative.
+function kiroModelLacksXhigh(model: ProtocolValue) {
+  const v = parseClaudeVersion(model);
+  return !v || (v.major === 4 && v.minor !== null && v.minor <= 6);
+}
+
+export function extractKiroEffortLevel(body: ProtocolRecord, model?: string) {
     const effort = body?.output_config?.effort ??
         body?.reasoning_effort ??
         (typeof body?.reasoning === "object" ? body.reasoning?.effort : null);
@@ -177,8 +259,10 @@ export function extractKiroEffortLevel(body: ProtocolRecord) {
     const normalized = effort.toLowerCase();
     if (normalized === "none" || normalized === "off" || normalized === "disabled")
         return null;
-    if (normalized === "xhigh" || normalized === "max")
-        return "high";
+    if (normalized === "xhigh")
+        return kiroModelLacksXhigh(model) ? "high" : "xhigh";
+    if (normalized === "max")
+        return "max";
     if (["low", "medium", "high"].includes(normalized))
         return normalized;
     return null;
@@ -198,10 +282,10 @@ function extractKiroGptEffortLevel(body: ProtocolRecord) {
     }
     return null;
 }
-export function buildKiroAdditionalModelRequestFields(body: ProtocolRecord, effortPath = "output_config") {
+export function buildKiroAdditionalModelRequestFields(body: ProtocolRecord, effortPath = "output_config", model?: string) {
     const effort = effortPath === "reasoning"
         ? extractKiroGptEffortLevel(body)
-        : extractKiroEffortLevel(body);
+        : extractKiroEffortLevel(body, model);
     if (!effort)
         return undefined;
     if (effortPath === "reasoning") {
@@ -223,12 +307,10 @@ export function resolveKiroEffortPath(model: string) {
     }
     if (!normalized.includes("claude"))
         return null;
-    const match = normalized.match(/(?:^|[/.])claude(?:[/.][a-z]+)*[/.](\d+)(?:[/.](\d+))?(?:[/.]|$)/);
-    if (!match)
+    const v = parseClaudeVersion(model);
+    if (!v)
         return null;
-    const [, majorText, minorText] = match;
-    const major = Number(majorText);
-    const minor = minorText === undefined ? null : Number(minorText);
+    const { major, minor } = v;
     const dateSuffixMinor = minor !== null && minor >= 1000;
     // Kiro rejected additionalModelRequestFields on legacy 4.5 models in live smoke.
     // Default future Claude/Kiro models to supported so new model releases do not
@@ -248,7 +330,7 @@ export function buildKiroAdditionalModelRequestFieldsForModel(body: ProtocolReco
     const effortPath = resolveKiroEffortPath(model);
     if (!effortPath)
         return undefined;
-    return buildKiroAdditionalModelRequestFields(body, effortPath);
+    return buildKiroAdditionalModelRequestFields(body, effortPath, model);
 }
 /**
  * Detect whether an inbound request is asking for reasoning / thinking output.
@@ -338,7 +420,7 @@ export function resolveKiroModel(model: string) {
         thinking = true;
         upstream = stripThinkingSuffix(upstream);
     }
-    return { upstream, agentic, thinking };
+    return { upstream: normalizeKiroUpstreamModelId(upstream), agentic, thinking };
 }
 /**
  * Build the magic system-prompt prefix that turns Kiro reasoning on.

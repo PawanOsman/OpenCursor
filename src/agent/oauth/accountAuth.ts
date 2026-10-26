@@ -45,8 +45,9 @@ export class AccountLogin {
   private deadline?: ReturnType<typeof setTimeout>;
   private provider!: AuthProvider;
   private config!: AuthConfig;
-  private verifier = crypto.randomBytes(96).toString("base64url");
-  private nonce = crypto.randomBytes(24).toString("hex");
+  // Upstream PKCE defaults: 32-byte verifier (provider override, e.g. xAI 96) and 32-byte state.
+  private verifier = "";
+  private nonce = crypto.randomBytes(32).toString("base64url");
   private redirect = "";
   private busy = false;
   private keyPair?: { publicKey: string; privateKeyDer: Buffer };
@@ -66,6 +67,7 @@ export class AccountLogin {
     const kind = this.kind;
     this.provider = PROVIDERS[kind];
     if (!this.provider && kind !== "xiaomi-mimo") throw new Error("Unsupported account provider.");
+    this.verifier = crypto.randomBytes(this.provider?.pkceVerifierBytes ?? 32).toString("base64url");
     const flow = this.provider?.flowType ?? "authorization_code";
     this.state.loginMethod = flow === "device_code" ? "device-code" : ["import_token", "browser_token"].includes(flow) ? "import-token" : "browser";
     this.state.expiresAt = Date.now() + 600_000;
@@ -254,6 +256,9 @@ export async function refreshProviderAccount(account: OAuthAccount, signal: Abor
       return { accessToken: raw.access_token, refreshToken: raw.refresh_token, expiresIn: raw.expires_in };
     });
   } else if (handlers[kind]) tokens = await withAuthSignal(signal, handlers[kind]);
+  // Upstream falls back to the generic OAuth2 refresh for providers without a
+  // dedicated handler (returns null when the provider has no refresh URL).
+  else if (!["windsurf", "zed", "cursor", "xiaomi-mimo"].includes(kind)) tokens = await withAuthSignal(signal, () => refresh.refreshAccessToken(kind, account.refreshToken, { ...account }));
   if (!tokens?.accessToken) throw new Error("This account could not be refreshed. Reconnect it in Providers.");
   // A Copilot session token is minted from the GitHub token it replaced; keeping
   // it would replay the rejected session. The transport mints a fresh one.

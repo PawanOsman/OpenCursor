@@ -9,9 +9,10 @@
 
 import type { ProtocolRecord, ProtocolValue, ProtocolCredentials, ProtocolError } from "../wireTypes.js";
 import type { ExecutorConfig, ExecutorRequest, ExecutorResult, ExecutorLogger, TokenRefreshResult } from "./types.js";
+import { randomUUID } from "node:crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS, PROVIDER_OAUTH } from "../config/providers.js";
-import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE, selectAnthropicBeta } from "../providers/shared.js";
+import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE, selectAnthropicBeta, mergeAnthropicBeta } from "../providers/shared.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
 import { OAUTH_ENDPOINTS, buildKimiHeaders } from "../config/appConstants.js";
 import { buildClineHeaders } from "../shared/clineAuth.js";
@@ -51,9 +52,37 @@ function applyAuth(headers: Record<string, string>, desc: ProtocolRecord, creden
 const HEADER_HOOKS: ProtocolRecord = {
   // Stable device_id from OAuth connection (CLIProxyAPI KimiTokenStorage.DeviceID)
   kimiHeaders: (h: ProtocolValue, c: ProtocolValue) => Object.assign(h, buildKimiHeaders(c?.providerSpecificData?.deviceId)),
+  // MiniMax Code (mcode): the placeholder x-api-key rides every request next
+  // to the Bearer token, plus per-request session/timezone headers. Static
+  // teammates (User-Agent, X-Mavis-Agent-Id) live in the registry transport.
+  minimaxHeaders: (h: Record<string, string>) => {
+    h["x-api-key"] = "sk-xxx";
+    h["X-Mavis-Timezone-Offset"] = String(new Date().getTimezoneOffset() * -60);
+    if (!h["X-Mavis-Session-Id"]) h["X-Mavis-Session-Id"] = randomUUID();
+  },
+  // Muse: x-api-version only on subscription (minted key) requests — plain
+  // Model API keys already work without it
+  museHeaders: (h: Record<string, string>, c: ProtocolCredentials) => { if (c?.accessToken && !c?.apiKey) h["x-api-version"] = "1.0.0"; },
   clineHeaders: (h: ProtocolValue, c: ProtocolValue) => Object.assign(h, buildClineHeaders(c.apiKey || c.accessToken)),
   kilocodeOrg: (h: ProtocolValue, c: ProtocolValue) => { if (c.providerSpecificData?.orgId) h["X-Kilocode-OrganizationID"] = c.providerSpecificData.orgId; },
 };
+
+// Session id from Claude Code's metadata.user_id: either the JSON form
+// {"session_id":"..."} or a bare (optionally "claude:"-prefixed) id.
+// Mirrors 9router utils/claudeCloaking.js extractClaudeSessionIdFromUserId.
+function extractClaudeSessionIdFromUserId(userId: ProtocolValue): string | null {
+  if (typeof userId !== "string" || !userId) return null;
+  if (userId[0] === "{") {
+    try {
+      const sid = JSON.parse(userId)?.session_id;
+      return typeof sid === "string" && sid ? sid.replace(/^claude:/i, "").trim() || null : null;
+    } catch {
+      return null;
+    }
+  }
+  const clean = userId.replace(/^claude:/i, "").trim();
+  return clean || null;
+}
 
 // Config-driven OAuth refresh grants — derived from registry oauth.refresh.
 const REFRESH_GRANTS = Object.fromEntries(
@@ -175,10 +204,22 @@ export class DefaultExecutor extends BaseExecutor {
     // combo silently falls through to the next model. The model id gates this:
     // a node fronting Kimi or GLM answers on its own ids and never matches, so
     // gateways that would choke on unknown beta flags are left untouched.
+    const clientBeta = credentials?.rawHeaders?.["anthropic-beta"];
     const isClaudeModel = typeof model === "string" && /^claude-/.test(model);
     if (model && (this.provider === "claude"
       || (this.provider?.startsWith?.("anthropic-compatible-") && isClaudeModel))) {
-      headers["Anthropic-Beta"] = selectAnthropicBeta(model, body);
+      headers["Anthropic-Beta"] = mergeAnthropicBeta(selectAnthropicBeta(model, body), clientBeta);
+    } else if (this.provider === "anthropic" && clientBeta) {
+      headers["Anthropic-Beta"] = mergeAnthropicBeta(headers["Anthropic-Beta"], clientBeta);
+    }
+
+    // Claude OAuth: align x-claude-code-session-id with metadata.user_id.session_id if missing
+    if (this.provider === "claude" && !headers["x-claude-code-session-id"]) {
+      const token = credentials?.accessToken || credentials?.apiKey || "";
+      if (token.includes("sk-ant-oat")) {
+        const sid = extractClaudeSessionIdFromUserId(body?.metadata?.user_id);
+        if (sid) headers["x-claude-code-session-id"] = sid;
+      }
     }
 
     // Strip first-party Claude Code identity headers for non-Anthropic anthropic-compatible upstreams

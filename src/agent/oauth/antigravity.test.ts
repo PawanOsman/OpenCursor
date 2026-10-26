@@ -10,7 +10,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderEvent, ToolSchema, WireMessage } from "../types";
 import {
-  ANTIGRAVITY_CONFIG, AntigravityProtocolError, antigravityHeaders,
+  ANTIGRAVITY_CONFIG, AntigravityProtocolError, antigravityHeaders, antigravityRequestId, antigravitySessionId,
   antigravityModelChoices, parseAntigravityStream, resolveAntigravityProject, toAntigravityRequest,
 } from "./antigravity";
 
@@ -49,18 +49,29 @@ describe("Antigravity OAuth protocol identity", () => {
     expect(ANTIGRAVITY_CONFIG.onboardUserUrl).toBe("https://cloudcode-pa.googleapis.com/v1internal:onboardUser");
   });
 
-  it("uses IDE 2.11.0 headers without router, SDK or invented machine identity headers", () => {
-    expect(antigravityHeaders("fixture-token", { purpose: "generation", platform: "linux", arch: "x64" })).toEqual({
+  it("uses the Antigravity Hub 2.24.0 identity on every endpoint purpose", () => {
+    expect(antigravityHeaders("fixture-token", { purpose: "generation" })).toEqual({
       authorization: "Bearer fixture-token", "content-type": "application/json",
-      "user-agent": "antigravity/ide/2.11.0 linux/x64", accept: "text/event-stream",
+      "user-agent": "antigravity/hub/2.24.0 darwin/arm64", accept: "text/event-stream",
     });
-    expect(antigravityHeaders("fixture-token", { purpose: "catalog", platform: "darwin", arch: "arm64" })).toEqual({
+    expect(antigravityHeaders("fixture-token", { purpose: "catalog" })).toEqual({
       authorization: "Bearer fixture-token", "content-type": "application/json",
-      "user-agent": "antigravity/ide/2.11.0 darwin/arm64",
-      "x-client-name": "antigravity", "x-client-version": "2.11.0",
+      "user-agent": "antigravity/hub/2.24.0 darwin/arm64",
+      "x-client-name": "antigravity", "x-client-version": "2.24.0",
     });
-    const project = antigravityHeaders("fixture-token", { purpose: "project" });
-    expect(Object.keys(project).sort()).toEqual(["authorization", "content-type", "user-agent"]);
+    expect(antigravityHeaders("fixture-token", { purpose: "project" })).toEqual({
+      authorization: "Bearer fixture-token", "content-type": "application/json",
+      "user-agent": "antigravity/hub/2.24.0 darwin/arm64", "x-request-source": "local",
+    });
+  });
+
+  it("derives numeric session ids and stable IDE request ids", () => {
+    expect(antigravitySessionId("-42")).toBe("-42");
+    expect(antigravitySessionId("conversation")).toMatch(/^-\d+$/);
+    expect(antigravitySessionId("conversation")).toBe(antigravitySessionId("conversation"));
+    const first = antigravityRequestId("-1", "gemini-3-flash", 3, 1000);
+    expect(first).toMatch(/^agent\/[0-9a-f-]{36}\/1000\/[0-9a-f-]{36}\/5$/);
+    expect(antigravityRequestId("-1", "gemini-3-flash", 1, 2000).split("/")[1]).toBe(first.split("/")[1]);
   });
 });
 

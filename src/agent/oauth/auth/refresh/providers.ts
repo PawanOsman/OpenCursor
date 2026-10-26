@@ -17,12 +17,27 @@ import { dedupRefresh } from "./dedup.js";
 import { buildExternalIdpRefreshParams } from "../kiroExternalIdp.js";
 
 import xai from "../providers/xai.js";
-export async function refreshXaiToken(refreshToken: string) {
-  const config = await xai.prepareConfig!(xai.config);
-  const response = await fetch(config.tokenUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" }, body: new URLSearchParams({ grant_type: "refresh_token", client_id: config.clientId, refresh_token: refreshToken }) });
-  if (!response.ok) return { error: response.status === 400 || response.status === 401 ? "invalid_grant" : "refresh_failed" };
-  const data = await response.json();
-  return { accessToken: data.access_token, refreshToken: data.refresh_token || refreshToken, expiresIn: data.expires_in, idToken: data.id_token };
+// xAI and Grok CLI share one OAuth client. Dedup by the spent refresh token so
+// concurrent refreshes never replay a rotated token.
+export async function refreshXaiToken(refreshToken: string, log?: AuthLogger) {
+  if (!refreshToken) return null;
+  return dedupRefresh("xai", refreshToken, async () => {
+    try {
+      const config = await xai.prepareConfig!(xai.config);
+      const response = await fetch(config.tokenUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" }, body: new URLSearchParams({ grant_type: "refresh_token", client_id: config.clientId, refresh_token: refreshToken }) });
+      if (!response.ok) {
+        // Classify from the body without surfacing it: it may echo credentials.
+        const text = await response.text().catch(() => "");
+        log?.warn?.("TOKEN_REFRESH", `xai refresh failed: HTTP ${response.status}`);
+        return text.includes("invalid_grant") || text.includes("invalid_request") ? { error: "invalid_grant" } : null;
+      }
+      const data = await response.json();
+      return { accessToken: data.access_token, refreshToken: data.refresh_token || refreshToken, expiresIn: data.expires_in, idToken: data.id_token };
+    } catch (error) {
+      log?.warn?.("TOKEN_REFRESH", `xai refresh failed: ${authErrorMessage(error)}`);
+      return null;
+    }
+  }, log);
 }
 
 // Per-provider refresh variants for the generic path. Keys not listed fall back

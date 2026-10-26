@@ -8,7 +8,7 @@
  */
 
 import type { ProtocolValue, ProtocolRecord } from "../wireTypes.js";
-const pkg: Record<string, string> = { version: "0.2.0" };
+const pkg: Record<string, string> = { version: "0.2.1" };
 const APP_VERSION = pkg.version || "0.0.0";
 export function getClineAccessToken(token: ProtocolValue) {
     if (typeof token !== "string")

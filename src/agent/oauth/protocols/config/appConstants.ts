@@ -169,7 +169,7 @@ export const CLAUDE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official C
 // makes the backend flag the request and answer 429 Quota Exhausted.
 export const ANTIGRAVITY_PROMPT_REWRITES: ProtocolValue[] = [
     { from: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", to: "" },
-    { from: /You are Hermes Agent,\s*(an intelligent AI assistant)(?: created by Nous Research)?\./gi, to: "You are Hermes Agent. You are $1." },
+    { from: /You are Hermes(?: Agent)?(?:,\s*(?:an intelligent AI assistant|an AI assistant|an AI agent))?(?:,?\s*(?:built|created)\s+by\s+Nous Research)?\./gi, to: "You are an AI assistant." },
     // Claude Code prepends this line to its system prompt. The Claude-format translator strips it,
     // but OpenAI-format clients (e.g. proxies that convert Claude Code to /v1/chat/completions)
     // pass it through, and any system text containing it gets a fake 429 RESOURCE_EXHAUSTED.
@@ -187,7 +187,7 @@ export const OAUTH_ENDPOINTS: ProtocolRecord = {
     iflow: { token: PROVIDER_OAUTH["iflow"]?.tokenUrl, auth: PROVIDER_OAUTH["iflow"]?.authorizeUrl },
     github: { token: PROVIDER_OAUTH["github"]?.tokenUrl, auth: PROVIDER_OAUTH["github"]?.authorizeUrl, deviceCode: PROVIDER_OAUTH["github"]?.deviceCodeUrl },
 };
-function getAppPackageVersion(): string { return "0.2.0"; }
+function getAppPackageVersion(): string { return "0.2.1"; }
 // Kimi Code OAuth / API headers (CLIProxyAPI internal/auth/kimi commonHeaders parity).
 // deviceId must stay stable per connection for the whole OAuth session.
 export function buildKimiHeaders(deviceId: ProtocolValue) {

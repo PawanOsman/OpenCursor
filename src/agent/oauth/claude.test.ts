@@ -49,16 +49,16 @@ describe("Claude OAuth request protocol", () => {
     });
   });
 
-  it("uses only the current account's Bearer token and minimal JSON endpoint headers", () => {
+  it("uses only the current account's Bearer token and the CLI identity on account endpoints", () => {
     const first = claudeOAuthHeaders("first-account");
     const second = claudeOAuthHeaders("second-account", { betas: ["oauth-2025-04-20"] });
     expect(first).toEqual({
       authorization: "Bearer first-account", "anthropic-version": "2023-06-01",
       "anthropic-beta": "oauth-2025-04-20", accept: "application/json",
+      "user-agent": "claude-cli/2.1.280 (external, cli)",
     });
     expect(second).toEqual({ ...first, authorization: "Bearer second-account" });
     expect(second["x-api-key"]).toBeUndefined();
-    expect(second["user-agent"]).toBeUndefined();
   });
 
   it("constructs the official streaming endpoint with the reference compatibility version", () => {
@@ -74,13 +74,18 @@ describe("Claude OAuth request protocol", () => {
     expect(request.headers.get("anthropic-version")).toBe("2023-06-01");
     expect(request.headers.get("user-agent")).toBe("claude-cli/2.1.280 (external, sdk-cli)");
     expect(request.headers.get("x-app")).toBe("cli");
-    expect([...request.headers.keys()].some((key) => key.startsWith("x-stainless"))).toBe(false);
+    expect(request.headers.get("anthropic-dangerous-direct-browser-access")).toBe("true");
+    expect(request.headers.get("x-stainless-package-version")).toBe("0.80.0");
+    expect(request.headers.get("x-stainless-runtime-version")).toBe("v24.14.0");
+    expect(request.headers.get("x-stainless-os")).toBe("MacOS");
+    expect(request.headers.get("x-stainless-arch")).toBe("arm64");
+    expect(request.headers.get("x-stainless-timeout")).toBe("600");
     expect(request.headers.has("x-api-key")).toBe(false);
     expect(CLAUDE_OAUTH_CONFIG.models).toContain("claude-fable-5-1");
     expect(CLAUDE_OAUTH_CONFIG.models).toContain("claude-haiku-4-5-20251001");
   });
 
-  it("retains four cache boundaries without mutating history or adding billing identity", () => {
+  it("retains four cache boundaries without mutating history; API-key tokens get no billing identity", () => {
     const messages: WireMessage[] = [
       { role: "system", content: Array.from({ length: 3 }, (_, i) => ({ type: "text", text: `system ${i}`, cache_control: { type: "ephemeral" } })) },
       { role: "user", content: Array.from({ length: 3 }, (_, i) => ({ type: "text", text: `user ${i}`, cache_control: { type: "ephemeral" } })) },
@@ -125,10 +130,39 @@ describe("Claude OAuth request protocol", () => {
     })));
   });
 
-  it.each(["claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"])("only enables the currently used beta features for %s", (model) => {
+  it("adds the billing block, Claude Code user id and matching session header for OAuth tokens", () => {
+    const token = "sk-ant-oat01-fixture";
+    const request = buildClaudeMessagesRequest(token, {
+      model: "claude-sonnet-4-6", messages: [{ role: "user", content: "hi" }], sessionId: "session-fixture",
+      signal: new AbortController().signal,
+    });
+    const body = JSON.parse(String(request.init.body));
+    expect(body.system[0].text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=[0-9a-f]{5};$/);
+    expect(body.system[1].text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
+    const userId = JSON.parse(body.metadata.user_id);
+    expect(Object.keys(userId)).toEqual(["device_id", "account_uuid", "session_id"]);
+    expect(userId.device_id).toMatch(/^[0-9a-f]{64}$/);
+    expect(userId.account_uuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(userId.session_id).toBe("session-fixture");
+    expect(new Headers(request.init.headers).get("x-claude-code-session-id")).toBe("session-fixture");
+    const again = JSON.parse(JSON.parse(String(buildClaudeMessagesRequest(token, {
+      model: "claude-sonnet-4-6", messages: [{ role: "user", content: "hi" }], sessionId: "session-fixture",
+      signal: new AbortController().signal,
+    }).init.body)).metadata.user_id);
+    expect(again).toEqual(userId);
+  });
+
+  it.each([
+    ["claude-opus-5", true], ["claude-sonnet-5", true], ["claude-fable-5-1", false], ["claude-haiku-4-5-20251001", false],
+  ] as const)("sends the Claude Code beta set for %s", (model, heavy) => {
     const request = makeRequest({ model });
     const betas = new Headers(request.init.headers).get("anthropic-beta")!.split(",");
-    expect(betas).toEqual(["oauth-2025-04-20", "claude-code-20250219", "interleaved-thinking-2025-05-14"]);
+    expect(betas).toEqual([
+      "claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14", "context-management-2025-06-27",
+      "prompt-caching-scope-2026-01-05", "structured-outputs-2025-12-15", "fast-mode-2026-02-01",
+      "redact-thinking-2026-02-12", "token-efficient-tools-2026-03-28",
+      ...(heavy ? ["advanced-tool-use-2025-11-20", "effort-2025-11-24"] : []),
+    ]);
     const body = JSON.parse(String(request.init.body));
     expect(body.context_management).toBeUndefined();
     expect(body.output_config).toBeUndefined();
@@ -140,9 +174,10 @@ describe("Claude OAuth request protocol", () => {
     expect(JSON.parse(String(request.init.body))).toMatchObject({
       speed: "fast", thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: "max" },
     });
-    expect(new Headers(request.init.headers).get("anthropic-beta")!.split(",")).toEqual([
-      "oauth-2025-04-20", "claude-code-20250219", "interleaved-thinking-2025-05-14", "fast-mode-2026-02-01",
-    ]);
+    // Summaries requested: redact-thinking is dropped so thinking text streams.
+    const betas = new Headers(request.init.headers).get("anthropic-beta")!.split(",");
+    expect(betas).toContain("fast-mode-2026-02-01");
+    expect(betas).not.toContain("redact-thinking-2026-02-12");
   });
 
   it.each([
@@ -153,20 +188,17 @@ describe("Claude OAuth request protocol", () => {
   ] as const)("keeps %s at standard speed when %s is selected", (model, speed) => {
     const request = makeRequest({ model, modelParams: { speed } });
     expect(JSON.parse(String(request.init.body))).not.toHaveProperty("speed");
-    expect(new Headers(request.init.headers).get("anthropic-beta")).not.toContain("fast-mode-");
   });
 
-  it("preserves modern and manual reasoning without obsolete effort/context betas", () => {
+  it("preserves modern and manual reasoning and gates the 1M context beta", () => {
     const modern = makeRequest({ model: "claude-opus-5", modelParams: { thinking: "enabled", reasoningEffort: "high", maxContext: "1m" } });
     const modernBody = JSON.parse(String(modern.init.body));
     expect(modernBody.thinking).toEqual({ type: "adaptive", display: "summarized" });
     expect(modernBody.output_config).toEqual({ effort: "high" });
     expect(new Headers(modern.init.headers).get("anthropic-beta")).not.toContain("context-1m");
-    expect(new Headers(modern.init.headers).get("anthropic-beta")).not.toContain("effort-");
 
     const legacy = makeRequest({ model: "claude-opus-4-5", maxTokens: 8192, modelParams: { thinking: "enabled", reasoningEffort: "high", maxContext: "1m" } });
     expect(JSON.parse(String(legacy.init.body)).thinking).toEqual({ type: "enabled", budget_tokens: 4096 });
-    expect(new Headers(legacy.init.headers).get("anthropic-beta")).not.toContain("effort-2025-11-24");
     expect(new Headers(legacy.init.headers).get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
   });
 
@@ -197,7 +229,7 @@ describe("Claude OAuth streaming contract", () => {
       expect(body.tools).toHaveLength(1);
       expect(body.tools[0].name).toBe("Read");
       expect(body.speed).toBe(speed);
-      expect(headers.get("anthropic-beta")!.includes("fast-mode-2026-02-01")).toBe(speed === "fast");
+      expect(headers.get("anthropic-beta")).toContain("fast-mode-2026-02-01");
       return new Response([
         { type: "message_start", message: { id: "request-fixture", model, usage: { input_tokens: 12, cache_read_input_tokens: 4 } } },
         { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call-fixture", name: "Read" } },

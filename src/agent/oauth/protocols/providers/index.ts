@@ -117,7 +117,12 @@ export const PROVIDERS: Record<string, ProviderTransport> = {
             "Content-Type": "application/connect+proto",
             "User-Agent": "connect-es/1.6.1"
         },
-        "clientVersion": "3.12.17"
+        "clientVersion": "3.12.17",
+        "usage": {
+            "url": "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+            "planInfoUrl": "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo",
+            "authUsageUrl": "https://api2.cursor.sh/auth/usage"
+        }
     },
     "grok-cli": {
         "format": "openai-responses",
@@ -126,13 +131,13 @@ export const PROVIDERS: Record<string, ProviderTransport> = {
         "modelsUrl": "https://cli-chat-proxy.grok.com/v1/models",
         "userUrl": "https://cli-chat-proxy.grok.com/v1/user",
         "billingUrl": "https://cli-chat-proxy.grok.com/v1/billing",
-        "clientVersion": "0.2.99",
+        "clientVersion": "1.0.44",
         "clientIdentifier": "grok-shell",
         "tokenAuth": "xai-grok-cli",
         "headers": {
-            "User-Agent": "grok-shell/0.2.99 (linux; x86_64)",
+            "User-Agent": "grok-shell/1.0.44 (linux; x86_64)",
             "x-grok-client-identifier": "grok-shell",
-            "x-grok-client-version": "0.2.99"
+            "x-grok-client-version": "1.0.44"
         },
         "usage": {
             "url": "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
@@ -361,6 +366,18 @@ export const PROVIDERS: Record<string, ProviderTransport> = {
                         "kimiHeaders"
                     ]
                 }
+            },
+            {
+                "format": "openai-responses",
+                "baseUrl": "https://api.kimi.com/coding/v1/responses",
+                "auth": {
+                    "combined": true,
+                    "header": "Authorization",
+                    "scheme": "bearer",
+                    "hooks": [
+                        "kimiHeaders"
+                    ]
+                }
             }
         ]
     },
@@ -427,10 +444,11 @@ export const PROVIDERS: Record<string, ProviderTransport> = {
         "format": "openai-responses",
         "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
         "forceStream": true,
-        "cliVersion": "0.154.0",
+        "cliVersion": "0.159.0",
         "headers": {
             "originator": "codex_cli_rs",
-            "User-Agent": "codex_cli_rs/0.154.0"
+            "User-Agent": "codex_cli_rs/0.159.0",
+            "version": "0.159.0"
         },
         "usage": {
             "url": "https://chatgpt.com/backend-api/wham/usage",
@@ -476,7 +494,9 @@ export const PROVIDERS: Record<string, ProviderTransport> = {
         "usage": {
             "oauthUrl": "https://api.anthropic.com/api/oauth/usage",
             "orgUrl": "https://api.anthropic.com/v1/organizations/{org_id}/usage",
-            "settingsUrl": "https://api.anthropic.com/v1/settings"
+            "settingsUrl": "https://api.anthropic.com/v1/settings",
+            "profileUrl": "https://api.anthropic.com/api/oauth/profile",
+            "resetUrl": "https://api.anthropic.com/api/organizations/{org_id}/reset_rate_limits"
         },
         "clientId": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
         "tokenUrl": "https://api.anthropic.com/v1/oauth/token"
@@ -487,7 +507,7 @@ export const PROVIDERS: Record<string, ProviderTransport> = {
             "https://daily-cloudcode-pa.googleapis.com"
         ],
         "headers": {
-            "User-Agent": "antigravity/ide/2.11.0 darwin/arm64"
+            "User-Agent": "antigravity/hub/2.24.0 darwin/arm64"
         },
         "retry": {
             "429": {
@@ -919,7 +939,8 @@ export const PROVIDERS: Record<string, ProviderTransport> = {
                     "combined": true,
                     "header": "Authorization",
                     "scheme": "bearer"
-                }
+                },
+                "thinkingFormat": "openai-responses"
             }
         ]
     },
@@ -1090,7 +1111,11 @@ export const PROVIDERS: Record<string, ProviderTransport> = {
         "quirks": {
             "forceAutoToolChoiceModels": [
                 "muse-spark-1.3-contributor-free"
-            ]
+            ],
+            "reasoningAliasFields": true
+        },
+        "reasoningInject": {
+            "scope": "all"
         }
     }
 };
@@ -8801,7 +8826,8 @@ export const PROVIDER_OAUTH: Record<string, ProtocolRecord> = {
         "apiServerUrl": "https://server.codeium.com",
         "auth1ApiServerUrl": "https://server.self-serve.windsurf.com",
         "platform": "windsurf",
-        "quotaUrl": "https://windsurf.com/_backend/exa.seat_management_pb.SeatManagementService/GetPlanStatus"
+        "quotaUrl": "https://windsurf.com/_backend/exa.seat_management_pb.SeatManagementService/GetPlanStatus",
+        "firebaseApiKey": "AIzaSyDsOl-1XpT5err0Tcn0TFFod1H8gVGIycY"
     },
     "cline": {
         "appBaseUrl": "https://app.cline.bot",
@@ -8863,7 +8889,7 @@ export const PROVIDER_OAUTH: Record<string, ProtocolRecord> = {
             "codex_cli_simplified_flow": "true",
             "originator": "codex_cli_rs"
         },
-        "refreshLeadMs": 432000000,
+        "refreshLeadMs": 600000,
         "refresh": {
             "encoding": "form",
             "scope": "openid profile email offline_access"
@@ -8901,7 +8927,7 @@ export const PROVIDER_OAUTH: Record<string, ProtocolRecord> = {
         "apiVersion": "v1internal",
         "loadCodeAssistEndpoint": "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
         "onboardUserEndpoint": "https://cloudcode-pa.googleapis.com/v1internal:onboardUser",
-        "loadCodeAssistUserAgent": "antigravity/ide/2.11.0 darwin/arm64",
+        "loadCodeAssistUserAgent": "antigravity/hub/2.24.0 darwin/arm64",
         "refreshLeadMs": 300000
     }
 };

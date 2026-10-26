@@ -34,7 +34,7 @@ import type { ProtocolValue, ProtocolRecord, ProtocolError, ProtocolCredentials 
 import { createHash } from "crypto";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { buildCosyHeaders } from "../shared/qoder/cosy.js";
-import { QODER_IDE_VERSION, QODER_CLIENT_TYPE, qoderRegionOf, qoderJobTokenExchangeUrl, qoderUserInfoUrl, qoderInferenceBase, } from "../shared/qoder/constants.js";
+import { QODER_IDE_VERSION, QODER_CLIENT_TYPE, qoderRegionOf, qoderJobTokenExchangeUrl, qoderUserInfoUrl, qoderInferenceBase, QODER_STATIC_MODEL_CONFIGS, } from "../shared/qoder/constants.js";
 const FETCH_TIMEOUT_MS = 15000;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1h, same as the Kiro catalog
 const PAT_PREFIX = "pt-";
@@ -348,6 +348,20 @@ export function routableQoderModels(catalog: ProtocolValue) {
         return [];
     const out: ProtocolValue[] = [];
     const seen = new Set();
+  // Static fallback keys first (Sonus `smodel` / Cantus `cmodel`). The live
+  // catalog often omits them, yet the executor still routes them through
+  // QODER_STATIC_MODEL_CONFIGS — so they must not vanish from /v1/models just
+  // because the live catalog replaced the static provider list. A catalog entry
+  // for the same key always wins.
+  const catalogKeys = new Set([
+    ...(catalog.models || []).map((m: ProtocolValue) => m?.id),
+    ...(catalog.rawConfigs ? [...catalog.rawConfigs.keys()] : []),
+  ]);
+  for (const [key, cfg] of Object.entries(QODER_STATIC_MODEL_CONFIGS as Record<string, ProtocolRecord>)) {
+    if (!key || seen.has(key) || catalogKeys.has(key)) continue;
+    seen.add(key);
+    out.push({ id: key, name: cfg.display_name || key, hidden: false });
+  }
     for (const m of catalog.models || []) {
         if (!m?.id || seen.has(m.id))
             continue;

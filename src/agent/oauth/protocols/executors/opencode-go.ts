@@ -14,6 +14,7 @@ import { DefaultExecutor } from "./default.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { modelTargetFormat } from "../providers/models/schema.js";
 import { getProviderModels } from "../config/providerModels.js";
+import { isMuseSparkModel } from "../providers/models/helpers.js";
 import {
   normalizeResponsesInput,
   clampResponsesCallId,
@@ -57,11 +58,19 @@ function baseModelId(model: string) {
   return String(model || "").replace(/\([^()]+\)\s*$/, "").trim();
 }
 
-// Responses-only per the provider registry (grok-4.6, gpt-5.6-luna, muse-spark, …).
-// Reading the registry keeps this in sync with config — never hardcode model ids here.
+// Unknown-id fallback mirroring 9router's OPENCODE_FAMILIES: gpt/grok/muse-spark
+// ids outside the curated registry (passthrough ids) stay on /responses.
+const RESPONSES_FAMILY_RE = /^(grok|gpt|muse[-_]?spark)/i;
+
+// Responses-only per the provider registry (grok-4.6, gpt-5.6-luna, muse-spark, …),
+// including the family-regex fallback for passthrough ids — never hardcode model ids here.
+// Mirrors 9router getModelTargetFormat("opencode-go", model).
 function isResponsesModel(model: string) {
-  const entry = getProviderModels("opencode-go").find((m: ProtocolRecord) => m.id === baseModelId(model));
-  return modelTargetFormat(entry) === "openai-responses";
+  const base = baseModelId(model);
+  if (isMuseSparkModel(model)) return true;
+  const entry = getProviderModels("opencode-go").find((m: ProtocolRecord) => m.id === model || m.id === base);
+  if (entry) return modelTargetFormat(entry) === "openai-responses";
+  return RESPONSES_FAMILY_RE.test(base);
 }
 
 // Flatten Chat Completions tool declarations into the Responses flat shape and

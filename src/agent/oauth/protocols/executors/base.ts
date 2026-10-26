@@ -115,7 +115,7 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }: ExecutorRequest): Promise<ExecutorResult> {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, directFetch }: ExecutorRequest): Promise<ExecutorResult> {
     const fallbackCount = this.getFallbackCount();
     let lastError: ProtocolValue = null;
     let lastStatus = 0;
@@ -166,7 +166,7 @@ export class BaseExecutor {
           headers,
           body: bodyStr,
           signal: mergedSignal
-        }, proxyOptions);
+        }, proxyOptions, directFetch);
         clearTimeout(connectTimer);
         const ct = response.headers?.get?.("content-type") || "";
         const cl = response.headers?.get?.("content-length") || "?";

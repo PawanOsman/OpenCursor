@@ -8,6 +8,9 @@
  */
 
 import type { ProtocolValue, ProtocolRecord, ProtocolError } from "../wireTypes.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import crypto from "node:crypto";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 /**
@@ -56,6 +59,66 @@ const COOKIE_TTL_MS = 30 * 60 * 1000;
 // accounts / connections can rotate without clobbering each other.
 const _cache = new Map(); // key -> { cookie, at }
 const _inflight = new Map(); // key -> Promise<cookie|null>
+function desktopCookiePath() {
+  const home = os.homedir();
+  if (process.platform === "win32") {
+    return path.join(home, "AppData", "Roaming", "Xiaomi MiMo", "Partitions", "xiaomi-account", "Network", "Cookies");
+  }
+  if (process.platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "Xiaomi MiMo", "Partitions", "xiaomi-account", "Network", "Cookies");
+  }
+  return path.join(home, ".config", "Xiaomi MiMo", "Partitions", "xiaomi-account", "Network", "Cookies");
+}
+
+/**
+ * Read the persisted Xiaomi account cookies from MiMo Desktop's Electron profile.
+ * The Chromium cookie DB is held with an exclusive lock while Desktop runs, so we
+ * copy it first and bail (return null) if that fails.
+ * @returns {Promise<Record<string,string>|null>}
+ */
+async function readDesktopAccountCookies(): Promise<Record<string, string> | null> {
+  const src = desktopCookiePath();
+  if (!fs.existsSync(src)) return null;
+  const tmp = path.join(os.tmpdir(), `oc-mimo-cookies-${process.pid}-${crypto.randomBytes(4).toString("hex")}.db`);
+  try {
+    fs.copyFileSync(src, tmp);
+  } catch {
+    return null; // locked by a running Desktop
+  }
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(tmp, { readOnly: true });
+    const rows = db.prepare("SELECT name, value FROM cookies WHERE host_key = ?").all("." + ACCOUNT_HOST) as ProtocolRecord[];
+    db.close();
+    const jar: Record<string, string> = Object.fromEntries(rows.map((r: ProtocolRecord) => [String(r.name), String(r.value)]));
+    return jar.passToken ? jar : null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Read just the passToken + identity cookies from Desktop's profile.
+ * Exported so the connect flow can persist a per-account passToken into the
+ * connection's providerSpecificData — this is what enables multi-account rotation.
+ * @returns {Promise<{passToken:string, userId:string|null, cUserId:string|null}|null>}
+ */
+export async function readDesktopPassToken() {
+  try {
+    const jar = await readDesktopAccountCookies();
+    if (!jar?.passToken) return null;
+    return { passToken: jar.passToken, userId: jar.userId || null, cUserId: jar.cUserId || null };
+  } catch {
+    return null;
+  }
+}
+
 function signatureClientSign(nonce: ProtocolValue, ssecurity: ProtocolValue) {
     const input = `nonce=${nonce}` + (ssecurity && ssecurity.trim() ? `&${ssecurity}` : "");
     return encodeURIComponent(crypto.createHash("sha1").update(input).digest("base64"));
@@ -174,7 +237,7 @@ async function getServiceCookie(providerSpecificData: ProtocolValue, proxyOption
     const apiBase = resolveMimoServerBase(providerSpecificData);
     const passJar = providerSpecificData?.mimoPassToken
         ? { passToken: providerSpecificData.mimoPassToken, userId: providerSpecificData.mimoUserId, cUserId: providerSpecificData.mimoCUserId }
-        : null;
+        : await readDesktopAccountCookies();
     if (!passJar)
         return { cookie: null, reason: "no-pass-token" };
     // One cached session per passToken+cluster — accounts/connections rotate

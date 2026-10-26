@@ -98,7 +98,7 @@ describe("OpenCursor Codex request contract", () => {
     expect(CODEX_CONFIG).toMatchObject({
       authUrl: "https://auth.openai.com/oauth/authorize", tokenUrl: "https://auth.openai.com/oauth/token",
       clientId: "app_EMoamEEZ73f0CkXaXp7hrann", port: 1455, path: "/auth/callback",
-      scope: "openid profile email offline_access", originator: "codex_cli_rs", cliVersion: "0.154.0",
+      scope: "openid profile email offline_access", originator: "codex_cli_rs", cliVersion: "0.159.0",
     });
     expect(CODEX_CONFIG.fallbackModels).toContain("gpt-6-astra");
     expect(CODEX_CONFIG.fallbackModels).toContain("gpt-6-sol");
@@ -121,7 +121,7 @@ describe("OpenCursor Codex request contract", () => {
     expect(fetchMock).toHaveBeenCalledWith("https://chatgpt.com/backend-api/codex/responses", expect.objectContaining({ method: "POST", signal: abort.signal }));
     expect(request.init.headers).toMatchObject({
       authorization: "Bearer fixture-token", "ChatGPT-Account-ID": "fixture-workspace",
-      originator: "codex_cli_rs", "user-agent": "codex_cli_rs/0.154.0", accept: "text/event-stream",
+      originator: "codex_cli_rs", "user-agent": "codex_cli_rs/0.159.0", version: "0.159.0", accept: "text/event-stream",
     });
     const body = JSON.parse(String(request.init.body));
     expect(body).toMatchObject({

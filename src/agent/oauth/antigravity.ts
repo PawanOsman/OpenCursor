@@ -7,7 +7,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
+import { ANTIGRAVITY_IDE_USER_AGENT, ANTIGRAVITY_IDE_VERSION } from "./protocols/providers/shared.js";
 import type { ModelParams, SamplingParams } from "../provider/types";
 import type { ProviderEvent, ToolCall, ToolSchema, WireContentPart, WireMessage } from "../types";
 import { sseData } from "../provider/sse";
@@ -67,7 +68,9 @@ export const ANTIGRAVITY_CONFIG = {
     "https://www.googleapis.com/auth/cclog",
     "https://www.googleapis.com/auth/experimentsandconfigs",
   ],
-  ideVersion: "2.11.0",
+  /** Antigravity Hub desktop fingerprint; static on every host platform. */
+  ideVersion: ANTIGRAVITY_IDE_VERSION,
+  userAgent: ANTIGRAVITY_IDE_USER_AGENT,
   apiBase: "https://daily-cloudcode-pa.googleapis.com",
   quotaUrl: "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
   loadCodeAssistUrl: "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
@@ -89,18 +92,43 @@ export class AntigravityProtocolError extends Error {
 
 export function antigravityHeaders(token: string, options: {
   purpose?: "generation" | "catalog" | "project";
-  platform?: string;
-  arch?: string;
 } = {}): Record<string, string> {
   return {
     authorization: `Bearer ${token}`,
     "content-type": "application/json",
-    "user-agent": `antigravity/ide/${ANTIGRAVITY_CONFIG.ideVersion} ${options.platform ?? process.platform}/${options.arch ?? process.arch}`,
+    "user-agent": ANTIGRAVITY_CONFIG.userAgent,
     ...(options.purpose === "generation" ? { accept: "text/event-stream" } : {}),
+    // Quota/model catalog calls carry the client name and version.
     ...(options.purpose === "catalog" ? {
       "x-client-name": "antigravity", "x-client-version": ANTIGRAVITY_CONFIG.ideVersion,
     } : {}),
+    // loadCodeAssist/onboardUser are sent as local IDE requests.
+    ...(options.purpose === "project" ? { "x-request-source": "local" } : {}),
   };
+}
+
+/** Convert any session id to the IDE's numeric "-<int63>" form; numeric ids pass through. */
+export function antigravitySessionId(seed: string): string {
+  const value = seed.trim();
+  if (/^-?\d+$/.test(value)) return value;
+  const n = createHash("sha256").update(value).digest().readBigUInt64BE(0) & 0x7fffffffffffffffn;
+  return `-${n.toString()}`;
+}
+
+function uuidFromSeed(seed: string): string {
+  const bytes = createHash("sha256").update(seed || "antigravity").digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** IDE request id: agent/<conversation>/<ms>/<trajectory>/<step>, stable per session. */
+export function antigravityRequestId(sessionId: string | undefined, model: string, contentCount: number, now = Date.now()): string {
+  const session = sessionId || "anonymous";
+  const conversationId = uuidFromSeed(`antigravity:conversation:${session}`);
+  const trajectoryId = uuidFromSeed(`antigravity:trajectory:${session}:${model}:agent`);
+  return `agent/${conversationId}/${now}/${trajectoryId}/${Math.max(1, contentCount * 2 - 1)}`;
 }
 
 interface GeminiPart {
@@ -311,7 +339,7 @@ export function toAntigravityRequest(options: {
   // The current IDE chat envelope omits requestType. In the upstream API,
   // `agent` is explicitly removed because it selects an incorrect quota bucket.
   return { project: options.projectId.trim(), model, userAgent: "antigravity",
-    requestId: options.requestId ?? `agent/${randomUUID()}/${Date.now()}/${randomUUID()}/0`, request };
+    requestId: options.requestId ?? antigravityRequestId(request.sessionId, model, request.contents.length || 1), request };
 }
 
 function aborted(signal?: AbortSignal) {

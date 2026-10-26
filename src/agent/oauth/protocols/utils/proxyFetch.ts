@@ -9,6 +9,12 @@
 
 // Per-request cancellation; never monkey-patch global fetch.
 import { authFetch } from '../../auth/network.js';
-export function proxyAwareFetch(url: string | URL | Request, init: RequestInit = {}, _proxyOptions?: unknown): ReturnType<typeof authFetch> {
+export function proxyAwareFetch(
+    url: string | URL | Request,
+    init: RequestInit = {},
+    _proxyOptions?: unknown,
+    directFetch?: (url: string, init: RequestInit) => Promise<Response>,
+): ReturnType<typeof authFetch> {
+    if (directFetch && typeof url === "string") return directFetch(url, init) as ReturnType<typeof authFetch>;
     return authFetch(url, init);
 }

@@ -205,6 +205,7 @@ export const WINDSURF_CONFIG = {
   planStatusPath: "/exa.seat_management_pb.SeatManagementService/GetPlanStatus",
   userStatusPath: "/exa.seat_management_pb.SeatManagementService/GetUserStatus",
   defaultApiServerUrl: "https://server.codeium.com",
+  firebaseApiKey: "AIzaSyDsOl-1XpT5err0Tcn0TFFod1H8gVGIycY",
   callbackPath: "/windsurf-auth-callback",
   userAgent: "antigravity-cockpit-tools",
   oauthTimeoutMs: 600_000,

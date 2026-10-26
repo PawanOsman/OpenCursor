@@ -14,9 +14,9 @@ import { ProviderEvent, ToolSchema, WireMessage } from "./types";
 import { ChatHTTPError } from "./provider";
 import { AnthropicUsageTracker } from "./anthropicUsage";
 import { sseData } from "./provider/sse";
-import { CLAUDE_OAUTH_CONFIG as ANTHROPIC, buildClaudeAuthorizationUrl, buildClaudeMessagesRequest, claudeOAuthHeaders } from "./oauth/claude";
+import { CLAUDE_OAUTH_CONFIG as ANTHROPIC, buildClaudeAuthorizationUrl, buildClaudeMessagesRequest, claudeOAuthHeaders, claudeSeedUuid } from "./oauth/claude";
 import { CODEX_CONFIG as CODEX, codexHeaders, createCodexRequest, parseCodexStream, CodexProtocolError } from "./oauth/codex";
-import { ANTIGRAVITY_CONFIG as ANTIGRAVITY, antigravityHeaders, antigravityModelChoices, resolveAntigravityModel, toAntigravityRequest, parseAntigravityStream, resolveAntigravityProject, AntigravityProtocolError } from "./oauth/antigravity";
+import { ANTIGRAVITY_CONFIG as ANTIGRAVITY, antigravityHeaders, antigravitySessionId, antigravityModelChoices, resolveAntigravityModel, toAntigravityRequest, parseAntigravityStream, resolveAntigravityProject, AntigravityProtocolError } from "./oauth/antigravity";
 import type { ModelParams, SamplingParams } from "./provider/types";
 import { OAUTH_KINDS, OAUTH_PROVIDER_DEFINITIONS, isOAuthProviderKind, supportsOAuthQuota } from "../shared/oauthProviders";
 import type { OAuthLoginOptions, AccountLogin } from "./oauth/accountAuth";
@@ -88,6 +88,13 @@ const antigravityCatalogs = new Map<string, { identity: string; expiresAt: numbe
 const ANTIGRAVITY_CATALOG_TTL_MS = 5 * 60_000;
 /** Failed accounts pause briefly; credential changes and re-enabling reset this. */
 const accountCooldowns = new Map<string, number>();
+/** Per-account session ids for requests without a conversation key (upstream deriveSessionId). */
+const runtimeSessions = new Map<string, string>();
+function runtimeSessionId(id: string): string {
+  let session = runtimeSessions.get(id);
+  if (!session) { session = crypto.randomUUID(); runtimeSessions.set(id, session); }
+  return session;
+}
 let persistence: Promise<void> = Promise.resolve();
 
 /** Credential failures belong to this account, not to the user's model request. */
@@ -282,7 +289,8 @@ export function hasAnyAccount(): boolean {
 
 const b64url = (b: Buffer) => b.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 function pkce() {
-  const verifier = b64url(crypto.randomBytes(96));
+  // Upstream generatePKCE: 32 random bytes -> 43-char verifier.
+  const verifier = b64url(crypto.randomBytes(32));
   const challenge = b64url(crypto.createHash("sha256").update(verifier).digest());
   return { verifier, challenge };
 }
@@ -362,7 +370,7 @@ export async function login(kind: OAuthKind, options?: OAuthLoginOptions) {
   }
 
   const { verifier, challenge } = pkce();
-  const state = crypto.randomBytes(16).toString("hex");
+  const state = crypto.randomBytes(32).toString("base64url");
   const cfg = kind === "claude-code" ? ANTHROPIC : kind === "codex" ? CODEX : ANTIGRAVITY;
 
   const server = http.createServer(async (req, res) => {
@@ -578,7 +586,8 @@ function buildAuthUrl(kind: OAuthKind, challenge: string, state: string): string
     });
     return `${ANTIGRAVITY.authUrl}?${params.toString()}`;
   }
-  const params = new URLSearchParams({
+  // Same parameter order and %20 space encoding as the Codex CLI.
+  const params: Record<string, string> = {
     response_type: "code",
     client_id: CODEX.clientId,
     redirect_uri: redirectUri(kind),
@@ -587,10 +596,10 @@ function buildAuthUrl(kind: OAuthKind, challenge: string, state: string): string
     code_challenge_method: "S256",
     id_token_add_organizations: "true",
     codex_cli_simplified_flow: "true",
-    state,
     originator: CODEX.originator,
-  });
-  return `${CODEX.authUrl}?${params.toString()}`;
+    state,
+  };
+  return `${CODEX.authUrl}?${Object.entries(params).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join("&")}`;
 }
 
 async function completeLogin(kind: OAuthKind, code: string, retState: string, expectState: string, verifier: string, isCurrent: () => boolean) {
@@ -720,7 +729,7 @@ async function exchangeAntigravity(code: string, verifier: string): Promise<OAut
   // Identify the user + resolve the Google Cloud project for Code Assist.
   let email: string | undefined;
   try {
-    const ui = await fetch(`${ANTIGRAVITY.userInfoUrl}?alt=json`, { headers: { authorization: `Bearer ${token}`, accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
+    const ui = await fetch(`${ANTIGRAVITY.userInfoUrl}?alt=json`, { headers: { authorization: `Bearer ${token}`, accept: "application/json", "x-request-source": "local" }, signal: AbortSignal.timeout(15_000) });
     if (ui.ok) email = ((await ui.json()) as any)?.email;
   } catch { /* non-fatal */ }
 
@@ -1341,8 +1350,10 @@ async function* streamProviderAccount(id: string, opts: Parameters<typeof stream
   }
 }
 
-async function* streamClaudeCode(id: string, opts: Parameters<typeof buildClaudeMessagesRequest>[1]): AsyncGenerator<ProviderEvent> {
-  const response = await oauthFetch(id, (account) => buildClaudeMessagesRequest(account.accessToken, opts), opts.signal, true);
+async function* streamClaudeCode(id: string, opts: Parameters<typeof buildClaudeMessagesRequest>[1] & { promptCacheKey?: string }): AsyncGenerator<ProviderEvent> {
+  // Claude Code session: stable per conversation, else per account for this window.
+  const sessionId = claudeSeedUuid(`session:${id}:${opts.promptCacheKey ?? runtimeSessionId(id)}`);
+  const response = await oauthFetch(id, (account) => buildClaudeMessagesRequest(account.accessToken, { ...opts, sessionId }), opts.signal, true);
   if (!response.ok || !response.body) {
     throw await oauthStreamError("claude-code", response);
   }
@@ -1429,9 +1440,8 @@ async function* streamAntigravity(id: string, opts: {
   try {
     const generation = contextGeneration;
     const initial = await ensureAntigravityProject(id, opts.signal);
-    const sessionId = opts.promptCacheKey
-      ? crypto.createHash("sha256").update(`${id}:${opts.promptCacheKey}`).digest().readBigUInt64BE().toString()
-      : undefined;
+    // Numeric IDE session: per conversation, else stable per account for this window.
+    const sessionId = antigravitySessionId(opts.promptCacheKey ? `${id}:${opts.promptCacheKey}` : runtimeSessionId(id));
     const ambiguousModel = resolveAntigravityModel(opts.model).model !== resolveAntigravityModel(opts.model, [opts.model]).model;
     const send = async () => {
       if (ambiguousModel && cachedAntigravityModels(enabledAccount(id)) === undefined) {

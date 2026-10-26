@@ -24,7 +24,7 @@ export const CODEX_CONFIG = {
   path: "/auth/callback",
   scope: "openid profile email offline_access",
   originator: "codex_cli_rs",
-  cliVersion: "0.154.0",
+  cliVersion: "0.159.0",
   responsesUrl: "https://chatgpt.com/backend-api/codex/responses",
   modelsUrl: "https://chatgpt.com/backend-api/codex/models",
   fallbackModels: [
@@ -43,6 +43,7 @@ export function codexHeaders(account: CodexCredentials, opts: { sessionId?: stri
     accept: opts.accept ?? "application/json",
     originator: CODEX_CONFIG.originator,
     "user-agent": `${CODEX_CONFIG.originator}/${CODEX_CONFIG.cliVersion}`,
+    version: CODEX_CONFIG.cliVersion,
     ...(opts.sessionId ? { session_id: opts.sessionId } : {}),
     ...(account.accountId ? { "ChatGPT-Account-ID": account.accountId } : {}),
   };
