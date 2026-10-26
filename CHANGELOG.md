@@ -13,6 +13,44 @@ All notable changes to the "ocursor" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.2.1] - 2026-10-27
+
+### Added
+
+- "Allow editing model output" toggle in the conversation menu: when on, assistant messages and thinking blocks can be edited, and the next request uses the edited history. Provider signatures from the edited step onward are dropped so the request stays valid.
+- Models: Claude Sonnet 5.5 and Haiku 5.5, GPT-6.1 Sol and Terra, Gemini 4 Argon, Kimi K3.1 Pro and Grok 4.7, plus newer provider-prefixed aliases (9router `cc/`, `cx/`, `gh/`, `ag/`, `kr/`, etc.) and per-model thinking, effort, context and pricing options.
+- Project hook files (`.cursor/hooks.json`, `.claude/settings.json`) now ask for approval of their exact contents, and run only in trusted workspaces.
+- Choose where local embeddings run in **Indexing & Docs → Run Embeddings On**: CPU (default) or a specific GPU (DirectML on Windows, CUDA on Linux, Core ML on macOS). GPUs are listed with their real VRAM, identical cards are numbered, and a GPU that fails to load falls back to the CPU with the reason shown.
+- Pause and resume codebase indexing while it syncs, without turning indexing off. Progress is saved, file changes queue while paused, search keeps working, and resuming skips files already embedded.
+- Steering updates can be edited after the run, without the model-output toggle. Edits update the history the model sees next.
+
+### Changed
+
+- Steering no longer behaves like a new message. The update appears inline in the running response, which keeps its timer and work section, and it reaches the model as guidance for the current task instead of a new request with fresh context. Double Enter (or **Send now**) still interrupts with a new message.
+- Large performance pass for low and mid-range machines:
+  - Each conversation is stored in its own file and loaded on demand, instead of re-serialising every chat on each save and keystroke.
+  - Local embedding runs in a worker thread with a capped thread count, so indexing no longer freezes the editor. Unchanged files and unchanged chunks are not re-embedded, and background indexing pauses while you type or the agent responds.
+  - Streaming re-renders only the newest part of a message; earlier messages, the composer and offscreen animations stay idle.
+  - The chat view no longer waits for MCP servers at startup; servers connect in parallel, and the first message waits at most a few seconds for their tools.
+  - Faster workspace scans and searches with CPU-aware concurrency, shell waits without polling, idle browser shutdown, and cheaper stream parsing and context saves during long runs.
+- Claude Sonnet 5.5 uses its `between_tools` thinking mode when thinking is turned off, streams summarised notes between tool calls by default, and generates chat titles without forced tool use.
+- Edit buttons sit inside the block they edit (thinking header, steering note, or a gutter beside response text) instead of overlapping content.
+
+### Fixed
+
+- Shell approval rules can no longer be bypassed with braces, redirections, or PowerShell `\;` chaining; unbalanced commands now ask.
+- `Rg` is checked for outside-workspace paths; review mode asks for data-carrying web requests, uploads, and MCP tools not marked read-only; web and MCP allow rules match exact origins and names.
+- WebFetch blocks private, loopback and metadata addresses, re-checks redirects, and caps response size.
+- Tool batches run in the order the model emitted them.
+- A webview reload can no longer overwrite a background conversation's transcript; a corrupt pending-edit journal no longer stops activation.
+- Choosing a model no longer copies workspace settings into user settings; inline review no longer edits `.vscode/settings.json`.
+- Markdown output is sanitised with an allowlist (no inline styles, forms, or event handlers).
+- OAuth tokens stay in sync across VS Code windows; sign-in callbacks time out; Antigravity sign-in uses PKCE.
+- pnpm dependency overrides now apply; runtime-manifest checks work with CRLF checkouts.
+- OpenCode Free requests now use a TLS fingerprint the free tier accepts, matching 9router. The optional `wreq-js` runtime is installed on first use into `~/.opencursor/runtime`; without it, requests fall back to the standard connection.
+- The Indexing page no longer shows "Loading…" while the embedding model is idle; it shows the configured device and only reports loading while a model is actually loading.
+- Choosing a model or changing settings no longer refetches every provider's model list.
+
 ## [0.2.0] - 2026-09-24
 
 ### Added
