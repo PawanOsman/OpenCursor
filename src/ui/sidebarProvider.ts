@@ -1157,7 +1157,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     let cut = conv.steps.length;
     for (let i = 0; i < conv.steps.length; i++) {
       const step = conv.steps[i];
-      if (step.kind === "user" && !step.synthetic) {
+      // Steering steps belong to the request they refined (not a user turn).
+      if (step.kind === "user" && !step.synthetic && !step.steering) {
         if (seen === keepUserSteps) { cut = i; break; }
         seen++;
       }

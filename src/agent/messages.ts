@@ -266,7 +266,7 @@ export function stepsToTranscript(steps: Step[]): string {
   ]);
   for (const s of steps) {
     if (s.kind === "user") {
-      out.push(`## ${s.synthetic ? "System note" : "User"}\n${s.text}`);
+      out.push(`## ${s.synthetic ? "System note" : s.steering ? "User update (during the task)" : "User"}\n${s.text}`);
       // A later turn may update rules without repeating them in the query.
       // Summaries must see these restrictions before dropping that turn.
       if (!s.synthetic && s.context) {
@@ -363,11 +363,16 @@ export function buildMessages(system: string, steps: Step[], ctx?: CursorContext
       // System notes are tagged so the model never mistakes them for the user.
       if (s.synthetic) {
         textContent = `<system_reminder>\n${textContent}\n</system_reminder>`;
+      } else if (s.steering) {
+        // Mid-run guidance refines the task in progress. Framed (and sent
+        // without a fresh context snapshot) so the model keeps going rather
+        // than treating it as a new request to start over from.
+        textContent = `<user_update>\nThe user added this while you were working. It is an update to the current task, not a new request: take it into account and continue from where you are.\n\n${textContent}\n</user_update>`;
       }
 
       // The fallback supports legacy callers. Production records a snapshot
       // before the first request; saved turns always win over mutable context.
-      const turnContext = !s.synthetic
+      const turnContext = !s.synthetic && !s.steering
         ? s.context ?? (i === lastUserIdx && ctx ? snapshotUserContext(ctx) : undefined)
         : undefined;
       const parts: WireContentPart[] = [];

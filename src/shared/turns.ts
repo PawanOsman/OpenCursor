@@ -106,12 +106,17 @@ export interface MaxStepsBlock {
   resumed?: boolean;
 }
 export interface VerificationBlock { kind: "verification"; summary: import("../agent/verification").VerificationSnapshot }
-export type AssistantBlock = TextBlock | ThinkingBlock | ToolBlock | ErrorBlock | CompactionBlock | MaxStepsBlock | VerificationBlock;
+/** Guidance the user added while this run was working; the run continues with it. */
+export interface SteeringBlock { kind: "steering"; text: string; at: number }
+export type AssistantBlock = TextBlock | ThinkingBlock | ToolBlock | ErrorBlock | CompactionBlock | MaxStepsBlock | VerificationBlock | SteeringBlock;
 
 export interface UserTurn {
   role: "user";
   text: string;
-  /** Guidance consumed inside the current run rather than a new run boundary. */
+  /**
+   * Legacy (saved before steering became a SteeringBlock): guidance consumed
+   * inside the current run rather than a new run boundary.
+   */
   steering?: true;
   attachments?: Attachment[];
   /** Model id this message was sent with (shown on the bubble). */
@@ -347,7 +352,6 @@ function settleTrailingTurn(turns: Turn[]): Turn[] {
 
 // Apply a streaming agent event to the turns array (immutably).
 export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
-  if (ev.type === "user-steering") return [...settleTrailingTurn(closeTrailingThinking(turns)), { role: "user", text: ev.text, steering: true }];
   const ensureAssistant = (list: Turn[]): { list: Turn[]; turn: AssistantTurn } => {
     const last = list[list.length - 1];
     if (last && last.role === "assistant") {
@@ -357,6 +361,15 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
     const turn: AssistantTurn = { role: "assistant", blocks: [], startedAt: Date.now() };
     return { list: [...list, turn], turn };
   };
+
+  // Steering joins the running turn: same timer, same work section, no new
+  // request boundary. Only a separately sent message starts a new turn.
+  if (ev.type === "user-steering") {
+    const { list, turn } = ensureAssistant(closeTrailingThinking(turns));
+    turn.startedAt ??= Date.now();
+    turn.blocks.push({ kind: "steering", text: ev.text, at: Date.now() });
+    return list;
+  }
 
   if (ev.type === "run-status") {
     if (ev.status !== "running") return settleTrailingTurn(closeTrailingThinking(turns));

@@ -30,7 +30,8 @@ export interface ModelOutputEditResult {
 }
 
 type AssistantStep = Extract<Step, { kind: "assistant" }>;
-const isRequest = (step: Step) => step.kind === "user" && !step.synthetic;
+/** Steering stays inside its turn (a SteeringBlock), so it is not a request boundary. */
+const isRequest = (step: Step) => step.kind === "user" && !step.synthetic && !step.steering;
 const field = (kind: ModelOutputEdit["kind"]) => (step: AssistantStep) => (kind === "text" ? step.text : step.thinking) ?? "";
 
 /** Steps produced in reply to the turn's user request, when turns and requests still align. */

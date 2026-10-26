@@ -939,7 +939,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				// A durable host mailbox may need to flush storage before returning.
 				// Leave unconsumed entries pending if Stop or a shared budget wins.
 				if (!canContinueAt(nextStep)) break;
-				pushHistory({ kind: "user", text: steering });
+				pushHistory({ kind: "user", text: steering, steering: true });
 				await opts.onRunEvent?.({ type: "steering", at: Date.now(), data: { text: steering, runId: opts.runId ?? shellSessionKey } });
 				consumed = true;
 			}
@@ -998,7 +998,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			let latestUser: Step | undefined;
 			for (let k = history.length - 1; k >= 0 && !latestUser; k--) {
 				const candidate = history[k];
-				if (candidate.kind === "user" && !candidate.synthetic) latestUser = candidate;
+				if (candidate.kind === "user" && !candidate.synthetic && !candidate.steering) latestUser = candidate;
 			}
 			const requiredContextTokens = latestUser?.kind === "user" && latestUser.context ? stepsTokens([{ kind: "user", text: "", context: latestUser.context }]) : 0;
 			if (limitedContext && fittingBudget <= overheadTokens + requiredContextTokens + 64) {

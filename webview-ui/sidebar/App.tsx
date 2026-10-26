@@ -346,6 +346,14 @@ function useStableCallback<Args extends unknown[], Result>(callback: (...args: A
 
 /** A sent user message. Memoized with stable handlers so settled messages are
  *  not re-rendered on every streaming frame of a long conversation. */
+/** Guidance the user added mid-run, shown inline in the work it changed. */
+function SteeringNote({ text }: { text: string }) {
+  return <div className="steering-note" role="note" aria-label="Your update to the running task">
+    <span className="steering-note-label"><Icon name="steer" size={12} /> You</span>
+    <div className="steering-note-text"><MentionText text={text} /></div>
+  </div>;
+}
+
 const UserMessage = React.memo(function UserMessage({ turn, index, isRunning, onEdit, onResend, onRevert, onPreviewImage }: {
   turn: UserTurn; index: number; isRunning: boolean;
   onEdit: (index: number, turn: UserTurn) => void; onResend: (index: number, turn: UserTurn) => void;
@@ -676,6 +684,7 @@ const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex,
       if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} /></div>;
       if (block.kind === "max-steps") return <div className="block-group" key={index}><MaxStepsCard block={block} running={running} /></div>;
       if (block.kind === "verification") return <VerificationCard key={index} summary={block.summary} />;
+      if (block.kind === "steering") return <SteeringNote key={index} text={block.text} />;
       return <div className="block-group" key={index}>
         <ToolCard block={block} onImplement={onImplement} onOpenSubagent={onOpenSubagent} awaitingApproval={!!taskApprovals[block.callId]?.length} />
         {approvals[block.callId] && <ApprovalCard request={approvals[block.callId]} inline />}
@@ -749,6 +758,8 @@ function SubagentChat({
                 <div className="block-group" key={bi}><MaxStepsCard block={b} running={false} /></div>
               ) : b.kind === "verification" ? (
                 <VerificationCard key={bi} summary={b.summary} />
+              ) : b.kind === "steering" ? (
+                <SteeringNote key={bi} text={b.text} />
               ) : (
                 <div className="block-group" key={bi}><ToolCard block={b} /></div>
               )

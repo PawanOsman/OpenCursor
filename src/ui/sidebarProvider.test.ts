@@ -778,7 +778,8 @@ describe("durable host-owned follow-up queue", () => {
     const delivered = host._view.webview.postMessage.mock.calls.map(([message]: any[]) => message).filter((message: any) => message.type === "workflowState").at(-1);
     expect(delivered.steeringQueues[a.id]).toEqual([]);
     expect(store.get(a.id)?.steps).toContainEqual({ kind: "user", text: "Keep the API unchanged" });
-    expect(store.get(a.id)?.turns).toContainEqual({ role: "user", text: "Keep the API unchanged", steering: true });
+    expect(store.get(a.id)?.turns.at(-1)).toMatchObject({ role: "assistant", blocks: expect.arrayContaining([expect.objectContaining({ kind: "steering", text: "Keep the API unchanged" })]) });
+    expect(store.get(a.id)?.turns.filter(turn => turn.role === "user")).toHaveLength(1);
     expect(host._view.webview.postMessage).toHaveBeenCalledWith({ type: "agentEvent", convId: a.id, event: { type: "user-steering", text: "Keep the API unchanged", requestId: "guidance" } });
     expect(await running.drainSteering?.()).toEqual([]);
     release();
@@ -818,7 +819,7 @@ describe("durable host-owned follow-up queue", () => {
       const persisted = host.context.workspaceState.get("ocursor.conversations").find((conversation: { id: string }) => conversation.id === a.id);
       expect(persisted.steeringQueue).toEqual([]);
       expect(persisted.steps).toContainEqual({ kind: "user", text: "Preserve the public API" });
-      expect(persisted.turns).toContainEqual({ role: "user", text: "Preserve the public API", steering: true });
+      expect(persisted.turns.at(-1)).toMatchObject({ role: "assistant", blocks: expect.arrayContaining([expect.objectContaining({ kind: "steering", text: "Preserve the public API" })]) });
       expect(persisted.queue.map((item: { id: string }) => item.id)).toEqual(["main"]);
     } finally {
       finishJournal();

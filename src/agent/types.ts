@@ -75,7 +75,8 @@ export type Step =
   /** `synthetic` marks loop-injected system messages (nudges, subagent reports,
    *  compaction summaries) — they are not the user's request and must never be
    *  treated as one when placing context blocks or bounding the live turn. */
-  | { kind: "user"; text: string; attachments?: Attachment[]; synthetic?: boolean; context?: UserContextSnapshot }
+  /** `steering`: guidance added while the run worked; part of the current request, not a new one. */
+  | { kind: "user"; text: string; attachments?: Attachment[]; synthetic?: boolean; steering?: boolean; context?: UserContextSnapshot }
   | { kind: "assistant"; text: string; thinking?: string; calls: ToolCall[]; responsesReasoning?: ResponsesReasoning; chatReasoning?: ChatReasoning }
   | { kind: "tool-result"; callId: string; name: string; output: string; status: "completed" | "error"; image?: ToolImage; outcome?: ToolOutcome };
 

@@ -65,19 +65,36 @@ describe("assistant run timing", () => {
     expect(assistant(restored).blocks[0]).toEqual({ kind: "text", text: "Checking. Done." });
   });
 
-  it("settles steering segments independently and leaves old timing intact when background work completes", () => {
+  it("keeps one running turn and timer across steering", () => {
     const at = clock();
     let turns = applyEvent([{ role: "user", text: "Fix it" }], { type: "run-status", status: "running" });
     turns = applyEvent(turns, { type: "tool-call-started", callId: "bg", name: "Task", input: {} });
     at(4000);
     turns = applyEvent(turns, { type: "user-steering", text: "Keep the API" });
-    expect(assistant(turns, 1)).toMatchObject({ startedAt: 1000, endedAt: 4000, durationMs: 3000 });
+    expect(turns).toHaveLength(2);
+    expect(assistant(turns)).toMatchObject({ startedAt: 1000 });
+    expect(assistant(turns).endedAt).toBeUndefined();
     at(4500);
     turns = applyEvent(turns, { type: "text-delta", text: "I will. Done." });
     turns = applyEvent(turns, { type: "tool-call-completed", callId: "bg", name: "Task", status: "completed", result: "Done" });
     at(8000);
     turns = applyEvent(turns, { type: "run-status", status: "finished" });
     turns = applyEvent(turns, { type: "run-result", text: "Done.", durationMs: 7000 });
+    expect(turns).toHaveLength(2);
+    expect(assistant(turns)).toMatchObject({ startedAt: 1000, endedAt: 8000, durationMs: 7000, finalText: "Done." });
+    expect(assistant(turns).blocks.map(block => block.kind)).toEqual(["tool", "steering", "text"]);
+  });
+
+  it("keeps the timing of conversations saved with legacy steering turns", () => {
+    const at = clock();
+    const legacy: Turn[] = [
+      { role: "user", text: "Fix it" },
+      { role: "assistant", blocks: [], startedAt: 1000, endedAt: 4000, durationMs: 3000 },
+      { role: "user", text: "Keep the API", steering: true },
+      { role: "assistant", blocks: [], startedAt: 4500 },
+    ];
+    at(8000);
+    const turns = applyEvent(legacy, { type: "run-result", text: "Done.", durationMs: 7000 });
     expect(assistant(turns, 1)).toMatchObject({ startedAt: 1000, endedAt: 4000, durationMs: 3000 });
     expect(assistant(turns)).toMatchObject({ startedAt: 4500, endedAt: 8000, durationMs: 3500, finalText: "Done." });
   });

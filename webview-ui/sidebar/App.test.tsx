@@ -596,7 +596,7 @@ describe("production chat application lifecycle", () => {
     message({ type: "agentEvent", convId: "A", event: { type: "user-steering", text: first.text, requestId: "first" } });
     expect(container.querySelectorAll(".queue-item")).toHaveLength(1);
     expect(container.querySelector('.queue-item[aria-busy="true"]')).toBeNull();
-    expect([...container.querySelectorAll(".msg.user")].pop()?.textContent).toContain(first.text);
+    expect([...container.querySelectorAll(".steering-note")].pop()?.textContent).toContain(first.text);
   });
 
   it("restores steering controls after rejection and restores in-flight steering after reconnect", () => {
@@ -651,7 +651,7 @@ describe("production chat application lifecycle", () => {
     expect(vi.mocked(vscode.postMessage).mock.calls).toEqual([[{ type: "queueAction", convId: "A", id: "remove-me", action: "remove" }]]);
   });
 
-  it("renders consumed steering between assistant turns while keeping the run and previous work intact", async () => {
+  it("renders consumed steering inside the running response without starting a new turn", async () => {
     initial();
     message({ type: "agentEvent", convId: "A", event: { type: "text-delta", text: "I am checking the current implementation." } });
     message({ type: "agentEvent", convId: "A", event: { type: "tool-call-started", callId: "check-before-steer", name: "Shell", input: { command: "npm test" } } });
@@ -666,16 +666,19 @@ describe("production chat application lifecycle", () => {
     message({ type: "agentEvent", convId: "A", event: { type: "text-delta", text: "I will preserve those shortcuts as I update the component." } });
     await act(async () => { await new Promise<void>(resolve => requestAnimationFrame(() => resolve())); });
 
+    // One user request, one running response: the update joins the work in
+    // progress instead of closing it and opening a new message group.
     const renderedTurns = [...container.querySelectorAll(".msg")];
-    expect(renderedTurns.map(turn => turn.classList.contains("user") ? "user" : "assistant")).toEqual(["user", "assistant", "user", "assistant"]);
+    expect(renderedTurns.map(turn => turn.classList.contains("user") ? "user" : "assistant")).toEqual(["user", "assistant"]);
     expect(renderedTurns[1]).toBe(previousAssistant);
-    expect(renderedTurns[1].querySelector(".working-head")?.textContent).toContain("Worked");
-    act(() => renderedTurns[1].querySelector<HTMLButtonElement>("button.working-head")!.click());
-    expect(renderedTurns[1].textContent).toContain("I am checking the current implementation.");
-    expect(renderedTurns[1].textContent).toContain("npm test");
-    expect(renderedTurns[1].querySelector(".ok-icon")).not.toBeNull();
-    expect(renderedTurns[2].textContent?.trim()).toBe("Keep the existing keyboard shortcuts.");
-    expect(renderedTurns[3].textContent).toContain("I will preserve those shortcuts as I update the component.");
+    expect(renderedTurns[1].querySelector(".working-head")?.textContent ?? "").not.toContain("Worked");
+    const content = renderedTurns[1].textContent ?? "";
+    expect(content).toContain("I am checking the current implementation.");
+    expect(content).toContain("npm test");
+    const note = renderedTurns[1].querySelector(".steering-note")!;
+    expect(note.textContent).toContain("Keep the existing keyboard shortcuts.");
+    expect(content.indexOf("npm test")).toBeLessThan(content.indexOf("Keep the existing keyboard shortcuts."));
+    expect(content.indexOf("Keep the existing keyboard shortcuts.")).toBeLessThan(content.indexOf("I will preserve those shortcuts as I update the component."));
     expect(container.querySelector('[data-testid="composer"]')?.getAttribute("data-running")).toBe("true");
     expect(vi.mocked(vscode.postMessage).mock.calls.filter(([m]) => (m as any).type !== "persistTurns")).toEqual([]);
   });

@@ -1296,7 +1296,9 @@ describe("persistent collaborators, steering and goal evidence", () => {
         return answer("Inspected the API without changing it.");
       },
     ], { drainSteering: () => steering.splice(0), onRunEvent });
-    expect(history.filter(step => step.kind === "user" && step.text === "Keep the public API unchanged; inspect only.")).toHaveLength(1);
+    expect(history.filter(step => step.kind === "user" && step.text === "Keep the public API unchanged; inspect only.")).toEqual([
+      expect.objectContaining({ steering: true }),
+    ]);
     expect(onRunEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "steering", data: expect.objectContaining({ text: "Keep the public API unchanged; inspect only." }) }));
     expect(fixture.executions.map(item => item.name)).toEqual(["Read"]);
     expectFinished(events, "Inspected the API without changing it.", 2);

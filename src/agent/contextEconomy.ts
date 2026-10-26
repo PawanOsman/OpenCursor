@@ -64,11 +64,11 @@ function lastUserIndex(steps: Step[]): number {
   return -1;
 }
 
-/** Index of the last real (non-synthetic) user message — the actual request. */
+/** Index of the last real user message — the actual request (not a system note or mid-run steering). */
 export function lastRealUserIndex(steps: Step[]): number {
   for (let i = steps.length - 1; i >= 0; i--) {
     const s = steps[i];
-    if (s.kind === "user" && !s.synthetic) return i;
+    if (s.kind === "user" && !s.synthetic && !s.steering) return i;
   }
   return lastUserIndex(steps);
 }

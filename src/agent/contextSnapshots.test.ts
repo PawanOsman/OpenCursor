@@ -134,3 +134,36 @@ describe("immutable user context", () => {
     expect(JSON.stringify(buildMessages("OpenCursor", tail))).toContain("Do not execute tests");
   });
 });
+
+describe("mid-run steering", () => {
+  const liveContext = { userInfo: "Live rules", openFiles: "src/live.ts", timestamp: "2026-10-27T09:00:00Z", reminder: "Live reminder" };
+
+  it("is sent as an update to the current task, without a new request context", () => {
+    const history: Step[] = [first(), ...exchange("one"), { kind: "user", text: "Keep the old shortcuts", steering: true }];
+    const messages = buildMessages("OpenCursor", history, liveContext);
+    const steer = JSON.stringify(messages.at(-1));
+    expect(messages.at(-1)?.role).toBe("user");
+    expect(steer).toContain("<user_update>");
+    expect(steer).toContain("Keep the old shortcuts");
+    expect(steer).toContain("not a new request");
+    // No fresh snapshot: the steer is not a new <user_query> with live context.
+    expect(steer).not.toContain("<user_query>");
+    expect(steer).not.toContain("Live rules");
+    expect(steer).not.toContain("src/live.ts");
+    // The original request keeps its own context and stays the current request.
+    expect(JSON.stringify(messages[1])).toContain("Workspace rules: preserve manual changes");
+    expect(JSON.stringify(messages[1])).toContain("<user_query>");
+  });
+
+  it("does not change earlier messages, so the prompt cache prefix survives", () => {
+    const history: Step[] = [first(), ...exchange("one")];
+    const before = buildMessages("OpenCursor", history, liveContext);
+    history.push({ kind: "user", text: "Also cover the edge case", steering: true });
+    const after = buildMessages("OpenCursor", history, liveContext);
+    expect(after.slice(0, before.length)).toEqual(before);
+  });
+
+  it("is labelled as an update in compaction transcripts", () => {
+    expect(stepsToTranscript([first(), { kind: "user", text: "Use tabs", steering: true }])).toContain("## User update (during the task)\nUse tabs");
+  });
+});
