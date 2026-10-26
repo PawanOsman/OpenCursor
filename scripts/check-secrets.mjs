@@ -27,6 +27,8 @@ for (const file of new Set(files)) {
   const lines = readFileSync(file, "utf8").split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     if (!credential.test(lines[i])) continue;
+    // Explicit per-line opt-out for values that are public by design (e.g. Firebase web API keys).
+    if (/\/\/\s*check-secrets:\s*public\b/.test(lines[i])) continue;
     // Never print the matching value into CI logs.
     console.error(`${file}:${i + 1}: potential credential`);
     failed = true;

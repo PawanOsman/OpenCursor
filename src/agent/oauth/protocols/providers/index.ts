@@ -8827,7 +8827,7 @@ export const PROVIDER_OAUTH: Record<string, ProtocolRecord> = {
         "auth1ApiServerUrl": "https://server.self-serve.windsurf.com",
         "platform": "windsurf",
         "quotaUrl": "https://windsurf.com/_backend/exa.seat_management_pb.SeatManagementService/GetPlanStatus",
-        "firebaseApiKey": "AIzaSyDsOl-1XpT5err0Tcn0TFFod1H8gVGIycY"
+        "firebaseApiKey": "AIzaSyDsOl-1XpT5err0Tcn0TFFod1H8gVGIycY" // check-secrets: public (Firebase web API key, client-side identifier)
     },
     "cline": {
         "appBaseUrl": "https://app.cline.bot",
