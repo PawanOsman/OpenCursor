@@ -17,9 +17,10 @@ import { vscode } from "../shared/vscode";
 import * as workPresentation from "./workPresentation";
 
 vi.mock("../shared/vscode", () => ({ vscode: { postMessage: vi.fn() } }));
+const composerRenders = vi.hoisted(() => ({ count: 0 }));
 vi.mock("./components/Composer", () => ({
   KIND_SVG: {}, applyFileIconTo: vi.fn(),
-  Composer: (props: any) => <div data-testid="composer" data-running={props.isRunning}><button data-testid="send" onClick={() => props.onSubmit("queued-A", [])}>Send fixture</button><button data-testid="agent" onClick={() => props.onMode("agent")}>Agent mode</button></div>,
+  Composer: (props: any) => (composerRenders.count++, <div data-testid="composer" data-running={props.isRunning}><button data-testid="send" onClick={() => props.onSubmit("queued-A", [])}>Send fixture</button><button data-testid="agent" onClick={() => props.onMode("agent")}>Agent mode</button></div>),
 }));
 let root: Root, container: HTMLDivElement;
 beforeEach(() => {
@@ -56,6 +57,41 @@ describe("transcript resource usage", () => {
     expect(container.textContent).toContain("New response");
     expect(split.mock.calls.some(([turn]) => turn.blocks.some(block => block.kind === "text" && block.text === "Settled response"))).toBe(false);
     expect(split.mock.calls.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the composer and settled user messages idle while a response streams", async () => {
+    initial({ turns: [
+      { role: "user", text: "Earlier request" },
+      { role: "assistant", blocks: [{ kind: "text", text: "Settled response" }], startedAt: 1, endedAt: 2 },
+      { role: "user", text: "New request" },
+    ] });
+    await paint();
+    let bubbleReads = 0;
+    vi.spyOn(Element.prototype, "scrollHeight", "get").mockImplementation(function (this: Element) {
+      if (this.classList.contains("bubble")) bubbleReads++;
+      return 0;
+    });
+    const rendersBefore = composerRenders.count;
+    for (let i = 0; i < 10; i++) {
+      message({ type: "agentEvent", convId: "A", event: { type: "text-delta", text: ` token${i}` } });
+      await paint();
+    }
+    expect(container.textContent).toContain("token9");
+    expect(composerRenders.count).toBe(rendersBefore);
+    expect(bubbleReads).toBe(0);
+  });
+
+  it("updates only the trailing markdown block of a streaming response", async () => {
+    initial({ turns: [{ role: "user", text: "Explain" }] });
+    message({ type: "agentEvent", convId: "A", event: { type: "text-delta", text: "First **paragraph**.\n\nSecond" } });
+    await paint();
+    const first = Array.from(container.querySelectorAll(".msg.assistant .markdown-content p")).find(p => p.textContent === "First paragraph.")!;
+    expect(first).toBeTruthy();
+    message({ type: "agentEvent", convId: "A", event: { type: "text-delta", text: " paragraph grows" } });
+    await paint();
+    const paragraphs = Array.from(container.querySelectorAll(".msg.assistant .markdown-content p"));
+    expect(paragraphs[0]).toBe(first);
+    expect(paragraphs.map(p => p.textContent)).toEqual(["First paragraph.", "Second paragraph grows"]);
   });
 
   it("does not redraw the active transcript for background token deltas", async () => {

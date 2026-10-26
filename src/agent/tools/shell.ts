@@ -14,7 +14,7 @@ import { spawnPtyCommand, getInteractiveTerminal, terminalDimensions } from "../
 import {
   nextShellId, registerShellJob, getOwnedShell, shellOutcome,
   finishShellTranscript, waitForShell, renderShell, pushShellOutput,
-  getShellSession, spawnShellCommand, trackShellProcess, killShellProcess, applyCwdSideEffect,
+  getShellSession, spawnShellCommand, trackShellProcess, killShellProcess, applyCwdSideEffect, notifyShellSettled,
   type BgShell, type ShellNotify,
 } from "./shared";
 
@@ -142,6 +142,7 @@ export const runTerminalTool = defineTool("Shell", true, async (input, abortSign
     sh.endedAt = Date.now();
     recordOutcome(ctx, callId, shellOutcome(sh));
     live.update();
+    notifyShellSettled(sh);
   };
 
   let proc: ReturnType<typeof spawnShellCommand>;

@@ -12,6 +12,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import type { DocSource } from "./docsIndex";
+import * as docsFs from "fs/promises";
+
+vi.mock("fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
 
 const embedding = vi.hoisted(() => ({ fingerprint: "fixture-embedding-v1", texts: vi.fn() }));
 vi.mock("./semanticIndex", () => ({
@@ -225,6 +231,19 @@ describe("documentation index transactions and content integrity", () => {
     expect((await searchDocs(source.id, "configuration")).map(hit => hit.url)).toEqual([url("/docs")]);
     setDocSourcesProvider(() => [{ ...source, url: "https://other.test/docs" }]);
     await expect(searchDocs(source.id, "configuration")).rejects.toThrow("scope changed");
+  });
+
+  it("parses a documentation index once for repeated searches and picks up a reindex", async () => {
+    page("/docs", html(paragraph("Overview")));
+    await indexDocSource({ ...source, scope: "page" });
+    const reads = vi.mocked(docsFs.readFile).mockClear();
+    const first = await searchDocs(source.id, "configuration");
+    const second = await searchDocs(source.id, "configuration");
+    expect(second).toEqual(first);
+    expect(reads.mock.calls.filter(([target]) => String(target) === file())).toHaveLength(1);
+    page("/docs", html(paragraph("Rewritten overview with different wording")));
+    await indexDocSource({ ...source, scope: "page" });
+    expect((await searchDocs(source.id, "configuration"))[0].text).toContain("Rewritten overview");
   });
 
   it("hashes complete page content, preserving pages with matching first 8k characters", async () => {

@@ -17,6 +17,30 @@ import { InputRule, inputRules, textblockTypeInputRule, undoInputRule, wrappingI
 import { keymap } from "prosemirror-keymap";
 import { liftListItem, sinkListItem, splitListItem } from "prosemirror-schema-list";
 import { highlightCode, normalizeCodeLanguage } from "../../shared/codeLanguages";
+
+interface HighlightToken { from: number; to: number; className: string }
+// Each highlight pass covers every code block in the draft. Remember recent
+// results so editing one block does not re-tokenize (and re-parse as HTML) the rest.
+const highlightCache = new Map<string, readonly HighlightToken[]>();
+const HIGHLIGHT_CACHE_LIMIT = 16;
+
+function highlightTokens(text: string, language: string): readonly HighlightToken[] {
+  const key = language + "\u0000" + text;
+  const hit = highlightCache.get(key);
+  if (hit) return hit;
+  const root = document.createElement("div");
+  root.innerHTML = highlightCode(text, language);
+  const tokens: HighlightToken[] = [];
+  let offset = 0;
+  for (const child of Array.from(root.childNodes)) {
+    const length = child.textContent?.length || 0;
+    if (child instanceof HTMLElement && child.className && length) tokens.push({ from: offset, to: offset + length, className: child.className });
+    offset += length;
+  }
+  highlightCache.set(key, tokens);
+  if (highlightCache.size > HIGHLIGHT_CACHE_LIMIT) highlightCache.delete(highlightCache.keys().next().value as string);
+  return tokens;
+}
 import type { MentionItem } from "../types";
 
 export interface ComposerCodeBlock {
@@ -425,6 +449,7 @@ export class ComposerEditor {
     return true;
   }
 
+  /** Unchanged code blocks reuse their token ranges; only edited blocks are re-highlighted. */
   private scheduleHighlight(): void {
     if (this.highlightTimer) clearTimeout(this.highlightTimer);
     this.highlightTimer = setTimeout(() => {
@@ -436,15 +461,8 @@ export class ComposerEditor {
         if (node.type !== schema.nodes.code_block || remaining <= 0) return;
         const text = node.textContent.slice(0, Math.min(64_000, remaining));
         remaining -= text.length;
-        const root = document.createElement("div");
-        root.innerHTML = highlightCode(text, node.attrs.language || "auto");
-        let offset = 0;
-        for (const child of Array.from(root.childNodes)) {
-          const length = child.textContent?.length || 0;
-          if (child instanceof HTMLElement && child.className && length) {
-            decorations.push(Decoration.inline(position + 1 + offset, position + 1 + offset + length, { class: child.className }));
-          }
-          offset += length;
+        for (const token of highlightTokens(text, node.attrs.language || "auto")) {
+          decorations.push(Decoration.inline(position + 1 + token.from, position + 1 + token.to, { class: token.className }));
         }
         return false;
       });

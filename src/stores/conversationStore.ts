@@ -8,7 +8,12 @@
  */
 
 import * as vscode from "vscode";
-import { randomUUID } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as syncFs from "node:fs";
+import * as path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { atomicWrite } from "./durableFiles";
+import { logError } from "../logging";
 import type { Step } from "../agent/types";
 import type { Turn } from "../shared/turns";
 import type { ContextState } from "../agent/contextState";
@@ -89,27 +94,73 @@ export function trimArchivedConversation(conversation: Conversation): Conversati
 const KEY = "ocursor.conversations";
 const ACTIVE_KEY = "ocursor.activeConversation";
 const UI_KEY = "ocursor.chatWorkspace.v1";
+/** Composer drafts arrive per keystroke; storage only needs the settled text. */
+const UI_WRITE_DELAY_MS = 250;
+/** Transcript bodies kept in memory once their file is current (LRU beyond this). */
+const MAX_LOADED_BODIES = 8;
+const BODY_PREFIX = "body:";
 
 type ConversationMetadata = Omit<Conversation, "steps" | "turns" | "contextState" | "runEvents">;
-type PendingWrite = { snapshot: unknown; waiters: { resolve: () => void; reject: (error: unknown) => void }[] };
+type Snapshot = unknown | (() => unknown);
+type PendingWrite = { snapshot: Snapshot; waiters: { resolve: () => void; reject: (error: unknown) => void }[] };
 type StoreState = {
   conversations: Conversation[]; ui: ChatWorkspaceState; writes: Promise<void>;
   pendingWrites: Map<string, PendingWrite>; draining?: Promise<void>;
   ready: Promise<void>; latestWrites: Map<string, Promise<void>>;
+  /** Per-conversation transcript files; undefined keeps everything in the Memento. */
+  directory?: string;
+  /** File-backed conversations whose transcript is not currently in memory. */
+  unloaded: Set<string>;
+  /** Transcripts that must stay inline in the Memento (legacy data, or a failed file write). */
+  inline: Set<string>;
+  /** Unloaded conversations saved with an unsettled run (restart recovery). */
+  openRuns: Set<string>;
+  recent: Map<string, number>; tick: number;
+  inFlight?: string;
+  uiTimer?: ReturnType<typeof setTimeout>;
+  uiWaiters: { resolve: () => void; reject: (error: unknown) => void }[];
 };
 // A single synchronous view per workspace prevents competing live sessions from
 // losing each other's changes while VS Code asynchronously flushes its Memento.
 const sharedStates = new WeakMap<vscode.Memento, StoreState>();
 type ConversationPatch = Partial<Pick<Conversation, "steps" | "contextState" | "turns" | "title" | "personaId" | "usedTokens" | "archivedAt" | "goal" | "queue" | "reviewTarget" | "runEvents" | "steeringQueue" | "steering" | "workspaceRoot" | "allowModelOutputEdits">>;
+const BODY_KEYS = ["turns", "steps", "contextState", "runEvents"] as const;
+type StoredConversation = Conversation & { bodyInFile?: true; openRun?: true };
+
+function hasOpenRun(turns: Turn[] | undefined): boolean {
+  return !!turns?.some((turn) => turn.role === "assistant" && turn.startedAt != null && turn.endedAt == null);
+}
+function withoutBody(conversation: Conversation): Conversation {
+  const result = { ...conversation } as Partial<Conversation>;
+  delete result.steps; delete result.turns; delete result.contextState; delete result.runEvents;
+  return result as Conversation;
+}
+
+/**
+ * VS Code serializes an extension's entire Memento (and ships it to the main
+ * process) on every update. Keeping transcripts there made each streaming save
+ * and each draft keystroke reserialize every conversation in the workspace, so
+ * transcripts live in one file per conversation and the Memento holds metadata.
+ */
+function transcriptDirectory(context: vscode.ExtensionContext): string | undefined {
+  const base = context.storageUri?.fsPath ?? context.globalStorageUri?.fsPath;
+  return base ? path.join(base, "conversations") : undefined;
+}
 
 export class ConversationStore {
   private readonly cache: StoreState;
   constructor(private readonly context: vscode.ExtensionContext) {
     const existing = sharedStates.get(context.workspaceState);
     if (existing) { this.cache = existing; return; }
-    const current = context.workspaceState.get<Conversation[]>(KEY);
-    const old = context.globalState.get<Conversation[]>(KEY);
-    this.cache = { conversations: structuredClone(current ?? old ?? []), ui: context.workspaceState.get<ChatWorkspaceState>(UI_KEY) ?? { openTabs: [], drafts: {} }, writes: Promise.resolve(), pendingWrites: new Map(), ready: Promise.resolve(), latestWrites: new Map() };
+    const current = context.workspaceState.get<StoredConversation[]>(KEY);
+    const old = context.globalState.get<StoredConversation[]>(KEY);
+    const directory = transcriptDirectory(context);
+    this.cache = {
+      conversations: [], ui: context.workspaceState.get<ChatWorkspaceState>(UI_KEY) ?? { openTabs: [], drafts: {} }, writes: Promise.resolve(),
+      pendingWrites: new Map(), ready: Promise.resolve(), latestWrites: new Map(), directory,
+      unloaded: new Set(), inline: new Set(), openRuns: new Set(), recent: new Map(), tick: 0, uiWaiters: [],
+    };
+    this.cache.conversations = structuredClone(current ?? old ?? []).map((stored) => this.adopt(stored));
     sharedStates.set(context.workspaceState, this.cache);
     if (!current && old?.length) {
       this.cache.writes = Promise.resolve(this.state.update(KEY, structuredClone(old))).then(async () => {
@@ -120,6 +171,22 @@ export class ConversationStore {
       });
     }
     this.cache.ready = this.cache.writes;
+    // Move inline (pre-file) transcripts out of the Memento in the background.
+    for (const id of this.cache.inline) void this.queueWrite(BODY_PREFIX + id, id).catch(() => {});
+  }
+
+  /** Normalize one persisted record into the in-memory cache representation. */
+  private adopt(stored: StoredConversation): Conversation {
+    const { bodyInFile, openRun, ...conversation } = stored;
+    const inlineBody = (conversation.turns?.length ?? 0) > 0 || (conversation.steps?.length ?? 0) > 0 || conversation.contextState !== undefined || (conversation.runEvents?.length ?? 0) > 0;
+    if (this.cache.directory && bodyInFile && !inlineBody) {
+      this.cache.unloaded.add(conversation.id);
+      if (openRun) this.cache.openRuns.add(conversation.id);
+      return withoutBody(conversation as Conversation);
+    }
+    const result = { ...conversation, turns: conversation.turns ?? [], steps: conversation.steps ?? [] } as Conversation;
+    if (this.cache.directory) this.cache.inline.add(result.id);
+    return result;
   }
 
   /** workspaceState = per-workspace storage; VS Code scopes it for us. */
@@ -127,8 +194,12 @@ export class ConversationStore {
     return this.context.workspaceState;
   }
 
+  private bodyFile(id: string): string {
+    return path.join(this.cache.directory!, `${createHash("sha256").update(id).digest("hex").slice(0, 32)}.json`);
+  }
+
   /** Keep only the latest pending snapshot per key when storage falls behind. */
-  private queueWrite(key: string, snapshot: unknown): Promise<void> {
+  private queueWrite(key: string, snapshot: Snapshot): Promise<void> {
     const pending = this.cache.pendingWrites.get(key) ?? { snapshot, waiters: [] };
     pending.snapshot = snapshot;
     const written = new Promise<void>((resolve, reject) => pending.waiters.push({ resolve, reject }));
@@ -142,12 +213,16 @@ export class ConversationStore {
             const batch = this.cache.pendingWrites;
             this.cache.pendingWrites = new Map();
             for (const [key, value] of batch) {
+              this.cache.inFlight = key;
               try {
-                await this.state.update(key, value.snapshot);
+                if (key.startsWith(BODY_PREFIX)) await this.writeBody(key.slice(BODY_PREFIX.length));
+                else await this.state.update(key, typeof value.snapshot === "function" ? (value.snapshot as () => unknown)() : value.snapshot);
                 for (const waiter of value.waiters) waiter.resolve();
               } catch (error) {
                 failure ??= error;
                 for (const waiter of value.waiters) waiter.reject(error);
+              } finally {
+                this.cache.inFlight = undefined;
               }
             }
           }
@@ -155,6 +230,7 @@ export class ConversationStore {
         } finally {
           this.cache.draining = undefined;
         }
+        this.trimLoaded();
       });
       this.cache.draining = this.cache.writes = next;
       void next.catch(() => {});
@@ -162,30 +238,137 @@ export class ConversationStore {
     return written;
   }
 
-  private persist(list: Conversation[]): Promise<void> {
+  /** Write one transcript file; a failure keeps that transcript inline in the Memento instead. */
+  private async writeBody(id: string): Promise<void> {
+    const directory = this.cache.directory!;
+    const file = this.bodyFile(id);
+    const conversation = this.cache.conversations.find((c) => c.id === id);
+    if (!conversation) { await fs.rm(file, { force: true }); return; }
+    if (this.cache.unloaded.has(id)) return;
+    const json = JSON.stringify({ version: 1, id, turns: conversation.turns, steps: conversation.steps, contextState: conversation.contextState, runEvents: conversation.runEvents });
+    try {
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+      await atomicWrite(file, json);
+    } catch (error) {
+      if (!this.cache.inline.has(id) && this.cache.conversations.some((c) => c.id === id)) {
+        this.cache.inline.add(id);
+        void this.queueWrite(KEY, () => this.snapshotList()).catch(() => {});
+      }
+      throw error;
+    }
+    if (this.cache.inline.delete(id)) void this.queueWrite(KEY, () => this.snapshotList()).catch(() => {});
+  }
+
+  /** The Memento record: metadata for file-backed transcripts, full records otherwise. */
+  private snapshotList(): unknown[] {
+    if (!this.cache.directory) return this.cache.conversations;
+    return this.cache.conversations.map((conversation) => {
+      if (this.cache.inline.has(conversation.id)) return conversation;
+      const open = this.cache.unloaded.has(conversation.id) ? this.cache.openRuns.has(conversation.id) : hasOpenRun(conversation.turns);
+      // Empty placeholders keep older extension versions from crashing on a downgrade.
+      return { ...withoutBody(conversation), turns: [], steps: [], bodyInFile: true, ...(open ? { openRun: true } : {}) };
+    });
+  }
+
+  /** Read a file-backed transcript into memory (synchronously; first access only). */
+  private load(id: string): Conversation | undefined {
+    const index = this.cache.conversations.findIndex((c) => c.id === id);
+    if (index < 0) return undefined;
+    this.cache.recent.set(id, ++this.cache.tick);
+    const current = this.cache.conversations[index];
+    if (!this.cache.unloaded.has(id)) return current;
+    const file = this.bodyFile(id);
+    let body: Partial<Conversation> = {};
+    try {
+      body = JSON.parse(syncFs.readFileSync(file, "utf8"));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code && code !== "ENOENT") throw error;
+      if (!code) {
+        // Corrupt JSON: preserve it for recovery rather than overwriting it later.
+        try { syncFs.renameSync(file, `${file}.corrupt-${Date.now()}`); } catch { /* best effort */ }
+        logError("conversation.load", error, { conversationId: id });
+      }
+    }
+    const loaded: Conversation = {
+      ...current, turns: Array.isArray(body.turns) ? body.turns : [], steps: Array.isArray(body.steps) ? body.steps : [],
+      ...(body.contextState !== undefined ? { contextState: body.contextState } : {}),
+      ...(body.runEvents !== undefined ? { runEvents: body.runEvents } : {}),
+    };
+    // Copy-on-write: earlier list snapshots stay immutable.
+    const list = [...this.cache.conversations];
+    list[index] = loaded;
+    this.cache.conversations = list;
+    this.cache.unloaded.delete(id);
+    this.cache.openRuns.delete(id);
+    return loaded;
+  }
+
+  /** Release clean, least-recently-used transcripts; their files are current. */
+  private trimLoaded(): void {
+    if (!this.cache.directory) return;
+    const candidates = this.cache.conversations.filter((c) => !this.cache.unloaded.has(c.id));
+    let excess = candidates.length - MAX_LOADED_BODIES;
+    if (excess <= 0) return;
+    const busy = (id: string) => this.cache.inline.has(id) || this.cache.pendingWrites.has(BODY_PREFIX + id) || this.cache.inFlight === BODY_PREFIX + id;
+    const order = candidates.filter((c) => !busy(c.id)).sort((a, b) => (this.cache.recent.get(a.id) ?? 0) - (this.cache.recent.get(b.id) ?? 0));
+    let list: Conversation[] | undefined;
+    for (const conversation of order) {
+      if (excess-- <= 0) break;
+      list ??= [...this.cache.conversations];
+      const index = list.indexOf(conversation);
+      if (hasOpenRun(conversation.turns)) this.cache.openRuns.add(conversation.id);
+      list[index] = withoutBody(conversation);
+      this.cache.unloaded.add(conversation.id);
+      this.cache.recent.delete(conversation.id);
+    }
+    if (list) this.cache.conversations = list;
+  }
+
+  private persist(list: Conversation[], bodies: string[] = []): Promise<void> {
     // Clone incoming patches, preserving immutable untouched transcripts.
     this.cache.conversations = list;
-    return this.queueWrite(KEY, list);
+    const writes = this.cache.directory ? bodies.map((id) => this.queueWrite(BODY_PREFIX + id, id)) : [];
+    const metadata = this.queueWrite(KEY, () => this.snapshotList());
+    return writes.length ? Promise.all([...writes, metadata]).then(() => {}) : metadata;
   }
 
   list(options: { archived?: boolean; query?: string } = {}): ConversationSummary[] {
     const query = options.query?.trim().toLocaleLowerCase();
-    return this.cache.conversations
+    const result = this.cache.conversations
       .filter((c) => options.archived === undefined || !!c.archivedAt === options.archived)
       .map((c) => {
-        const transcript = query ? turnsToTranscript(c.turns, Number.MAX_SAFE_INTEGER) : "";
-        const match = transcript.toLocaleLowerCase().indexOf(query ?? "");
         const titleMatch = !query || c.title.toLocaleLowerCase().includes(query);
+        const transcript = query ? turnsToTranscript(this.loadSafely(c.id)?.turns ?? [], Number.MAX_SAFE_INTEGER) : "";
+        const match = transcript.toLocaleLowerCase().indexOf(query ?? "");
         return { ...c, matches: titleMatch || match >= 0, excerpt: query && match >= 0 ? transcript.slice(Math.max(0, match - 45), match + 160).replace(/\s+/g, " ") : undefined };
       })
       .filter((c) => c.matches)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt, archivedAt: c.archivedAt, excerpt: c.excerpt, ...(c.allowModelOutputEdits ? { allowModelOutputEdits: true } : {}) }));
+    if (query) this.trimLoaded();
+    return result;
+  }
+
+  private loadSafely(id: string): Conversation | undefined {
+    try { return this.load(id); } catch (error) { logError("conversation.load", error, { conversationId: id }); return undefined; }
+  }
+
+  /** Cheap existence check that never reads or copies a transcript. */
+  has(id: string): boolean {
+    return this.cache.conversations.some((c) => c.id === id);
   }
 
   get(id: string): Conversation | undefined {
-    const conversation = this.cache.conversations.find((c) => c.id === id);
-    return conversation ? structuredClone(conversation) : undefined;
+    const conversation = this.loadSafely(id);
+    if (!conversation) {
+      const metadata = this.cache.conversations.find((c) => c.id === id);
+      // An unreadable transcript is shown empty but never overwritten (update() rejects).
+      return metadata ? { ...structuredClone(metadata), turns: [], steps: [] } : undefined;
+    }
+    const copy = structuredClone(conversation);
+    this.trimLoaded();
+    return copy;
   }
 
   getMetadata(id: string): ConversationMetadata | undefined {
@@ -198,9 +381,7 @@ export class ConversationStore {
   }
 
   private metadata(conversation: Conversation): ConversationMetadata {
-    const result = { ...conversation } as Partial<Conversation>;
-    delete result.steps; delete result.turns; delete result.contextState; delete result.runEvents;
-    return structuredClone(result) as ConversationMetadata;
+    return structuredClone(withoutBody(conversation)) as ConversationMetadata;
   }
 
   getActiveId(): string | undefined {
@@ -223,15 +404,21 @@ export class ConversationStore {
       personaId,
     };
     const list = [...this.cache.conversations, conv];
+    this.cache.recent.set(conv.id, ++this.cache.tick);
+    // A missing transcript file reads as empty, so a new chat writes only metadata.
     await this.persist(list);
     await this.setActiveId(conv.id);
     return structuredClone(conv);
   }
 
   update(id: string, patch: ConversationPatch): Promise<void> {
+    if (!this.cache.conversations.some((c) => c.id === id)) return Promise.resolve();
+    const needsBody = BODY_KEYS.some((key) => key in patch) || patch.archivedAt !== undefined;
+    if (needsBody && this.cache.unloaded.has(id)) {
+      try { this.load(id); } catch (error) { return Promise.reject(error); }
+    }
     const list = [...this.cache.conversations];
     const i = list.findIndex((c) => c.id === id);
-    if (i === -1) return Promise.resolve();
     const current = list[i];
     // Frequent saves (token usage, goal counters, unchanged turns) must not
     // rewrite the whole store when nothing actually changed.
@@ -247,14 +434,18 @@ export class ConversationStore {
     const changes = Object.fromEntries(changed.map((key) => [key, patch[key]])) as ConversationPatch;
     if (changes.runEvents) changes.runEvents = capRunEvents(changes.runEvents);
     let next: Conversation = { ...current, ...structuredClone(changes), updatedAt: Date.now() };
-    if (changes.archivedAt && !current.archivedAt) next = trimArchivedConversation(next);
+    let bodyChanged = changed.some((key) => (BODY_KEYS as readonly string[]).includes(key));
+    if (changes.archivedAt && !current.archivedAt) { next = trimArchivedConversation(next); bodyChanged = true; }
     list[i] = next;
-    return this.persist(list);
+    this.cache.recent.set(id, ++this.cache.tick);
+    return this.persist(list, bodyChanged ? [id] : []);
   }
 
   async delete(id: string): Promise<void> {
     const list = this.cache.conversations.filter((c) => c.id !== id);
-    await this.persist(list);
+    this.cache.unloaded.delete(id); this.cache.inline.delete(id); this.cache.openRuns.delete(id); this.cache.recent.delete(id);
+    // writeBody removes the transcript file of a conversation that no longer exists.
+    await this.persist(list, [id]);
     if (this.getActiveId() === id) {
       await this.setActiveId(undefined);
     }
@@ -276,12 +467,13 @@ export class ConversationStore {
       archivedAt: undefined, queue: [], runEvents: [], goal: undefined, steeringQueue: [], steering: [],
     };
     list[index] = fork;
-    await this.persist(list);
+    this.cache.unloaded.delete(fork.id);
+    await this.persist(list, [fork.id]);
     return structuredClone(fork);
   }
 
   async enqueue(id: string, message: QueuedMessage): Promise<boolean> {
-    const conversation = this.cache.conversations.find(conversation => conversation.id === id);
+    const conversation = this.load(id);
     if (!conversation) throw new Error("Conversation no longer exists.");
     // Retransmission from the UI must not enqueue the same accepted request twice.
     if (conversation.queue?.some((item) => item.id === message.id)
@@ -297,14 +489,18 @@ export class ConversationStore {
   }
 
   async recoverInterruptedRuns(): Promise<void> {
+    // Only transcripts saved mid-run need reading; others stay on disk.
+    for (const id of [...this.cache.openRuns]) this.loadSafely(id);
     const list = this.cache.conversations.map(conversation => ({ ...conversation }));
     let changed = false;
+    const bodies: string[] = [];
     for (const conversation of list) {
-      if (conversation.turns.some((turn) => turn.role === "assistant" && turn.startedAt != null && turn.endedAt == null)) {
+      if (!this.cache.unloaded.has(conversation.id) && hasOpenRun(conversation.turns)) {
         // A restarted host cannot know the exact interruption time. Use the
         // last saved snapshot instead of counting time while the IDE was shut.
         conversation.turns = forceSettleOpenWork(conversation.turns, "cancelled", conversation.updatedAt);
         changed = true;
+        bodies.push(conversation.id);
       }
       conversation.queue = (conversation.queue ?? []).map((item) => {
         if (item.status !== "running") return item;
@@ -328,7 +524,7 @@ export class ConversationStore {
         changed = true;
       }
     }
-    if (changed) await this.persist(list);
+    if (changed) await this.persist(list, bodies);
   }
 
   getWorkspaceState(): ChatWorkspaceState {
@@ -338,19 +534,40 @@ export class ConversationStore {
   }
 
   async setWorkspaceState(patch: Partial<ChatWorkspaceState>): Promise<void> {
-    const current = this.getWorkspaceState();
-    const snapshot = { ...current, ...structuredClone(patch) };
-    this.cache.ui = snapshot;
-    await this.queueWrite(UI_KEY, snapshot);
+    const current = this.cache.ui;
+    const existing = new Set(this.cache.conversations.map((c) => c.id));
+    // The cache owns its snapshot; only the caller's patch needs copying.
+    this.cache.ui = {
+      openTabs: [...new Set(current?.openTabs ?? [])].filter((id) => id === "" || existing.has(id)), drafts: current?.drafts ?? {},
+      ...structuredClone(patch),
+    };
+    // Drafts arrive per keystroke: coalesce them into one storage write.
+    const written = new Promise<void>((resolve, reject) => this.cache.uiWaiters.push({ resolve, reject }));
+    this.cache.uiTimer ??= setTimeout(() => this.releaseWorkspaceState(), UI_WRITE_DELAY_MS);
+    await written;
+  }
+
+  private releaseWorkspaceState(): void {
+    if (this.cache.uiTimer) clearTimeout(this.cache.uiTimer);
+    this.cache.uiTimer = undefined;
+    const waiters = this.cache.uiWaiters.splice(0);
+    if (!waiters.length) return;
+    this.queueWrite(UI_KEY, () => this.cache.ui).then(
+      () => { for (const waiter of waiters) waiter.resolve(); },
+      (error) => { for (const waiter of waiters) waiter.reject(error); },
+    );
   }
 
   async appendRunEvent(id: string, event: { runId: string; type: string; at: number; data?: unknown }): Promise<void> {
-    const conversation = this.cache.conversations.find(conversation => conversation.id === id);
+    const conversation = this.load(id);
     if (conversation) await this.update(id, { runEvents: [...conversation.runEvents ?? [], event] });
   }
 
   /** A barrier for writes already submitted; later token saves cannot extend it. */
-  flush(): Promise<void> { return Promise.all([this.cache.ready, ...this.cache.latestWrites.values()]).then(() => {}); }
+  flush(): Promise<void> {
+    this.releaseWorkspaceState();
+    return Promise.all([this.cache.ready, ...this.cache.latestWrites.values()]).then(() => {});
+  }
 }
 
 /** Derive a short title from the first user message. */

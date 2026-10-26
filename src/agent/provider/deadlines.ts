@@ -16,29 +16,32 @@ export async function* withStreamDeadline<T>(
   const combined = AbortSignal.any([signal, controller.signal]);
   const iterator = source(combined);
   let first = true;
+  // One abort listener for the whole stream instead of adding and removing one
+  // per token event. (A single long-lived race promise would instead retain a
+  // reaction per event, so each wait still gets its own short-lived promise.)
+  let rejectWait: ((reason: unknown) => void) | undefined;
+  const onAbort = () => rejectWait?.(combined.reason ?? new DOMException("Aborted", "AbortError"));
+  combined.addEventListener("abort", onAbort, { once: true });
   try {
     for (;;) {
       combined.throwIfAborted();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let onAbort: (() => void) | undefined;
+      // The deadline only covers waiting on the provider, never the consumer.
+      const timer = setTimeout(() => controller.abort(new Error(first
+        ? "Provider did not begin responding before the connection deadline. Check the endpoint or local model readiness."
+        : "Provider stream stalled before completion. Received output was preserved; no tools were replayed.")), first ? firstEventMs : idleMs);
+      let result: IteratorResult<T>;
       try {
-        const deadline = new Promise<never>((_, reject) => {
-          onAbort = () => reject(combined.reason ?? new DOMException("Aborted", "AbortError"));
-          combined.addEventListener("abort", onAbort, { once: true });
-          timer = setTimeout(() => controller.abort(new Error(first
-            ? "Provider did not begin responding before the connection deadline. Check the endpoint or local model readiness."
-            : "Provider stream stalled before completion. Received output was preserved; no tools were replayed.")), first ? firstEventMs : idleMs);
-        });
-        const result = await Promise.race([iterator.next(), deadline]);
-        if (result.done) return;
-        first = false;
-        yield result.value;
+        result = await Promise.race([iterator.next(), new Promise<never>((_, reject) => { rejectWait = reject; })]);
       } finally {
-        if (timer) clearTimeout(timer);
-        if (onAbort) combined.removeEventListener("abort", onAbort);
+        rejectWait = undefined;
+        clearTimeout(timer);
       }
+      if (result.done) return;
+      first = false;
+      yield result.value;
     }
   } finally {
+    combined.removeEventListener("abort", onAbort);
     controller.abort();
     // A broken provider must not hold cleanup forever by ignoring cancellation.
     void iterator.return(undefined as never).catch(() => {});

@@ -46,6 +46,7 @@ function loadTheme(): { themeDir: string; theme: any } | null {
 export function invalidateFileIconCache() {
   cached = undefined;
   resolved.clear();
+  dataUris.clear();
   langMaps = undefined;
 }
 

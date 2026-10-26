@@ -19,6 +19,15 @@ describe("provider stream deadlines", () => {
     expect((await source.next()).value).toBe("partial");
     await expect(source.next()).rejects.toThrow("stalled");
   });
+  it("does not count consumer time against the idle deadline and keeps every event", async () => {
+    const source = withStreamDeadline(async function* () { for (let i = 0; i < 500; i++) yield i; }, new AbortController().signal, 1000, 20);
+    const seen: number[] = [];
+    for await (const value of source) {
+      seen.push(value);
+      if (value === 3) await new Promise(resolve => setTimeout(resolve, 60));
+    }
+    expect(seen).toHaveLength(500);
+  });
   it("cancels a blocked read immediately", async () => {
     const abort = new AbortController();
     const source = withStreamDeadline(async function* () { await new Promise(() => {}); yield 1; }, abort.signal);

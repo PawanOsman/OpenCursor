@@ -228,7 +228,15 @@ function probeRg(cmd: string): Promise<boolean> {
 }
 
 /** Absolute path or bare command for ripgrep; null when unavailable. */
-export async function rgCommand(): Promise<string | null> {
+let rgProbe: Promise<string | null> | undefined;
+export function rgCommand(): Promise<string | null> {
+  if (rgPathCached !== undefined) return Promise.resolve(rgPathCached);
+  // Concurrent first searches share one probe instead of each spawning rg.
+  rgProbe ??= locateRg().finally(() => { rgProbe = undefined; });
+  return rgProbe;
+}
+
+async function locateRg(): Promise<string | null> {
   if (rgPathCached !== undefined) return rgPathCached;
   for (const cand of bundledRgCandidates()) {
     try {
@@ -317,6 +325,8 @@ export interface BgShell {
   /** Live-output sink (streams the rendered card to the UI while running). */
   onChunk?: (chunk: string) => void;
   outputListeners?: Set<(chunk: string) => void>;
+  /** Woken once when the job settles, so waiters need not poll for `done`. */
+  settleListeners?: Set<() => void>;
   /** Disposes process-lifetime listeners/timers; never persisted with the job metadata. */
   cleanup?: () => void;
   abort?: () => void;
@@ -747,9 +757,21 @@ export async function disposeShellSession(key: string): Promise<void> {
   shellSessions.delete(key);
 }
 
+/** Mark a job's settlement to waiters; call after setting `done`. */
+export function notifyShellSettled(sh: BgShell): void {
+  for (const listener of [...(sh.settleListeners ?? [])]) {
+    try { listener(); } catch { /* a waiter must not interrupt settlement */ }
+  }
+}
+
+/** Fallback poll for jobs settled without notifyShellSettled (and for `pump`). */
+const SHELL_POLL_MS = 250;
+
 /**
  * Wait until the shell finishes, `pattern` matches its output, or `ms` elapses.
  * Always resolves (never rejects). `ms <= 0` = one immediate pump + return.
+ * Completion and output are event-driven; arriving chunks are matched as they
+ * stream, so the slow fallback poll never rescans the retained preview.
  */
 export function waitForShell(sh: BgShell, ms: number, pattern?: RegExp, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -762,10 +784,12 @@ export function waitForShell(sh: BgShell, ms: number, pattern?: RegExp, signal?:
       if (timer) clearTimeout(timer);
       if (interval) clearInterval(interval);
       sh.outputListeners?.delete(onOutput);
+      sh.settleListeners?.delete(onSettled);
       signal?.removeEventListener("abort", onAbort);
       resolve();
     };
     const onAbort = () => finish();
+    const onSettled = () => finish();
     let recent = sh.output?.slice(-Math.floor(SHELL_OUTPUT_LIMITS.memoryChars * 3 / 4)) ?? "";
     const onOutput = (chunk: string) => {
       if (!pattern) return;
@@ -782,12 +806,18 @@ export function waitForShell(sh: BgShell, ms: number, pattern?: RegExp, signal?:
       sh.outputListeners ??= new Set();
       sh.outputListeners.add(onOutput);
     }
+    sh.settleListeners ??= new Set();
+    sh.settleListeners.add(onSettled);
 
     const deadline = Date.now() + Math.max(0, ms);
+    let scanned = false;
     const check = () => {
       try { sh.pump?.(); } catch { /* ignore */ }
       if (sh.done) return finish();
-      if (pattern) {
+      // Output retained before the wait began is scanned once; later chunks
+      // are matched by onOutput as they arrive.
+      if (pattern && !scanned) {
+        scanned = true;
         try {
           const shortened = (sh.outputChars ?? sh.output.length) > sh.output.length;
           const head = Math.floor(SHELL_OUTPUT_LIMITS.memoryChars / 4);
@@ -799,9 +829,9 @@ export function waitForShell(sh: BgShell, ms: number, pattern?: RegExp, signal?:
       }
       if (ms <= 0 || Date.now() >= deadline) return finish();
     };
-    // Hard wall-clock: never tick forever even if setInterval stalls.
-    timer = setTimeout(finish, Math.max(ms, 0) + 250);
-    interval = setInterval(check, 50);
+    // Wall-clock deadline; the poll only backs up settlement notification.
+    timer = setTimeout(finish, Math.max(ms, 0));
+    interval = setInterval(check, SHELL_POLL_MS);
     check();
   });
 }

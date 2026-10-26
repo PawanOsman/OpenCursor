@@ -33,3 +33,23 @@ export async function durableWrite(file: string, contents: string | Buffer): Pro
     await syncDirectory(path.dirname(file));
   } finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
 }
+/**
+ * Atomic replace without fsync: readers never observe a torn file, but the
+ * write may be lost on power failure. For frequently rewritten caches/snapshots
+ * whose durability matches VS Code's own Memento storage.
+ */
+export async function atomicWrite(file: string, contents: string | Buffer): Promise<void> {
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporary, contents, { mode: 0o600, flag: "wx" });
+    // Windows can briefly refuse a rename while a scanner/indexer holds the target.
+    for (let attempt = 0; ; attempt++) {
+      try { await fs.rename(temporary, file); break; }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (attempt >= 4 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+      }
+    }
+  } finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
+}

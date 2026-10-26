@@ -9,8 +9,9 @@
 
 // Real local semantic codebase index.
 // - Embeddings: @huggingface/transformers + onnxruntime-node
-//   (Xenova/all-MiniLM-L6-v2, q8). GPU when available (DML/CUDA/CoreML/WebGPU),
-//   else CPU with a bounded thread pool so the extension host stays responsive.
+//   (Xenova/all-MiniLM-L6-v2, q8) in a worker thread, so inference never blocks
+//   the extension host. q8 runs on CPU with a small thread pool; float models
+//   try GPU EPs (DML/CUDA/CoreML/WebGPU) first.
 // - Chunking: sliding line-window per file (simple, language-agnostic).
 //   ponytail: line-window chunking; upgrade to tree-sitter AST chunks when
 //   ranking quality on large funcs matters.
@@ -18,14 +19,16 @@
 //   (`.vec`). Chunk text is NOT kept in memory; snippets are read from disk for
 //   the top-k hits only.
 //   ponytail: O(n) cosine scan; swap for sqlite-vec/HNSW when repo > ~50k chunks.
-// - Incremental: per-file mtime hash skips unchanged files on re-index.
+// - Incremental: per-file mtime/size/content hash skips unchanged files; per-chunk
+//   text hashes reuse vectors for unchanged chunks of an edited file.
 
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
 import { scanFiles, isPathExcluded } from "./tools/fileScan";
-import { importRuntimeDep } from "../runtimeDeps";
+import { Worker } from "worker_threads";
+import { importRuntimeDep, resolveRuntimeDepEntry } from "../runtimeDeps";
 import type { ApiKeyPool } from "./provider/apiKeyPool";
 
 // Selectable local embedding models. Add entries here to offer more choices.
@@ -112,6 +115,13 @@ const MAX_VECTOR_BYTES = 64 * 1024 * 1024;
 const MAX_INDEX_CHUNKS = 50_000;
 const MAX_METADATA_BYTES = 16 * 1024 * 1024;
 const EMBED_IDLE_MS = 60_000;
+/** Background batches wait until the editor has been quiet this long... */
+const USER_QUIET_MS = 1_500;
+/** ...but never longer than this per batch, so indexing still progresses. */
+const USER_DEFER_MAX_MS = 10_000;
+/** Snapshots above this size are written after a quiet period instead of per save. */
+const IMMEDIATE_SAVE_BYTES = 4 * 1024 * 1024;
+const DEFERRED_SAVE_MS = 15_000;
 /** Source / doc extensions worth embedding. No binaries, lockfiles, or assets. */
 const EMBED_EXTS = new Set([
   ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs",
@@ -154,6 +164,8 @@ export interface Chunk {
   path: string; // workspace-relative, posix
   start: number; // 1-based, inclusive
   end: number; // 1-based, inclusive
+  /** Short hash of the embedded chunk text; lets edits reuse unchanged vectors. */
+  hash?: string;
 }
 
 /**
@@ -178,7 +190,7 @@ interface MetaFile {
   model: string;
   dim: number;
   files: Record<string, string>;
-  metas: [string, number, number][]; // [path, start, end] — compact on disk
+  metas: ([string, number, number] | [string, number, number, string])[]; // [path, start, end, hash?] — compact on disk
 }
 
 let storageDir: string | undefined;
@@ -188,37 +200,213 @@ export function setIndexStorageDir(dir: string): void {
 
 // ---- Embedder (lazy, singleton) ----
 // ONNX Runtime Node EPs: Win→dml, Linux x64→cuda, macOS→coreml, then webgpu, then cpu.
-// transformers.js defaults to CPU only; we try GPU when available and fall back.
-function preferredEmbedDevices(): string[] {
+// Quantised (q8) models stay on the CPU EP: DirectML/WebGPU have no kernels for
+// the integer ops, so each layer bounces between GPU and CPU. Measured on
+// all-MiniLM-L6-v2 q8 (24 chunks/batch): DML 5.0 s/batch vs CPU 0.56 s/batch,
+// while also loading the GPU. Float models still try GPU EPs first.
+function preferredEmbedDevices(model: EmbedModel = activeModel): string[] {
   const order: string[] = [];
-  switch (process.platform) {
-    case "win32":
-      order.push("dml"); // DirectML (any DX12 GPU)
-      break;
-    case "linux":
-      if (process.arch === "x64") order.push("cuda"); // needs CUDA 12 + cuDNN
-      break;
-    case "darwin":
-      order.push("coreml");
-      break;
+  if (model.dtype !== "q8") {
+    switch (process.platform) {
+      case "win32":
+        order.push("dml"); // DirectML (any DX12 GPU)
+        break;
+      case "linux":
+        if (process.arch === "x64") order.push("cuda"); // needs CUDA 12 + cuDNN
+        break;
+      case "darwin":
+        order.push("coreml");
+        break;
+    }
+    order.push("webgpu");
   }
-  order.push("webgpu", "cpu");
+  order.push("cpu");
   return order;
 }
 
 /**
- * ORT defaults to one intra-op thread per core, which saturates the machine and
- * starves the extension host. Leave at least half the cores to the editor.
+ * ORT defaults to one intra-op thread per core, which saturates the machine.
+ * Background indexing gets roughly a quarter of the logical cores (two on a
+ * typical 4-core/8-thread laptop): fewer threads also cost less total CPU per
+ * batch (measured 7.2 s CPU with 2 threads vs 10.3 s with 4 for the same work).
  */
-function cpuThreadBudget(): number {
-  const cores = Math.max(1, os.cpus()?.length || 1);
-  return Math.max(1, Math.min(4, Math.floor(cores / 2)));
+export function cpuThreadBudget(cores = os.cpus()?.length || 1): number {
+  return Math.max(1, Math.min(4, Math.floor(Math.max(1, cores) / 4)));
 }
 
-let extractorP: Promise<any> | null = null;
+/** Session options for every EP: GPU sessions still run fallback kernels on CPU threads. */
+function embedSessionOptions(): Record<string, unknown> {
+  return { intraOpNumThreads: cpuThreadBudget(), interOpNumThreads: 1, executionMode: "sequential" };
+}
+
+/** A loaded embedding session, in a worker thread or (fallback) in-process. */
+interface Embedder {
+  device: string;
+  /** False once a worker crashed or exited; the next call loads a new one. */
+  alive(): boolean;
+  run(texts: string[]): Promise<number[][]>;
+  dispose(): Promise<void>;
+}
+
+/**
+ * onnxruntime-node runs inference synchronously on the calling thread, so an
+ * in-process session freezes the extension host for the whole forward pass
+ * (measured 570 ms per 24-chunk batch on a fast desktop CPU, seconds on a
+ * low-end laptop). The worker owns the native session; the host only posts
+ * texts and receives a transferred Float32Array.
+ */
+const EMBED_WORKER_SOURCE = `
+const { parentPort, workerData } = require("worker_threads");
+let pipe = null, device = null;
+const ready = (async () => {
+  const t = await import(workerData.entry);
+  t.env.allowRemoteModels = true;
+  t.env.cacheDir = workerData.cacheDir;
+  let lastErr;
+  for (const d of workerData.devices) {
+    try {
+      pipe = await t.pipeline("feature-extraction", workerData.repo, { dtype: workerData.dtype, device: d, session_options: workerData.sessionOptions });
+      device = d;
+      return;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("no embedder device available");
+})();
+ready.then(
+  () => parentPort.postMessage({ type: "ready", device }),
+  (e) => parentPort.postMessage({ type: "failed", error: String((e && e.message) || e) }),
+);
+parentPort.on("message", async (m) => {
+  if (m.type === "dispose") {
+    try { await ready; if (pipe && pipe.dispose) await pipe.dispose(); } catch {}
+    parentPort.postMessage({ type: "disposed" });
+    return;
+  }
+  let out;
+  try {
+    await ready;
+    out = await pipe(m.texts, { pooling: workerData.pooling, normalize: true });
+    const data = new Float32Array(out.data);
+    parentPort.postMessage({ type: "result", id: m.id, dims: out.dims, data }, [data.buffer]);
+  } catch (e) {
+    parentPort.postMessage({ type: "result", id: m.id, error: String((e && e.message) || e) });
+  } finally {
+    try { if (out && out.dispose) out.dispose(); } catch {}
+  }
+});
+`;
+
+async function createWorkerEmbedder(m: EmbedModel, cacheDir: string): Promise<Embedder> {
+  const entry = await resolveRuntimeDepEntry("@huggingface/transformers");
+  const worker = new Worker(EMBED_WORKER_SOURCE, {
+    eval: true,
+    workerData: { entry, cacheDir, repo: m.repo, dtype: m.dtype, pooling: m.pooling, devices: preferredEmbedDevices(m), sessionOptions: embedSessionOptions() },
+  });
+  worker.unref();
+  const pending = new Map<number, { resolve: (v: number[][]) => void; reject: (e: Error) => void }>();
+  let nextId = 0;
+  let dead: Error | null = null;
+  let onDisposed: (() => void) | null = null;
+  let settleReady!: { resolve: (device: string) => void; reject: (e: Error) => void };
+  const ready = new Promise<string>((resolve, reject) => { settleReady = { resolve, reject }; });
+  const fail = (error: Error) => {
+    if (dead) return;
+    dead = error;
+    settleReady.reject(error);
+    for (const p of pending.values()) p.reject(error);
+    pending.clear();
+    onDisposed?.();
+  };
+  worker.on("message", (msg: any) => {
+    if (msg?.type === "ready") settleReady.resolve(String(msg.device));
+    else if (msg?.type === "failed") fail(new Error(msg.error));
+    else if (msg?.type === "disposed") onDisposed?.();
+    else if (msg?.type === "result") {
+      const p = pending.get(msg.id);
+      if (!p) return;
+      pending.delete(msg.id);
+      if (msg.error) return p.reject(new Error(msg.error));
+      const [rows, dim] = msg.dims as number[];
+      const data = msg.data as Float32Array;
+      const out: number[][] = [];
+      for (let r = 0; r < rows; r++) out.push(Array.from(data.subarray(r * dim, (r + 1) * dim)));
+      p.resolve(out);
+    }
+  });
+  worker.on("error", (e) => fail(e instanceof Error ? e : new Error(String(e))));
+  worker.on("exit", (code) => fail(new Error(`embedding worker exited (${code})`)));
+  let device: string;
+  try {
+    device = await ready;
+  } catch (e) {
+    void worker.terminate();
+    throw e;
+  }
+  return {
+    device,
+    alive: () => !dead,
+    run(texts) {
+      if (dead) return Promise.reject(dead);
+      const id = ++nextId;
+      return new Promise<number[][]>((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        worker.postMessage({ type: "embed", id, texts });
+      });
+    },
+    async dispose() {
+      if (!dead) {
+        // Let the session free native memory, but never wait on a wedged worker.
+        await new Promise<void>((resolve) => {
+          onDisposed = resolve;
+          worker.postMessage({ type: "dispose" });
+          setTimeout(resolve, 2_000).unref?.();
+        });
+      }
+      dead ??= new Error("embedder disposed");
+      await worker.terminate().catch(() => 0);
+    },
+  };
+}
+
+/** Same session in the extension host. Used when worker threads are unavailable. */
+async function createInProcessEmbedder(m: EmbedModel, cacheDir: string): Promise<Embedder> {
+  const t = await importRuntimeDep("@huggingface/transformers");
+  t.env.allowRemoteModels = true;
+  t.env.cacheDir = cacheDir;
+  // ORT often fails hard if a provider's libs are missing, so probe one device
+  // at a time instead of device:"auto".
+  let lastErr: unknown;
+  for (const device of preferredEmbedDevices(m)) {
+    try {
+      const pipe = await t.pipeline("feature-extraction", m.repo, { dtype: m.dtype, device, session_options: embedSessionOptions() });
+      return {
+        device,
+        alive: () => true,
+        async run(texts) {
+          let out: any;
+          try {
+            out = await pipe(texts, { pooling: m.pooling, normalize: true });
+            return (out.tolist ? out.tolist() : out) as number[][];
+          } finally {
+            try { out?.dispose?.(); } catch {}
+          }
+        },
+        async dispose() { await pipe?.dispose?.(); },
+      };
+    } catch (e) {
+      lastErr = e;
+      console.warn(`[semanticIndex] embedder device "${device}" unavailable, trying next…`);
+    }
+  }
+  throw lastErr ?? new Error("no embedder device available");
+}
+
+let extractorP: Promise<Embedder | null> | null = null;
 let embedDevice: string | null = null;
 let localOperation: Promise<unknown> = Promise.resolve();
 let embedIdleTimer: ReturnType<typeof setTimeout> | null = null;
+/** Set once a worker cannot start at all; later loads go straight to in-process. */
+let workerUnavailable = false;
 
 /** Native sessions are shared by background indexing, documentation and chat search. */
 function withLocalOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -243,40 +431,27 @@ export function getEmbedDevice(): string | null {
   return embedDevice;
 }
 
-async function getExtractor(): Promise<any | null> {
+async function getExtractor(): Promise<Embedder | null> {
   if (!storageDir) return null;
   if (!extractorP) {
     const m = activeModel;
+    const cacheDir = path.join(storageDir, "models");
     extractorP = (async () => {
-      const t = await importRuntimeDep("@huggingface/transformers");
-      t.env.allowRemoteModels = true;
-      t.env.cacheDir = path.join(storageDir!, "models");
-      // Try GPU EPs first; ORT often fails hard if a provider's libs are missing,
-      // so probe one device at a time instead of device:"auto".
-      const devices = preferredEmbedDevices();
-      const threads = cpuThreadBudget();
-      let lastErr: unknown;
-      for (const device of devices) {
+      let ex: Embedder | null = null;
+      if (!workerUnavailable) {
         try {
-          const pipe = await t.pipeline("feature-extraction", m.repo, {
-            dtype: m.dtype,
-            device,
-            session_options:
-              device === "cpu"
-                ? { intraOpNumThreads: threads, interOpNumThreads: 1, executionMode: "sequential" }
-                : undefined,
-          });
-          embedDevice = device;
-          console.log(`[semanticIndex] embedder on ${device} (${m.id})`);
-          // UI may already be open; push device once the pipeline is ready.
-          if (memRoot) emitStatus(memRoot);
-          return pipe;
+          ex = await createWorkerEmbedder(m, cacheDir);
         } catch (e) {
-          lastErr = e;
-          console.warn(`[semanticIndex] embedder device "${device}" unavailable, trying next…`);
+          console.warn("[semanticIndex] embedding worker unavailable, using the extension host:", e);
+          workerUnavailable = true;
         }
       }
-      throw lastErr ?? new Error("no embedder device available");
+      ex ??= await createInProcessEmbedder(m, cacheDir);
+      embedDevice = ex.device;
+      console.log(`[semanticIndex] embedder on ${ex.device} (${m.id})`);
+      // UI may already be open; push device once the pipeline is ready.
+      if (memRoot) emitStatus(memRoot);
+      return ex;
     })().catch((e) => {
       console.error("[semanticIndex] embedder load failed:", e);
       extractorP = null;
@@ -298,7 +473,7 @@ export async function releaseEmbedder(): Promise<void> {
     if (!p) return;
     try {
       const ex = await p;
-      await ex?.dispose?.();
+      await ex?.dispose();
     } catch {}
     if (memRoot) emitStatus(memRoot);
   });
@@ -352,16 +527,17 @@ async function embed(texts: string[], signal?: AbortSignal): Promise<number[][] 
     signal?.throwIfAborted();
     if (fingerprint !== getEmbedFingerprint()) return null;
     clearEmbedIdleTimer();
-    let out: any;
+    let ex: Embedder | null = null;
     try {
-      const ex = await getExtractor();
+      ex = await getExtractor();
       signal?.throwIfAborted();
       if (!ex || fingerprint !== getEmbedFingerprint()) return null;
-      out = await ex(texts, { pooling: activeModel.pooling, normalize: true });
+      const vecs = await ex.run(texts);
       signal?.throwIfAborted();
-      return (out.tolist ? out.tolist() : out) as number[][];
+      return vecs;
     } finally {
-      try { out?.dispose?.(); } catch {}
+      // A crashed worker is replaced on the next call instead of failing forever.
+      if (ex && !ex.alive() && extractorP) { extractorP = null; embedDevice = null; }
       if (extractorP) scheduleEmbedRelease();
     }
   });
@@ -403,6 +579,7 @@ let indexingEnabled = true;
 export function setIndexingEnabled(on: boolean): void {
   indexingEnabled = on;
   if (!on) {
+    cancelDeferredSave(); // the next build re-detects unsaved changes by mtime
     // Drop the ONNX session and the vector matrix; both are large and idle now.
     void releaseEmbedder();
     memIndex = null;
@@ -515,7 +692,7 @@ async function load(root: string): Promise<IndexData> {
         model: meta.model,
         dim,
         files: meta.files || {},
-        metas: meta.metas.slice(0, rows).map(([p, s, e]) => ({ path: p, start: s, end: e })),
+        metas: meta.metas.slice(0, rows).map(([p, s, e, h]) => (typeof h === "string" ? { path: p, start: s, end: e, hash: h } : { path: p, start: s, end: e })),
         vecs,
         count: rows,
       };
@@ -529,6 +706,7 @@ async function load(root: string): Promise<IndexData> {
 }
 
 async function save(root: string, idx: IndexData): Promise<void> {
+  if (deferredSave?.idx === idx) cancelDeferredSave();
   if (!storageDir || idx.fingerprint !== getEmbedFingerprint()) return;
   await fs.mkdir(storageDir, { recursive: true });
   if (idx.fingerprint !== getEmbedFingerprint()) return;
@@ -542,7 +720,7 @@ async function save(root: string, idx: IndexData): Promise<void> {
     model: idx.model,
     dim: idx.dim,
     files: idx.files,
-    metas: idx.metas.map((m) => [m.path, m.start, m.end]),
+    metas: idx.metas.map((m) => (m.hash ? [m.path, m.start, m.end, m.hash] : [m.path, m.start, m.end])),
   };
   const suffix = `.${Math.random().toString(36).slice(2)}.tmp`;
   try {
@@ -554,6 +732,35 @@ async function save(root: string, idx: IndexData): Promise<void> {
     await Promise.all([fs.rm(vectorDestination + suffix, { force: true }), fs.rm(metadataDestination + suffix, { force: true })]);
   }
   if (indexingEnabled && idx.fingerprint === getEmbedFingerprint()) { memIndex = idx; memRoot = normRoot(root); }
+}
+
+/**
+ * Every snapshot rewrites and hashes the whole vector matrix (up to 64 MB). A
+ * watcher burst on a large index (auto-save while typing) would do that every
+ * second, so large snapshots are coalesced; the in-memory index stays current
+ * and an unsaved update is simply re-detected by mtime on the next build.
+ */
+let deferredSave: { root: string; idx: IndexData; timer: ReturnType<typeof setTimeout> } | null = null;
+
+function cancelDeferredSave(): void {
+  if (deferredSave) clearTimeout(deferredSave.timer);
+  deferredSave = null;
+}
+
+async function persist(root: string, idx: IndexData): Promise<void> {
+  if (idx.count * idx.dim * 4 <= IMMEDIATE_SAVE_BYTES) return save(root, idx);
+  if (deferredSave && deferredSave.idx !== idx) await flushIndexSave();
+  if (deferredSave) clearTimeout(deferredSave.timer);
+  const timer = setTimeout(() => { void flushIndexSave().catch((e) => console.error("[semanticIndex] deferred save failed:", e)); }, DEFERRED_SAVE_MS);
+  timer.unref?.();
+  deferredSave = { root, idx, timer };
+}
+
+/** Write any coalesced snapshot now (deactivate / dispose). */
+export async function flushIndexSave(): Promise<void> {
+  const pending = deferredSave;
+  cancelDeferredSave();
+  if (pending && indexingEnabled) await save(pending.root, pending.idx);
 }
 
 /** Load persisted index into memory (no embed work). Call on activate so status/UI show prior work. */
@@ -580,6 +787,30 @@ function chunkFile(text: string): { start: number; end: number; text: string }[]
     if (i + CHUNK_LINES >= lines.length) break;
   }
   return out;
+}
+
+function chunkHash(text: string): string {
+  return crypto.createHash("sha1").update(text).digest("hex").slice(0, 16);
+}
+
+let lastUserActivity = 0;
+/**
+ * Typing, or an agent turn streaming, marks the editor busy. Background
+ * embedding batches then wait for a short quiet period so they don't compete
+ * for CPU with the user's foreground work. Queries are never delayed.
+ */
+export function noteUserActivity(): void {
+  lastUserActivity = Date.now();
+}
+
+async function waitForUserQuiet(): Promise<void> {
+  const started = Date.now();
+  for (;;) {
+    const quietFor = Date.now() - lastUserActivity;
+    const waited = Date.now() - started;
+    if (quietFor >= USER_QUIET_MS || waited >= USER_DEFER_MAX_MS) return;
+    await new Promise<void>((r) => setTimeout(r, Math.min(USER_QUIET_MS - quietFor, USER_DEFER_MAX_MS - waited)));
+  }
 }
 
 let indexing = false;
@@ -701,6 +932,7 @@ function emitStatusThrottled(root: string): void {
 
 /** Delete the persisted index for a workspace. */
 export async function deleteIndex(root: string): Promise<void> {
+  cancelDeferredSave();
   memIndex = emptyIndex();
   memRoot = normRoot(root);
   progress = { done: 0, total: 0 };
@@ -741,24 +973,45 @@ function isIndexableRel(rel: string): boolean {
  * Batching is the difference between one ONNX call per chunk and one per ~24,
  * which dominates build cost.
  */
+type PendingFile = { rel: string; hash: string; total: number; received: number; failed: boolean; chunks: { meta: Chunk; vec: number[] }[] };
+
 class BatchEmbedder {
-  private queue: { meta: Chunk; text: string; file: { rel: string; hash: string; total: number; received: number; failed: boolean; chunks: { meta: Chunk; vec: number[] }[] } }[] = [];
+  private queue: { meta: Chunk; text: string; file: PendingFile }[] = [];
   private chars = 0;
 
   constructor(private readonly idx: IndexData) {}
 
   async addFile(rel: string, hash: string, pieces: ReturnType<typeof chunkFile>): Promise<void> {
-    const file = { rel, hash, total: pieces.length, received: 0, failed: false, chunks: [] as { meta: Chunk; vec: number[] }[] };
+    const file: PendingFile = { rel, hash, total: pieces.length, received: 0, failed: false, chunks: [] };
     if (!pieces.length) { dropPath(this.idx, rel); this.idx.files[rel] = hash; return; }
+    // Unchanged chunks of an edited file keep their vectors; only new text is embedded.
+    const reusable = new Map<string, number>();
+    if (this.idx.files[rel] && this.idx.dim) {
+      for (let r = 0; r < this.idx.count; r++) {
+        const m = this.idx.metas[r];
+        if (m.path === rel && m.hash) reusable.set(m.hash, r);
+      }
+    }
+    const queued: { meta: Chunk; text: string }[] = [];
     for (const piece of pieces) {
-      this.queue.push({ meta: { path: rel, start: piece.start, end: piece.end }, text: piece.text, file });
-      this.chars += piece.text.length;
+      const meta: Chunk = { path: rel, start: piece.start, end: piece.end, hash: chunkHash(piece.text) };
+      const row = reusable.get(meta.hash!);
+      if (row === undefined) { queued.push({ meta, text: piece.text }); continue; }
+      const dim = this.idx.dim;
+      file.chunks.push({ meta, vec: Array.from(this.idx.vecs.subarray(row * dim, (row + 1) * dim)) });
+      file.received++;
+    }
+    if (!queued.length) { this.complete(file); return; }
+    for (const item of queued) {
+      this.queue.push({ ...item, file });
+      this.chars += item.text.length;
       if (this.queue.length >= EMBED_BATCH_TEXTS || this.chars >= EMBED_BATCH_CHARS) await this.flush();
     }
   }
 
   async flush(): Promise<void> {
     if (!this.queue.length) return;
+    await waitForUserQuiet();
     const batch = this.queue;
     this.queue = [];
     this.chars = 0;
@@ -772,20 +1025,24 @@ class BatchEmbedder {
       file.received++;
       if (!valid) file.failed = true;
       else file.chunks.push({ meta, vec: vecs![i] });
-      if (file.received === file.total && !file.failed) {
-        const previousRows = this.idx.files[file.rel]
-          ? this.idx.metas.reduce((count, chunk) => count + Number(chunk.path === file.rel), 0) : 0;
-        const nextRows = this.idx.count - previousRows + file.chunks.length;
-        if (nextRows > MAX_INDEX_CHUNKS || nextRows * dim * 4 > MAX_VECTOR_BYTES) {
-          indexLimitReason = "Semantic index memory limit reached; remaining files are available through text search.";
-          continue;
-        }
-        // A file's old vectors and hash stay valid until every replacement chunk succeeds.
-        dropPath(this.idx, file.rel);
-        for (const chunk of file.chunks) pushChunk(this.idx, chunk.meta, chunk.vec);
-        this.idx.files[file.rel] = file.hash;
-      }
+      if (file.received === file.total && !file.failed) this.complete(file);
     }
+  }
+
+  private complete(file: PendingFile): void {
+    const dim = this.idx.dim || file.chunks[0]?.vec.length || 0;
+    const previousRows = this.idx.files[file.rel]
+      ? this.idx.metas.reduce((count, chunk) => count + Number(chunk.path === file.rel), 0) : 0;
+    const nextRows = this.idx.count - previousRows + file.chunks.length;
+    if (nextRows > MAX_INDEX_CHUNKS || nextRows * dim * 4 > MAX_VECTOR_BYTES) {
+      indexLimitReason = "Semantic index memory limit reached; remaining files are available through text search.";
+      return;
+    }
+    // A file's old vectors and hash stay valid until every replacement chunk succeeds.
+    dropPath(this.idx, file.rel);
+    file.chunks.sort((a, b) => a.meta.start - b.meta.start);
+    for (const chunk of file.chunks) pushChunk(this.idx, chunk.meta, chunk.vec);
+    this.idx.files[file.rel] = file.hash;
   }
 }
 
@@ -805,8 +1062,15 @@ async function embedFileInto(embedder: BatchEmbedder, idx: IndexData, root: stri
   try { text = await fs.readFile(abs, "utf8"); } catch { return false; }
   const after = await fs.stat(abs).catch(() => null);
   if (!after || after.mtimeMs !== st.mtimeMs || after.size !== st.size) return false;
-  const version = `${Math.round(st.mtimeMs)}:${st.size}:${contentDigest(text)}`;
-  if (idx.files[rel] === version) return false;
+  const digest = contentDigest(text);
+  const version = `${Math.round(st.mtimeMs)}:${st.size}:${digest}`;
+  const previous = idx.files[rel];
+  if (previous === version) return false;
+  // Same bytes, new mtime: the vectors and line ranges are still exact.
+  if (previous?.endsWith(`:${digest}`) && /^\d+(?:\.\d+)?:\d+:[a-f0-9]{64}$/.test(previous)) {
+    idx.files[rel] = version;
+    return true;
+  }
   await embedder.addFile(rel, version, chunkFile(text));
   return true;
 }
@@ -872,9 +1136,9 @@ export async function upsertFile(root: string, absOrRel: string): Promise<void> 
     if (raw !== null && idx.files[rel].endsWith(`:${contentDigest(raw)}`)) return;
   }
   const embedder = new BatchEmbedder(idx);
-  await embedFileInto(embedder, idx, root, rel);
+  const changed = await embedFileInto(embedder, idx, root, rel);
   await embedder.flush();
-  await save(root, idx);
+  if (changed) await persist(root, idx);
   emitStatus(root);
 }
 
@@ -895,7 +1159,7 @@ export async function removeFile(root: string, absOrRel: string): Promise<void> 
   if (!idx.files[rel] && !idx.metas.some((m) => m.path === rel)) return;
   dropPath(idx, rel);
   delete idx.files[rel];
-  await save(root, idx);
+  await persist(root, idx);
   emitStatus(root);
 }
 
@@ -936,7 +1200,7 @@ async function drainPending(root: string): Promise<void> {
       await embedder.flush();
       indexing = false;
     }
-    if (changed && indexingEnabled) await save(root, idx);
+    if (changed && indexingEnabled) await persist(root, idx);
     emitStatus(root);
   } finally {
     drainRunning = false;

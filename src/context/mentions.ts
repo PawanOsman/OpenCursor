@@ -65,7 +65,16 @@ export async function searchFilesAndFolders(query: string, limit = 30): Promise<
       hits.sort((a, b) => b.score - a.score || a.rel.length - b.rel.length);
     } else {
       // Empty query: newest files first (composer open state).
-      const newest = files.slice().sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, limit * 2);
+      // Top-k selection instead of sorting the whole (up to 40k) scan per popup open.
+      const keep = limit * 2;
+      const newest: typeof files = [];
+      for (const f of files) {
+        if (newest.length >= keep && f.mtimeMs <= newest[newest.length - 1].mtimeMs) continue;
+        let i = newest.length;
+        while (i > 0 && newest[i - 1].mtimeMs < f.mtimeMs) i--;
+        newest.splice(i, 0, f);
+        if (newest.length > keep) newest.pop();
+      }
       for (const f of newest) hits.push({ rel: f.rel, score: f.mtimeMs });
     }
 
@@ -117,8 +126,18 @@ export async function searchFilesAndFolders(query: string, limit = 30): Promise<
   }
 }
 
+// The commit picker filters on every keystroke; one `git log` serves a burst.
+let recentCommits: { root: string; at: number; raw: Promise<string> } | undefined;
+function recentCommitLog(): Promise<string> {
+  const root = getWorkspaceRoot();
+  if (!recentCommits || recentCommits.root !== root || Date.now() - recentCommits.at > 5_000) {
+    recentCommits = { root, at: Date.now(), raw: git(["log", "--oneline", "-n", "50", "--no-merges"]) };
+  }
+  return recentCommits.raw;
+}
+
 export async function searchCommits(query: string, limit = 15): Promise<MentionItem[]> {
-  const raw = await git(["log", "--oneline", "-n", "50", "--no-merges"]);
+  const raw = await recentCommitLog();
   if (!raw) return [];
   const q = (query || "").toLowerCase();
   return raw

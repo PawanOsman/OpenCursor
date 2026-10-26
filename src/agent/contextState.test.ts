@@ -47,4 +47,25 @@ describe("saved working context", () => {
     expect(restoreContext(history, state)).toEqual([newer, history[1]]);
     expect(JSON.stringify(state)).not.toContain("Earlier decisions");
   });
+
+  it("extends the checkpoint digest across appends and recomputes it after a replaced step", () => {
+    const history = [user("Original request")];
+    const state: ContextState = {};
+    for (let i = 0; i < 5; i++) {
+      history.push(user(`Step ${i}`));
+      saveContext(history, [summary], state);
+      // A serialized copy (fresh objects, no cache) must accept the incremental digest.
+      expect(restoreContext(structuredClone(history), structuredClone(state))).toEqual([summary]);
+    }
+    history[1] = user("Edited step");
+    saveContext(history, [summary], state);
+    expect(restoreContext(structuredClone(history), structuredClone(state))).toEqual([summary]);
+    history.splice(1, 1);
+    saveContext(history, [summary], state);
+    expect(restoreContext(structuredClone(history), structuredClone(state))).toEqual([summary]);
+    const stale = structuredClone(state);
+    history.push(user("Later"));
+    history[0] = user("Changed origin");
+    expect(restoreContext(history, stale)).toEqual(history);
+  });
 });

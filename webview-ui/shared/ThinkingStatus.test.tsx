@@ -159,3 +159,23 @@ it("exposes exactly one current status as live-region content throughout a swap"
   expect(announced().map(element => element.textContent)).toEqual(["Running tests"]);
   expect(container.querySelector('.t-think-announcement')?.hasAttribute("aria-hidden")).toBe(false);
 });
+
+it("pauses its looping animations while scrolled out of view", () => {
+  let notify: ((entries: Partial<IntersectionObserverEntry>[]) => void) | undefined;
+  const disconnect = vi.fn();
+  vi.stubGlobal("IntersectionObserver", class {
+    constructor(callback: (entries: Partial<IntersectionObserverEntry>[]) => void) { notify = callback; }
+    observe() {}
+    disconnect = disconnect;
+  });
+  render("Thinking…");
+  const status = container.querySelector(".activity-status")!;
+  expect(status.hasAttribute("data-offscreen")).toBe(false);
+  act(() => notify!([{ isIntersecting: false }]));
+  expect(status.hasAttribute("data-offscreen")).toBe(true);
+  act(() => notify!([{ isIntersecting: true }]));
+  expect(status.hasAttribute("data-offscreen")).toBe(false);
+  act(() => root.unmount());
+  expect(disconnect).toHaveBeenCalled();
+  root = createRoot(container);
+});

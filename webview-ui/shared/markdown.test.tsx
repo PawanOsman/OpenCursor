@@ -18,8 +18,12 @@ vi.mock("marked", async (original) => {
   return { ...actual, Marked: class extends actual.Marked {
     constructor(...args: import("marked").MarkedExtension[]) {
       super(...args);
-      observed.parse = vi.fn(this.parse);
-      this.parse = observed.parse;
+      // Count every render pass, whole-document or per block.
+      const parse = this.parse, parser = this.parser.bind(this);
+      const rendered = vi.fn();
+      observed.parse = rendered;
+      this.parse = ((...input: Parameters<typeof parse>) => { rendered(); return parse(...input); }) as typeof parse;
+      this.parser = ((...input: Parameters<typeof parser>) => { rendered(); return parser(...input); }) as typeof parser;
     }
   } };
 });
@@ -159,4 +163,38 @@ it("keeps markdown task lists as disabled checkboxes and keeps tables", async ()
   expect(boxes[0].hasAttribute("checked")).toBe(true);
   expect(doc.querySelectorAll("table th, table td").length).toBe(4);
   expect(doc.querySelector("td")?.getAttribute("align")).toBe("left");
+});
+
+const STREAM_SAMPLE = [
+  "# Plan", "Setext heading", "===", "Intro with **bold**, _em_, `code`, ~~gone~~ and https://example.com.",
+  "1. first\n2. second\n\n   continued paragraph\n3. third\n   ```ts\n   const nested: number = 1;\n   ```",
+  "- tight\n- list\n  - nested", "> quote\n> - item\n>\n> ```py\n> print('q')\n> ```",
+  "| a | b |\n|:-|-:|\n| 1 | 2 |", "- [x] done\n- [ ] todo", "See [the docs][docs] and [inline](https://example.com \"t\").",
+  "```js\nfunction run() {\n  console.log(\"streaming\");\n}\n```", "---", "    indented code\n    block",
+  "Line one\nline two (breaks)", "[docs]: https://docs.example.com", "مرحبا بالعالم", "Trailing *open emphasis",
+].join("\n\n");
+
+it("renders block by block exactly like a whole-document parse, at every streaming prefix", async () => {
+  const { renderMarkdown, renderWhole } = await import("./markdown");
+  for (let end = 1; end <= STREAM_SAMPLE.length; end += 3) {
+    const prefix = STREAM_SAMPLE.slice(0, end);
+    expect(renderMarkdown(prefix), prefix).toBe(renderWhole(prefix));
+  }
+  expect(renderMarkdown(STREAM_SAMPLE)).toBe(renderWhole(STREAM_SAMPLE));
+});
+
+it("only renders the changed trailing block while a response streams", async () => {
+  const { renderMarkdown, parse } = await renderer();
+  const settled = Array.from({ length: 40 }, (_, index) => `Paragraph ${index} with **markdown**.\n\n\`\`\`js\nconsole.log(${index});\n\`\`\``).join("\n\n");
+  renderMarkdown(settled);
+  const initial = parse.mock.calls.length;
+  for (let index = 0; index < 20; index++) renderMarkdown(settled + "\n\nStreaming tail " + "word ".repeat(index));
+  // One pass per delta for the tail block only, never for the 80 settled blocks.
+  expect(parse.mock.calls.length - initial).toBe(20);
+});
+
+it("keeps raw HTML spanning blocks on the whole-document path", async () => {
+  const { renderMarkdown, renderWhole } = await import("./markdown");
+  const source = "<details>\n\nInside **details**\n\n</details>\n\n<b>open\n\nnext paragraph";
+  expect(renderMarkdown(source)).toBe(renderWhole(source));
 });

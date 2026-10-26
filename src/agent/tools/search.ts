@@ -182,11 +182,14 @@ export const grepTool = defineTool("Grep", false, async (input, abortSignal) => 
     const scan = st.isFile() ? { files: [{ abs: target, rel: relative(target), size: st.size, mtimeMs: st.mtimeMs }], truncated: false }
       : await scanFilesCached(target, { signal: abortSignal, maxFiles: 40_000, timeMs: 10_000 });
     if (abortSignal?.aborted) return { output: "(grep aborted)", outcome: { status: "aborted" } };
-    const candidates = scan.files.filter((f) => {
+    // Byte order of the relative path, computed once per file rather than
+    // allocating two Buffers on every comparison of the sort.
+    const candidates = scan.files.flatMap((f) => {
       const rel = relative(f.abs);
-      return (!glob || glob.test(rel)) && (!typeExts || typeExts.includes(path.extname(f.abs).toLowerCase()))
+      const ok = (!glob || glob.test(rel)) && (!typeExts || typeExts.includes(path.extname(f.abs).toLowerCase()))
         && !BINARY_EXTS.has(path.extname(f.abs).toLowerCase()) && !isNoisePath(rel) && f.size <= 8 * 1024 * 1024;
-    }).sort((a, b) => Buffer.compare(Buffer.from(relative(a.abs)), Buffer.from(relative(b.abs))));
+      return ok ? [{ file: f, key: Buffer.from(rel) }] : [];
+    }).sort((a, b) => Buffer.compare(a.key, b.key)).map((entry) => entry.file);
     const list = candidates.slice(0, 20_000);
     const deadline = Date.now() + 15_000;
     let incomplete = scan.truncated || candidates.length > list.length ? "file scan limit reached" : undefined;

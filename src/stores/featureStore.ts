@@ -451,8 +451,16 @@ export class FeatureStore {
 		return this.get();
 	}
 
+	private _sourceEpoch = 0;
+	/**
+	 * Bumped by notifyChanged(): changes outside the stored config (provider keys,
+	 * OAuth accounts) can change which models providers return.
+	 */
+	get sourceEpoch(): number { return this._sourceEpoch; }
+
 	/** Notify listeners of a config change that happened outside `set` (e.g. provider keys). */
-	notifyChanged() {
+	notifyChanged(options: { modelSources?: boolean } = {}) {
+		if (options.modelSources !== false) this._sourceEpoch++;
 		this._onDidChange.fire();
 	}
 

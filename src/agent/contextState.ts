@@ -7,7 +7,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, type Hash } from "node:crypto";
 import type { Step } from "./types";
 import type { TodoItem } from "./tools/types";
 
@@ -27,6 +27,29 @@ function prefixDigest(history: Step[], count: number): string {
   const hash = createHash("sha256");
   for (let i = 0; i < count; i++) hash.update(JSON.stringify(history[i])).update("\n");
   return hash.digest("hex");
+}
+
+/**
+ * Running digest per transcript array. The lossless transcript only grows and
+ * steps are replaced rather than mutated, so a checkpoint saved on every step of
+ * a long run extends the previous hash instead of re-serializing every earlier
+ * step (with its full tool output and images) again.
+ */
+const runningDigests = new WeakMap<Step[], { steps: Step[]; hash: Hash }>();
+
+function extendDigest(history: Step[], count: number): string {
+  const cached = runningDigests.get(history);
+  let reuse = !!cached && cached.steps.length <= count;
+  // Any replaced, inserted or removed step invalidates the running hash.
+  for (let i = 0; reuse && i < cached!.steps.length; i++) reuse = cached!.steps[i] === history[i];
+  const steps = reuse ? cached!.steps : [];
+  const hash = reuse ? cached!.hash : createHash("sha256");
+  for (let i = steps.length; i < count; i++) {
+    hash.update(JSON.stringify(history[i])).update("\n");
+    steps.push(history[i]);
+  }
+  runningDigests.set(history, { steps, hash });
+  return hash.copy().digest("hex");
 }
 
 /** A retry, edited request or truncated transcript invalidates an old summary. */
@@ -49,7 +72,7 @@ export function saveContext(history: Step[], steps: Step[], state: ContextState)
   state.checkpoint = {
     version: 1,
     throughStep: history.length,
-    prefixDigest: prefixDigest(history, history.length),
+    prefixDigest: extendDigest(history, history.length),
     steps: [...steps],
   };
 }

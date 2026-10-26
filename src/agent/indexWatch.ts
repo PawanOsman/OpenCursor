@@ -11,7 +11,7 @@
 
 import * as vscode from "vscode";
 import * as path from "path";
-import { applyFileChanges, buildIndex, setIndexingEnabled, warmIndex, isIndexingEnabled, getStatus } from "./semanticIndex";
+import { applyFileChanges, buildIndex, setIndexingEnabled, warmIndex, isIndexingEnabled, getStatus, noteUserActivity, flushIndexSave } from "./semanticIndex";
 import { getWorkspaceRoot } from "../context/workspaceUtils";
 import { invalidateScanCache, IGNORE_POLICY_FILES } from "./tools/fileScan";
 import type { FeatureStore } from "../stores/featureStore";
@@ -133,6 +133,10 @@ export function initIndexWatch(context: vscode.ExtensionContext, store: FeatureS
       onFs(u, "del");
     }),
     vscode.workspace.onDidSaveTextDocument((doc) => onFs(doc.uri, "up")),
+    // Background embedding yields to typing (output/log channels don't count).
+    vscode.workspace.onDidChangeTextDocument((e) => {
+      if (e.contentChanges.length && (e.document.uri.scheme === "file" || e.document.uri.scheme === "untitled")) noteUserActivity();
+    }),
     store.onDidChange(() => {
       const on = store.get().indexingEnabled !== false;
       if (on === lastEnabled) return;
@@ -160,6 +164,7 @@ export function initIndexWatch(context: vscode.ExtensionContext, store: FeatureS
         if (startupTimer) clearTimeout(startupTimer);
         timer = scanTimer = startupTimer = null;
         pending.clear();
+        void flushIndexSave().catch((error) => logError("index.save", error));
       },
     },
   );

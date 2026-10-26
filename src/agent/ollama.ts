@@ -134,7 +134,9 @@ export function pullModel(value: string, onProgress?: (pct: number) => void): Pr
         const total = [...layers.values()].reduce((n, l) => n + l.total, 0);
         const completed = [...layers.values()].reduce((n, l) => n + Math.min(l.total, l.completed), 0);
         const pct = success ? 100 : total ? Math.min(99, Math.floor(completed / total * 100)) : 0;
-        if (HOST === host) { pulling.set(name, pct); progress.set(name, String(data.status || "Downloading")); onProgress?.(pct); emit(); }
+        // Ollama streams a record per received chunk; only report visible changes.
+        const label = String(data.status || "Downloading");
+        if (HOST === host && (pulling.get(name) !== pct || progress.get(name) !== label)) { pulling.set(name, pct); progress.set(name, label); onProgress?.(pct); emit(); }
       };
       for (;;) {
         controller.signal.throwIfAborted(); reset();

@@ -13,7 +13,8 @@ import { AnimatedDisclosure } from "../../shared/AnimatedDisclosure";
 import { TextSwap } from "../../shared/TextTransitions";
 import { DateField, isValidDate } from "../../shared/DateField";
 import { Icon, IconName } from "../../shared/icons";
-import { basename, renderMarkdown } from "../../shared/markdown";
+import { basename } from "../../shared/markdown";
+import { MarkdownView } from "../../shared/MarkdownView";
 import { vscode } from "../../shared/vscode";
 import type { ToolBlock, OutMessage, AssistantBlock, FileIconInfo } from "../types";
 
@@ -381,7 +382,7 @@ function PlanCard({ block, onImplement }: { block: ToolBlock; onImplement?: (pat
       {open && (
         <div className="plan-body">
           {content ? (
-            <div className="markdown-content" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
+            <MarkdownView text={content} autoDirection={false} />
           ) : (
             <div className="plan-empty">{block.status === "running" ? "Writing plan…" : "(empty plan)"}</div>
           )}

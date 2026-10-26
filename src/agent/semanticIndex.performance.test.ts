@@ -131,6 +131,55 @@ describe("semantic indexing resource budgets", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  it("keeps a quantised model on a thread-capped CPU session", async () => {
+    await semantic.embedQuery("query");
+    expect(pipeline).toHaveBeenCalledTimes(1);
+    expect(pipeline.mock.calls[0][2]).toMatchObject({ dtype: "q8", device: "cpu", session_options: { intraOpNumThreads: semantic.cpuThreadBudget(), interOpNumThreads: 1 } });
+    expect([1, 2, 4, 8, 16, 32, 64].map(cores => semantic.cpuThreadBudget(cores))).toEqual([1, 1, 1, 2, 4, 4, 4]);
+  });
+
+  it("does not re-embed a saved file whose content is unchanged", async () => {
+    const target = path.join(root, "a.ts");
+    await fs.writeFile(target, "export const a = 1;");
+    await semantic.applyFileChanges(root, new Map([["a.ts", "up"]]));
+    expect(run).toHaveBeenCalledTimes(1);
+    const later = new Date(Date.now() + 60_000);
+    await fs.utimes(target, later, later); // git checkout / save without edits
+    await semantic.applyFileChanges(root, new Map([["a.ts", "up"]]));
+    await semantic.upsertFile(root, "a.ts");
+    await semantic.buildIndex(root);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(semantic.getStatus(root)).toMatchObject({ files: 1, chunks: 1 });
+  });
+
+  it("re-embeds only the chunks an edit touched", async () => {
+    const lines = Array.from({ length: 300 }, (_, i) => `export const value${i} = ${i};`);
+    await fs.writeFile(path.join(root, "big.ts"), lines.join("\n"));
+    await semantic.applyFileChanges(root, new Map([["big.ts", "up"]]));
+    const embedded = () => run.mock.calls.reduce((n, [texts]) => n + (texts as string[]).length, 0);
+    const initial = embedded();
+    const chunks = semantic.getStatus(root).chunks;
+    expect(initial).toBe(chunks);
+    lines[5] = "export const value5 = 'edited';";
+    await fs.writeFile(path.join(root, "big.ts"), lines.join("\n"));
+    await semantic.applyFileChanges(root, new Map([["big.ts", "up"]]));
+    expect(embedded() - initial).toBe(1); // only the window containing line 6
+    expect(semantic.getStatus(root).chunks).toBe(chunks);
+  });
+
+  it("holds background embedding batches while the user is typing", async () => {
+    await fs.writeFile(path.join(root, "a.ts"), "export const a = 1;");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    vi.setSystemTime(Date.now() - 60_000); // keep the activity mark in the past for later tests
+    semantic.noteUserActivity();
+    const update = semantic.applyFileChanges(root, new Map([["a.ts", "up"]]));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(run).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(600);
+    await update;
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects oversized stored vectors before reading them into host memory", async () => {
     await fs.writeFile(path.join(root, "a.ts"), "export const a = 1;");
     await semantic.buildIndex(root);

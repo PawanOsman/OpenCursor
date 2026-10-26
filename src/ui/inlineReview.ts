@@ -46,14 +46,16 @@ function changeForDiff(entry: DiffEntry) {
 function refreshOriginal(entry: DiffEntry) {
   const change = changeForDiff(entry);
   if (!change) return false;
-  const before = beforeUriFor(entry);
-  ORIGINALS.set(before.toString(), change.before);
-  originalsChanged.fire(before);
-  if (entry.scope) {
-    const after = beforeUriFor(entry, "after");
-    ORIGINALS.set(after.toString(), change.after);
-    originalsChanged.fire(after);
-  }
+  // Firing makes VS Code re-read the virtual document and recompute the diff,
+  // so only announce content that actually changed.
+  const publish = (uri: vscode.Uri, text: string) => {
+    const key = uri.toString();
+    if (ORIGINALS.get(key) === text) return;
+    ORIGINALS.set(key, text);
+    originalsChanged.fire(uri);
+  };
+  publish(beforeUriFor(entry), change.before);
+  if (entry.scope) publish(beforeUriFor(entry, "after"), change.after);
   return true;
 }
 
@@ -116,22 +118,33 @@ const addedDecoration = vscode.window.createTextEditorDecorationType({
   rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
 });
 
-/** Map an open editor to the pending change (if any) covering its document. */
-function changeForEditor(editor: vscode.TextEditor) {
-  const target = editor.document.uri.fsPath;
-  for (const change of pendingChanges.list()) {
-    const uri = fileUriFor(change.path);
-    if (uri && uri.fsPath === target) return change;
+/** Pending changes by editor path, rebuilt only when the pending set changes. */
+let changesByPath: Map<string, PendingChange> | undefined;
+function pendingByPath(): Map<string, PendingChange> {
+  if (!changesByPath) {
+    changesByPath = new Map();
+    for (const change of pendingChanges.list()) {
+      const uri = fileUriFor(change.path);
+      if (uri && !changesByPath.has(uri.fsPath)) changesByPath.set(uri.fsPath, change);
+    }
   }
-  return undefined;
+  return changesByPath;
 }
 
+/** Map an open editor to the pending change (if any) covering its document. */
+function changeForEditor(editor: vscode.TextEditor) {
+  return pendingByPath().get(editor.document.uri.fsPath);
+}
+
+/** Editors we painted, so ones without a change are cleared once rather than on every refresh. */
+const decorated = new WeakSet<vscode.TextEditor>();
 function refreshEditor(editor: vscode.TextEditor) {
   const change = changeForEditor(editor);
   if (!change || change.previewOnly) {
-    editor.setDecorations(addedDecoration, []);
+    if (decorated.has(editor)) { editor.setDecorations(addedDecoration, []); decorated.delete(editor); }
     return;
   }
+  decorated.add(editor);
   // Diff against the live document text so highlights stay correct if the user
   // keeps typing after the agent's edit.
   const hunks = computeHunks(change.before, editor.document.getText());
@@ -173,8 +186,28 @@ async function sync() {
 }
 
 function scheduleSync() {
+  changesByPath = undefined;
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = setTimeout(() => void sync(), 80);
+}
+
+/**
+ * Typing only moves highlights in the edited document. Diff originals depend on
+ * the pending snapshot, not the live text, so keystrokes never refresh them.
+ */
+let typingTimer: NodeJS.Timeout | undefined;
+const typedDocuments = new Set<vscode.TextDocument>();
+function scheduleHighlights(document: vscode.TextDocument) {
+  typedDocuments.add(document);
+  if (typingTimer) return;
+  typingTimer = setTimeout(() => {
+    typingTimer = undefined;
+    const documents = new Set(typedDocuments);
+    typedDocuments.clear();
+    for (const editor of vscode.window.visibleTextEditors) {
+      if (documents.has(editor.document)) refreshEditor(editor);
+    }
+  }, 150);
 }
 
 /** Register the inline diff view, its virtual original-content provider, and highlights. */
@@ -189,7 +222,7 @@ export function registerInlineReview(context: vscode.ExtensionContext) {
     }),
     addedDecoration,
     originalsChanged,
-    { dispose: () => refreshTimer && clearTimeout(refreshTimer) },
+    { dispose: () => { if (refreshTimer) clearTimeout(refreshTimer); if (typingTimer) clearTimeout(typingTimer); typingTimer = undefined; typedDocuments.clear(); } },
     { dispose: pendingChanges.onChange(scheduleSync) },
     vscode.window.onDidChangeVisibleTextEditors(() => {
       for (const editor of vscode.window.visibleTextEditors) {
@@ -199,9 +232,10 @@ export function registerInlineReview(context: vscode.ExtensionContext) {
     // Typing only refreshes highlights — re-opening diff tabs on every keystroke
     // would thrash the editor.
     vscode.workspace.onDidChangeTextDocument((e) => {
-      if (e.document.uri.scheme !== "file") return;
+      if (e.document.uri.scheme !== "file" || !e.contentChanges.length) return;
+      if (!pendingByPath().has(e.document.uri.fsPath)) return;
       for (const editor of vscode.window.visibleTextEditors) {
-        if (editor.document === e.document) scheduleSync();
+        if (editor.document === e.document) { scheduleHighlights(e.document); return; }
       }
     })
   );

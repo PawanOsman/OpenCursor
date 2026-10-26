@@ -84,4 +84,26 @@ describe("production provider model registry", () => {
       expect(getAllModels()).toBe(result);
     } finally { dispose(); }
   });
+  it("refetches only when provider sources or model metadata change", async () => {
+    vi.mocked(listModels).mockResolvedValue([{ id: "model" }]);
+    vi.mocked(listOAuthModels).mockResolvedValue([]);
+    let features: any = { providers: [{ id: "api", name: "API", kind: "openai", baseUrl: "https://api.example.test" }], embedModel: "minilm", chatTextSize: "default" };
+    const featureStore = { get: () => features, onDidChange: vi.fn(), nameFor: (id: string) => id, optionsFor: () => [], sourceEpoch: 0 };
+    initModelRegistry(featureStore as any, { getProviderKey: async () => "fixture-key" } as any);
+    await refreshAllModels();
+    const changed = featureStore.onDidChange.mock.calls[0][0];
+    vi.mocked(listModels).mockClear();
+    features = { ...features, chatTextSize: "large", mcpServers: [{ name: "tool" }] };
+    changed();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(listModels).not.toHaveBeenCalled();
+    featureStore.sourceEpoch++; // provider key saved
+    changed();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(listModels).toHaveBeenCalledTimes(1);
+    features = { ...features, modelOptions: { model: [{ key: "reasoning_effort", value: "high" }] } };
+    changed();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(listModels).toHaveBeenCalledTimes(2);
+  });
 });

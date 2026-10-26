@@ -116,6 +116,7 @@ export class JobManager {
     const history: Step[] = [], contextState: ContextState = {};
     const timer = setTimeout(() => abort.abort(new Error("Worker elapsed-time budget exceeded")), this.options.timeoutMs ?? 30 * 60_000);
     let baseReady = false, agentError: string | undefined;
+    let flushDeltas = () => {};
     try {
       state.status = "running"; state.updatedAt = Date.now(); await this.save(state);
       await git(directory, ["clone", "--no-hardlinks", "--no-checkout", "--", path.resolve(this.options.repositories[state.repository]), workspace]);
@@ -126,12 +127,28 @@ export class JobManager {
       // Export must never execute config or filters supplied by the agent.
       await fs.rename(path.join(workspace, ".git"), path.join(directory, "git-metadata"));
       await this.save(state);
+      const record = (event: AgentEvent) => void journal.append({ type: "agent-event", at: Date.now(), data: event }).catch(() => abort.abort());
+      // Each journal append is fsynced; merge token deltas into ~250 ms chunks
+      // instead of syncing once per token. Replayed text is identical.
+      let pendingText = "";
+      let deltaTimer: NodeJS.Timeout | undefined;
+      flushDeltas = () => {
+        clearTimeout(deltaTimer); deltaTimer = undefined;
+        if (!pendingText) return;
+        const text = pendingText; pendingText = "";
+        record({ type: "text-delta", text } as AgentEvent);
+      };
       const onEvent = (event: AgentEvent) => {
         if (event.type === "error") agentError = event.message;
         if (event.type === "run-result") state.result = event.text;
+        if (event.type === "text-delta") {
+          pendingText += event.text;
+          deltaTimer ??= setTimeout(flushDeltas, 250);
+          return;
+        }
         // Tool results/intent are durably written through onRunEvent. Stream
         // deltas remain reconnectable without storing provider credentials.
-        if (["text-delta", "run-status", "verification", "usage", "error", "max-steps"].includes(event.type)) void journal.append({ type: "agent-event", at: Date.now(), data: event }).catch(() => abort.abort());
+        if (["run-status", "verification", "usage", "error", "max-steps"].includes(event.type)) { flushDeltas(); record(event); }
       };
       await this.run({ apiBaseUrl: this.options.apiBaseUrl, apiKey: this.options.apiKey, model: state.model, anthropic: this.options.anthropic,
         workspaceRoot: workspace, executionProfile: this.options.execution ?? { kind: "container", network: false },
@@ -158,6 +175,7 @@ export class JobManager {
         }
         catch (error) { state.status = "failed"; state.error = `Patch export failed: ${String(error)}`; }
       }
+      flushDeltas();
       await journal.flush();
       await saveJson(path.join(directory, "history.json"), { history, contextState });
       state.updatedAt = Date.now(); await this.save(state);

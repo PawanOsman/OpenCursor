@@ -75,6 +75,38 @@ function readJson(file: string): any {
   }
 }
 
+/**
+ * Hook files are consulted on every agent event (each tool call, read, edit),
+ * so keep their contents and parsed hooks until the file's stat changes. A stat
+ * of a missing file does not throw and is far cheaper than open/read/parse.
+ */
+interface CachedHookFile { mtimeMs: number; size: number; ino: number; content: string | undefined; hooks?: Map<HookSource, ExternalHook[]> }
+const hookFileCache = new Map<string, CachedHookFile>();
+
+function cachedHookFile(file: string): CachedHookFile | undefined {
+  let stat: fs.Stats | undefined;
+  try {
+    stat = fs.statSync(file, { throwIfNoEntry: false });
+  } catch {
+    stat = undefined;
+  }
+  if (!stat?.isFile()) {
+    hookFileCache.delete(file);
+    return undefined;
+  }
+  const cached = hookFileCache.get(file);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && cached.ino === stat.ino) return cached;
+  let content: string | undefined;
+  try {
+    content = fs.readFileSync(file, "utf8");
+  } catch {
+    content = undefined;
+  }
+  const entry: CachedHookFile = { mtimeMs: stat.mtimeMs, size: stat.size, ino: stat.ino, content };
+  hookFileCache.set(file, entry);
+  return entry;
+}
+
 function writeJson(file: string, data: any): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + "\n", "utf8");
@@ -85,7 +117,15 @@ const isCursor = (s: HookSource) => s.startsWith("cursor");
 function listFrom(source: HookSource): ExternalHook[] {
   const file = fileFor(source);
   if (!file) return [];
-  return listFromData(source, readJson(file));
+  const cached = cachedHookFile(file);
+  if (cached?.content === undefined) return [];
+  cached.hooks ??= new Map();
+  let hooks = cached.hooks.get(source);
+  if (!hooks) {
+    hooks = hooksFromContent(source, cached.content);
+    cached.hooks.set(source, hooks);
+  }
+  return hooks.map((hook) => ({ ...hook }));
 }
 
 /** Parse hooks from already-read file contents (used for consent-pinned project files). */
@@ -135,11 +175,8 @@ export function readProjectHookFile(source: HookSource): { workspace: string; fi
   const workspace = getWorkspaceRoot();
   const file = isProjectHookSource(source) ? fileFor(source) : undefined;
   if (!workspace || !file) return undefined;
-  try {
-    return { workspace, file, content: fs.readFileSync(file, "utf8") };
-  } catch {
-    return undefined;
-  }
+  const content = cachedHookFile(file)?.content;
+  return content === undefined ? undefined : { workspace, file, content };
 }
 
 function removeAt(source: HookSource, data: any, ref: string): void {

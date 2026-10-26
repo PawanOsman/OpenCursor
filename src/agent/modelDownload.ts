@@ -21,6 +21,7 @@ export interface DownloadOptions {
 }
 interface PartialMetadata { url: string; validator?: string; sha256?: string; total?: number }
 const transfers = new Set<string>();
+const PROGRESS_INTERVAL_MS = 200;
 
 async function digest(file: string, signal?: AbortSignal): Promise<string> {
   const hash = createHash("sha256");
@@ -95,6 +96,7 @@ export async function downloadModelFile(url: string, destination: string, option
     preserve = Boolean(validator || expectedHash);
     await fs.writeFile(metadataPath, JSON.stringify({ url, validator, sha256: expectedHash, total } satisfies PartialMetadata), { mode: 0o600 });
     reader = response.body.getReader();
+    let lastProgressAt = -Infinity, reported = -1;
     const handle = await fs.open(partial, received ? "a" : "w", 0o600);
     try {
       for (;;) {
@@ -103,8 +105,11 @@ export async function downloadModelFile(url: string, destination: string, option
         if (chunk.done) break;
         await handle.writeFile(chunk.value);
         received += chunk.value.byteLength;
-        options.onProgress?.(received, total || options.expectedBytes || 0);
+        // One callback per network chunk is tens of thousands of webview posts for a large model.
+        const now = Date.now();
+        if (now - lastProgressAt >= PROGRESS_INTERVAL_MS) { lastProgressAt = now; reported = received; options.onProgress?.(received, total || options.expectedBytes || 0); }
       }
+      if (reported !== received) options.onProgress?.(received, total || options.expectedBytes || 0);
       await handle.sync();
     } finally { await handle.close(); }
     signal.throwIfAborted();

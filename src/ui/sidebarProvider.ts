@@ -145,7 +145,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       this._activeId = id;
       await this._store.setActiveId(id);
     }
-    if (this._deleting.has(id) || !this._store.get(id)) return;
+    if (this._deleting.has(id) || !this._store.has(id)) return;
     const item: QueuedMessage = { id: data.requestId || randomUUID(), text: data.text, attachments: data.attachments,
       model: data.model ?? this.settingsManager.getSettings().model, mode: data.mode ?? this._currentMode, createdAt: Date.now(), status: "queued" };
     const enqueued = await this._store.enqueue(id, item);
@@ -164,7 +164,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // Start on a microtask only after the lock is installed.
     const worker = Promise.resolve().then(async () => {
       while (!this._disposed && !this._queuePaused.has(id) && !this._queueActions.has(id) && !this._deleting.has(id)) {
-        const conversation = this._store.get(id);
+        const conversation = this._store.getMetadata(id);
         if (!conversation || conversation.archivedAt) break;
         const next = conversation.queue?.[0];
         // Unknown interrupted execution is never automatically replayed.
@@ -213,7 +213,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }).finally(() => {
       this._queueWorkers.delete(id);
       // A request may arrive while the previous worker's last disk flush settles.
-      const conversation = this._store.get(id);
+      const conversation = this._store.getMetadata(id);
       if (!this._disposed && !this._queuePaused.has(id) && !this._queueActions.has(id) && !this._deleting.has(id) && !conversation?.archivedAt && conversation?.queue?.[0]?.status === "queued") void this._drainQueue(id);
     });
     this._queueWorkers.set(id, worker);
@@ -353,7 +353,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   /** Undelivered guidance remains an ordinary queued message after a run ends. */
   private async _restorePendingSteering(id: string) {
-    const conversation = this._store.get(id);
+    const conversation = this._store.getMetadata(id);
     if (!conversation?.steeringQueue?.length) return;
     const queue = conversation.queue ?? [];
     const ids = new Set(queue.map(item => item.id));
@@ -500,9 +500,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // Keep the webview's pending-changes bar in sync with the store.
     const sub = pendingChanges.onChange(() => this._sendPendingChanges());
     // Live-refresh personas / provider availability when settings change.
+    let modelSources = this._modelSourcesKey();
     const cfgSub = this.featureStore.onDidChange(() => {
       this._sendConfigState();
-      void this._handleFetchModels();
+      // Only provider/key changes need the network; other settings (enabled
+      // models, options, UI prefs, MCP…) re-render from the fetched cache.
+      const sources = this._modelSourcesKey();
+      if (sources !== modelSources) { modelSources = sources; void this._handleFetchModels(); }
+      else this._publishFetched(this._fetchedCache || []);
       this._reevaluatePendingApprovals();
     });
     // Refresh the picker when OAuth accounts connect/disconnect.
@@ -593,7 +598,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           await this._handleMessage("Continue", undefined, { convId: data.convId, model: data.model, mode: data.mode });
           break;
         case "revertToMessage": {
-          if (this._activeId && this._store.get(this._activeId)) {
+          if (this._activeId && this._store.has(this._activeId)) {
             const convId = this._activeId;
             const session = this._sessions.get(convId);
             if (session) { this._cancelSession(convId); await session.done; }
@@ -872,19 +877,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     if (!result.historyUpdated) void vscode.window.showInformationMessage("OpenCursor: the edit is shown in the chat, but this part of the conversation was already summarized for the model, so the model will keep seeing the summary.");
   }
 
+  /** Line counts per changed file; every agent edit re-sends the bar, but only edited files need a new diff. */
+  private _changeStats = new Map<string, { before: string; after: string; previewOnly?: boolean; added: number; removed: number }>();
   private _sendPendingChanges() {
-    this._view?.webview.postMessage({
-      type: "pendingChanges",
-      changes: (this._activeId ? pendingChanges.list({ conversationId: this._activeId }) : []).map((c) => {
+    if (!this._view) return;
+    const stats = new Map<string, { before: string; after: string; previewOnly?: boolean; added: number; removed: number }>();
+    const changes = (this._activeId ? pendingChanges.list({ conversationId: this._activeId }) : []).map((c) => {
+      let stat = this._changeStats.get(c.path);
+      if (!stat || stat.before !== c.before || stat.after !== c.after || stat.previewOnly !== c.previewOnly) {
         let added = 0;
         let removed = 0;
         for (const h of c.previewOnly ? [] : computeHunks(c.before, c.after)) {
           added += h.afterLines.length;
           removed += h.beforeLines.length;
         }
-        return { path: c.path, existedBefore: c.existedBefore, added, removed };
-      }),
+        stat = { before: c.before, after: c.after, previewOnly: c.previewOnly, added, removed };
+      }
+      stats.set(c.path, stat);
+      return { path: c.path, existedBefore: c.existedBefore, added: stat.added, removed: stat.removed };
     });
+    this._changeStats = stats;
+    this._view.webview.postMessage({ type: "pendingChanges", changes });
   }
 
   /** Open VS Code's native diff between the original and current file contents. */
@@ -1061,10 +1074,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const settings = this.settingsManager.getSettings();
     // Resolve active conversation (or leave empty until first message).
     this._activeId = this._store.getActiveId();
-    if (this._activeId && !this._store.get(this._activeId)) {
+    if (this._activeId && !this._store.has(this._activeId)) {
       this._activeId = undefined;
     }
-    const active = this._activeId ? this._store.get(this._activeId) : undefined;
+    const active = this._activeId ? this._store.getMetadata(this._activeId) : undefined;
     const features = this.featureStore.get();
     this._view?.webview.postMessage({
       type: "initialState",
@@ -1254,7 +1267,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   /** Push live persona list + provider availability to the webview. */
   private _sendConfigState() {
     const features = this.featureStore.get();
-    const active = this._activeId ? this._store.get(this._activeId) : undefined;
+    const active = this._activeId ? this._store.getMetadata(this._activeId) : undefined;
     this._view?.webview.postMessage({
       type: "configState",
       approvalPolicy: this._approvalPolicy(),
@@ -1277,7 +1290,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   /** Resolve the system prompt for the active conversation's persona. */
   private _personaPromptFor(convId: string | undefined, features: ReturnType<FeatureStore["get"]>): string {
     const personas = allPersonas(features.customPersonas);
-    const conv = convId ? this._store.get(convId) : undefined;
+    const conv = convId ? this._store.getMetadata(convId) : undefined;
     const personaId = conv?.personaId ?? features.activePersonaId;
     return getPersona(personas, personaId).prompt;
   }
@@ -1731,6 +1744,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    * Publish a fetched id map to the webview + routing tables.
    * Rebuilds ModelDef options from featureStore (cheap, no network).
    */
+  /** Provider endpoints/enablement plus the key/account epoch: what a network model fetch depends on. */
+  private _modelSourcesKey(): string {
+    return JSON.stringify([this.featureStore.get().providers, this.featureStore.sourceEpoch ?? 0]);
+  }
+
   private _publishFetched(fetched: { providerId: string; ids: string[] }[]) {
     this._ollamaModelIds = new Set(fetched.find((f) => f.providerId === "__ollama__")?.ids ?? []);
     this._oauthModelKind = new Map();
@@ -1873,7 +1891,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const submittedModel = edit?.model ?? this.settingsManager.getSettings().model;
     const queueRunStopped = () => !!edit?.runId && !!convId && (this._disposed || this._queuePaused.has(convId)
       || !this._store.getMetadata(convId)?.queue?.some(item => item.id === edit.runId && item.status === "running"));
-    if (convId && (this._deleting.has(convId) || !this._store.get(convId))) return;
+    if (convId && (this._deleting.has(convId) || !this._store.has(convId))) return;
     if (queueRunStopped()) return "cancelled";
     const existing = convId ? this._sessions.get(convId) : undefined;
     if (existing) {
@@ -1900,7 +1918,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // Editing an earlier message: truncate persisted turns + model history to
     // that point, and optionally revert still-pending file edits made after it.
-    if (edit?.fromIndex != null && convId && this._store.get(convId)) {
+    if (edit?.fromIndex != null && convId && this._store.has(convId)) {
       if (edit.revertFiles) await pendingChanges.rejectAll({ conversationId: convId, fromTurnIndex: edit.fromIndex });
       await this._truncateConversation(convId, edit.fromIndex);
     }
@@ -2173,7 +2191,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           },
         })
           .then(async (title) => {
-            if (title && this._store.get(convId)) {
+            if (title && this._store.has(convId)) {
               await this._store.update(convId, { title });
               this._sendConversations();
             }

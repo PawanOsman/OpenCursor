@@ -26,10 +26,16 @@ export async function registerPluginManagement(context: vscode.ExtensionContext,
     const owned = new Set(pluginServers.map((server) => server.name));
     const collisions = configured.filter((server) => owned.has(server.name) && !previous.has(server.name));
     if (collisions.length) throw new Error(`Plugin MCP names conflict with existing servers: ${collisions.map((server) => server.name).join(", ")}. Rename the existing servers first.`);
-    await features.set({ mcpServers: [...configured.filter((server) => !previous.has(server.name)), ...pluginServers] });
+    const mcpServers = [...configured.filter((server) => !previous.has(server.name)), ...pluginServers];
+    // Startup and every plugin action reconcile; an unchanged result must not
+    // fire a settings change (views refresh, model lists refetch).
+    const unchanged = JSON.stringify(mcpServers) === JSON.stringify(configured)
+      && previous.size === owned.size && [...owned].every((name) => previous.has(name));
+    if (unchanged) return;
+    await features.set({ mcpServers });
     await context.globalState.update(key, [...owned]);
     await mcpManager.sync(features.get().mcpServers);
-    features.notifyChanged();
+    features.notifyChanged({ modelSources: false });
   };
 
   const preview = async (source: string, update = false): Promise<InstalledPlugin | undefined> => {
@@ -82,7 +88,7 @@ export async function registerPluginManagement(context: vscode.ExtensionContext,
         await reconcile();
         await manager.remove(plugin.id);
       }
-      features.notifyChanged();
+      features.notifyChanged({ modelSources: false });
     } catch (error) {
       logError("plugins.manage", error);
       vscode.window.showErrorMessage(`OpenCursor plugins: ${error instanceof Error ? error.message : String(error)}`);

@@ -13,7 +13,7 @@ import * as React from "react";
 import { Icon } from "../shared/icons";
 import { Select } from "../shared/Select";
 import { ImagePreview } from "../shared/ImagePreview";
-import { renderMarkdown } from "../shared/markdown";
+import { MarkdownView } from "../shared/MarkdownView";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
 import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
@@ -188,8 +188,16 @@ function groupTurns(turns: Turn[]): { turn: Turn; index: number }[][] {
   return groups;
 }
 
+// Settled turns keep their blocks array, so joining every response's text on
+// each streaming frame (O(transcript) string building) is avoided.
+const responseTexts = new WeakMap<AssistantBlock[], string>();
 function responseText(blocks: AssistantBlock[]): string {
-  return blocks.flatMap(block => block.kind === "text" ? [block.text] : block.kind === "error" ? [block.message] : []).join("\n\n");
+  let text = responseTexts.get(blocks);
+  if (text === undefined) {
+    text = blocks.flatMap(block => block.kind === "text" ? [block.text] : block.kind === "error" ? [block.message] : []).join("\n\n");
+    responseTexts.set(blocks, text);
+  }
+  return text;
 }
 
 // Summarize a finished explore group, e.g. "Explored 3 files · 2 searches".
@@ -274,10 +282,9 @@ function ExploringSection({
 
 // Memoized: during streaming the whole turn list re-renders on every frame, but
 // only the trailing block's text actually changes. Without this, every earlier
-// message in the conversation re-parses its markdown on each delta.
-const Markdown = React.memo(function Markdown({ text }: { text: string }) {
-  return <div className="markdown-content" dir="auto" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />;
-});
+// message in the conversation re-parses its markdown on each delta. Within the
+// streaming message only the changed trailing markdown block is re-rendered.
+const Markdown = MarkdownView;
 
 // Render <attached /> tags as the SAME pill as the composer editor:
 // [kind icon] name — shares .mention CSS and KIND_SVG icons.
@@ -311,6 +318,109 @@ const MentionText = React.memo(function MentionText({ text }: { text: string }) 
     </div>
   );
 });
+
+/** User message bubble that flags content overflowing its clamp height. It
+ *  measures when its message changes or it resizes, instead of forcing a
+ *  layout read for every user message on every streaming frame. */
+function ClampedBubble({ measureKey, ...props }: React.ComponentProps<"div"> & { measureKey: unknown }) {
+  const ref = React.useRef<HTMLDivElement>(null);
+  React.useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => { element.classList.toggle("clamped", element.scrollHeight > element.clientHeight + 1); };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+    observer?.observe(element);
+    return () => observer?.disconnect();
+  }, [measureKey]);
+  return <div ref={ref} {...props} />;
+}
+
+/** Latest-value callback with a stable identity, so memoized children are not
+ *  invalidated by inline handlers on every render. */
+function useStableCallback<Args extends unknown[], Result>(callback: (...args: Args) => Result): (...args: Args) => Result {
+  const latest = React.useRef(callback);
+  latest.current = callback;
+  return React.useCallback((...args: Args) => latest.current(...args), []);
+}
+
+/** A sent user message. Memoized with stable handlers so settled messages are
+ *  not re-rendered on every streaming frame of a long conversation. */
+const UserMessage = React.memo(function UserMessage({ turn, index, isRunning, onEdit, onResend, onRevert, onPreviewImage }: {
+  turn: UserTurn; index: number; isRunning: boolean;
+  onEdit: (index: number, turn: UserTurn) => void; onResend: (index: number, turn: UserTurn) => void;
+  onRevert: (index: number, turn: UserTurn) => void; onPreviewImage: (images: Attachment[], id: string) => void;
+}) {
+  return (
+    <div className="msg user message-shell" data-turn-index={index}>
+      <ClampedBubble
+        measureKey={turn}
+        className="bubble"
+        role="button"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+            event.preventDefault(); event.currentTarget.click();
+          }
+        }}
+        onClick={() => onEdit(index, turn)}
+        aria-disabled={isRunning || undefined}
+        title={isRunning ? "User message" : "Click to edit & resend"}
+      >
+        {turn.attachments && turn.attachments.length > 0 && (
+          <div className="msg-attachments">
+            {turn.attachments.map((a) =>
+              a.kind === "image" ? (
+                <button key={a.id} type="button" className="image-attachment-trigger"
+                  aria-label={`Preview image ${a.name}`} aria-haspopup="dialog" title={a.name}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onPreviewImage(turn.attachments!.filter(attachment => attachment.kind === "image"), a.id);
+                  }}>
+                  <img className="msg-attach-img" src={a.data} alt="" />
+                </button>
+              ) : (
+                <span key={a.id} className="msg-attach-file">
+                  <Icon name="file" /> {a.name}
+                </span>
+              )
+            )}
+          </div>
+        )}
+        {turn.text && <MentionText text={turn.text} />}
+      </ClampedBubble>
+      <MessageActions variant="user" text={turn.text} disabled={isRunning}
+        onEdit={() => onEdit(index, turn)}
+        onRetry={() => onResend(index, turn)}
+        onRevert={() => onRevert(index, turn)} />
+    </div>
+  );
+});
+
+/** An assistant response with its actions; memoized like {@link UserMessage}. */
+const AssistantMessage = React.memo(function AssistantMessage({ turn, index, isRunning, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals, onRetry }: {
+  turn: AssistantTurn; index: number; isRunning: boolean; running: boolean; phase?: string;
+  onImplement?: (path: string) => void; onOpenSubagent?: (callId: string) => void;
+  approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
+  onRetry?: (index: number) => void;
+}) {
+  return (
+    <div className="msg assistant message-shell" data-turn-index={index}>
+      <div className="role">
+        <Icon name="bot" /> Agent
+      </div>
+      <div className="bubble">
+        <AssistantContent turn={turn} turnIndex={index} running={running} phase={phase}
+          onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvals} taskApprovals={taskApprovals} />
+      </div>
+      <MessageActions variant="assistant" text={responseText(turn.blocks)} disabled={isRunning}
+        onRetry={onRetry ? () => onRetry(index) : undefined} />
+    </div>
+  );
+});
+
+/** The bottom composer only re-renders when its own inputs change, not on every streaming frame. */
+const MemoComposer = React.memo(Composer);
 
 /** Run paused at the step limit: Continue button with an "always auto continue" dropdown. */
 function MaxStepsCard({ block, running }: { block: import("./types").AssistantBlock & { kind: "max-steps" }; running: boolean }) {
@@ -522,12 +632,14 @@ export function OutputEditor({ initialText, label, onSave, onCancel }: { initial
   </div>;
 }
 
-function EditableOutput({ turnIndex, blockIndex, kind, children }: { turnIndex?: number; blockIndex: number; kind: "text" | "thinking"; children: React.ReactNode }) {
+function EditableOutput({ turn, turnIndex, blockIndex, kind, children }: { turn: AssistantTurn; turnIndex?: number; blockIndex: number; kind: "text" | "thinking"; children: React.ReactNode }) {
   const edit = React.useContext(ModelOutputEditContext);
-  const turns = React.useContext(OutputTurnsContext);
   const [editing, setEditing] = React.useState(false);
-  const turn = turnIndex === undefined ? undefined : turns?.[turnIndex];
-  const source = turn?.role === "assistant" ? turn.blocks[blockIndex] : undefined;
+  // `turn` is the stored turn at `turnIndex`, so editors start from the exact
+  // saved block text. Passing it directly (rather than a context holding the
+  // whole transcript) keeps settled messages from re-rendering on every
+  // streaming frame.
+  const source = turnIndex === undefined ? undefined : turn.blocks[blockIndex];
   const original = source && source.kind === kind ? source.text : undefined;
   React.useEffect(() => { if (edit?.disabled || !edit?.enabled) setEditing(false); }, [edit?.disabled, edit?.enabled]);
   if (!edit?.enabled || turnIndex === undefined || original === undefined) return <>{children}</>;
@@ -540,8 +652,6 @@ function EditableOutput({ turnIndex, blockIndex, kind, children }: { turnIndex?:
       disabled={edit.disabled} onClick={() => setEditing(true)}><Icon name="edit" size={14} /></button>
   </div>;
 }
-/** Stored turns of the visible chat, so editors start from the exact saved block text. */
-const OutputTurnsContext = React.createContext<Turn[] | null>(null);
 
 const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals }: {
   turn: AssistantTurn; turnIndex?: number; running: boolean; phase?: string;
@@ -559,9 +669,9 @@ const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex,
       if (block.kind === "explore-group") return <ExploringSection key={index} tools={block.tools}
         live={live && index === items.length - 1} onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvals} />;
       if (block.kind === "text") return <div className="block-group" key={index}>
-        <EditableOutput turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="text"><Markdown text={block.text} /></EditableOutput>
+        <EditableOutput turn={turn} turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="text"><Markdown text={block.text} /></EditableOutput>
       </div>;
-      if (block.kind === "thinking") return <EditableOutput key={index} turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="thinking"><ThinkingCard block={block} /></EditableOutput>;
+      if (block.kind === "thinking") return <EditableOutput key={index} turn={turn} turnIndex={turnIndex} blockIndex={sourceIndex(turn, block)} kind="thinking"><ThinkingCard block={block} /></EditableOutput>;
       if (block.kind === "error") return <div className="block-group" key={index}><ErrorCard block={block} /></div>;
       if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} /></div>;
       if (block.kind === "max-steps") return <div className="block-group" key={index}><MaxStepsCard block={block} running={running} /></div>;
@@ -962,6 +1072,9 @@ export function App() {
   // extra scrollable height beyond one viewport). Set imperatively so it tracks
   // the scroll area size. Never applied to the first group (already at top).
   const lastGroupRef = React.useRef<HTMLDivElement>(null);
+  // The group currently carrying that virtual space (tracked so clearing it
+  // never has to query every group in the transcript on each frame).
+  const spacedGroupRef = React.useRef<HTMLElement | null>(null);
 
   // Give the last group a min-height of one viewport so its user message can be
   // scrolled to the top ("virtual space") without adding real extra scroll beyond
@@ -970,9 +1083,11 @@ export function App() {
     const el = scrollRef.current;
     if (!el) return;
     // Clear stale virtual space from groups that are no longer last.
-    el.querySelectorAll<HTMLElement>(".chat-turn-group").forEach((g) => {
-      if (g !== lastGroupRef.current && g.style.minHeight) g.style.minHeight = "";
-    });
+    const spaced = spacedGroupRef.current;
+    if (spaced && spaced !== lastGroupRef.current) {
+      spaced.style.minHeight = "";
+      spacedGroupRef.current = null;
+    }
     const group = lastGroupRef.current;
     if (!group) return;
     // Grow the last group so the max scroll position lands exactly with the
@@ -984,6 +1099,7 @@ export function App() {
     const minH = Math.max(0, Math.round(el.clientHeight - trailing));
     const target = `${minH}px`;
     if (group.style.minHeight !== target) group.style.minHeight = target;
+    spacedGroupRef.current = group;
   }, []);
 
   React.useEffect(() => {
@@ -1642,6 +1758,41 @@ export function App() {
     });
   };
 
+  // Stable handlers for memoized transcript messages (always the latest closure).
+  const onUserEdit = useStableCallback((index: number, turn: UserTurn) => startEdit(index, turn));
+  const onUserResend = useStableCallback((index: number, turn: UserTurn) => requestEditSubmit(index, turn.text, turn.attachments ?? []));
+  const onUserRevert = useStableCallback((index: number, turn: UserTurn) => requestRevert(index, turn));
+  const onRetryResponse = useStableCallback((index: number) => retryResponse(index));
+  const onPreviewImage = React.useCallback((images: Attachment[], id: string) => setImagePreview({ images, activeId: id }), []);
+
+  // Stable handlers for the memoized bottom composer (always the latest closure).
+  const composerOnMode = useStableCallback((m: Mode) => {
+    setMode(m);
+    post({ type: "setMode", mode: m });
+  });
+  const composerOnTeams = useStableCallback((ids: string[]) => {
+    setActiveTeamIds(ids);
+    post({ type: "setActiveTeams", teamIds: ids });
+  });
+  const composerOnSelectModel = useStableCallback((m: string) => {
+    setSelectedModel(m);
+    post({ type: "selectModel", model: m });
+  });
+  const composerOnSaveModelOptions = useStableCallback((modelId: string, options: ModelOption[]) => {
+    setModelList((prev) => prev.map((m) => (m.id === modelId ? { ...m, options } : m)));
+    post({ type: "saveModelOptions", modelId, options });
+  });
+  const composerOnResetModelOptions = useStableCallback((modelId: string) => post({ type: "resetModelOptions", modelId }));
+  const composerOnRunNextQueued = useStableCallback(() => runQueuedNow(queued.findIndex(item => !isQueuedSteering(item))));
+  const composerOnTabDraft = useStableCallback((d: ComposerDraft) => setTabDraft(draftKey, d));
+  const composerOnSubmit = useStableCallback((text: string, attachments: Attachment[]) => {
+    setDraft(null);
+    draftsRef.current.delete(draftKey);
+    post({ type: "updateChatWorkspace", state: { drafts: Object.fromEntries(draftsRef.current) } });
+    onSubmit(text, attachments);
+  });
+  const composerOnCancel = useStableCallback(() => post({ type: "cancelRun", convId: activeId }));
+
   return (
     <div className={"app" + (uiPrefs.chatTextSize !== "default" ? ` text-${uiPrefs.chatTextSize}` : "")}>
       <div className="chat-header">
@@ -1779,7 +1930,6 @@ export function App() {
       <div className={"chat-messages" + (!subBlock && hasProviders && turns.length === 0 ? " is-empty" : "")} data-running={isRunning} ref={scrollRef} onScroll={onScroll} tabIndex={0} role="region" aria-label="Conversation">
         <TaskActivityContext.Provider value={isRunning}>
         <ModelOutputEditContext.Provider value={outputEdit}>
-        <OutputTurnsContext.Provider value={turns}>
         {subBlock ? (
           <SubagentChat block={subBlock} approvals={approvalsByCall} />
         ) : !hasProviders ? (
@@ -1865,69 +2015,21 @@ export function App() {
                       />
                     </div>
                   ) : (
-                    <div className="msg user message-shell" key={index} data-turn-index={index}>
-                      <div
-                        className="bubble"
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={(event) => {
-                          if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
-                            event.preventDefault(); event.currentTarget.click();
-                          }
-                        }}
-                        onClick={() => startEdit(index, turn)}
-                        aria-disabled={isRunning || undefined}
-                        title={isRunning ? "User message" : "Click to edit & resend"}
-                        ref={(el) => { if (el) el.classList.toggle("clamped", el.scrollHeight > el.clientHeight + 1); }}
-                      >
-                        {turn.attachments && turn.attachments.length > 0 && (
-                          <div className="msg-attachments">
-                            {turn.attachments.map((a) =>
-                              a.kind === "image" ? (
-                                <button key={a.id} type="button" className="image-attachment-trigger"
-                                  aria-label={`Preview image ${a.name}`} aria-haspopup="dialog" title={a.name}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    setImagePreview({ images: turn.attachments!.filter(attachment => attachment.kind === "image"), activeId: a.id });
-                                  }}>
-                                  <img className="msg-attach-img" src={a.data} alt="" />
-                                </button>
-                              ) : (
-                                <span key={a.id} className="msg-attach-file">
-                                  <Icon name="file" /> {a.name}
-                                </span>
-                              )
-                            )}
-                          </div>
-                        )}
-                        {turn.text && <MentionText text={turn.text} />}
-                      </div>
-                      <MessageActions variant="user" text={turn.text} disabled={isRunning}
-                        onEdit={() => startEdit(index, turn)}
-                        onRetry={() => requestEditSubmit(index, turn.text, turn.attachments ?? [])}
-                        onRevert={() => requestRevert(index, turn)} />
-                    </div>
+                    <UserMessage key={index} turn={turn} index={index} isRunning={isRunning}
+                      onEdit={onUserEdit} onResend={onUserResend} onRevert={onUserRevert} onPreviewImage={onPreviewImage} />
                   )
                 ) : (
-                  <div className="msg assistant message-shell" key={index} data-turn-index={index}>
-                    <div className="role">
-                      <Icon name="bot" /> Agent
-                    </div>
-                    <div className="bubble">
-                      <AssistantContent turn={turn} turnIndex={index} running={isRunning && (turn === turns[turns.length - 1] || hasLiveWork(turn.blocks))}
-                        phase={isRunning && turn === turns[turns.length - 1] && !status.error ? status.text : undefined}
-                        onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask} />
-                    </div>
-                    <MessageActions variant="assistant" text={responseText(turn.blocks)} disabled={isRunning}
-                      onRetry={group[0].turn.role === "user" ? () => retryResponse(index) : undefined} />
-                  </div>
+                  <AssistantMessage key={index} turn={turn} index={index} isRunning={isRunning}
+                    running={isRunning && (turn === turns[turns.length - 1] || hasLiveWork(turn.blocks))}
+                    phase={isRunning && turn === turns[turns.length - 1] && !status.error ? status.text : undefined}
+                    onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask}
+                    onRetry={group[0].turn.role === "user" ? onRetryResponse : undefined} />
                 )
               )}
 
             </div>
           ))
         )}
-        </OutputTurnsContext.Provider>
         </ModelOutputEditContext.Provider>
         </TaskActivityContext.Provider>
       </div>
@@ -2012,48 +2114,31 @@ export function App() {
           </div>
         )}
         </div>}
-        <Composer
+        <MemoComposer
           focusKey={activeId ?? "new"}
           approvalPolicy={approvalPolicy}
           persona={turns.length ? personas.find(persona => persona.id === personaId) : undefined}
           mode={mode}
-          onMode={(m) => {
-            setMode(m);
-            post({ type: "setMode", mode: m });
-          }}
+          onMode={composerOnMode}
           teams={teams}
           activeTeamIds={activeTeamIds}
-          onTeams={(ids) => {
-            setActiveTeamIds(ids);
-            post({ type: "setActiveTeams", teamIds: ids });
-          }}
+          onTeams={composerOnTeams}
           models={models}
           modelList={modelList}
           selectedModel={selectedModel}
-          onSelectModel={(m) => {
-            setSelectedModel(m);
-            post({ type: "selectModel", model: m });
-          }}
-          onSaveModelOptions={(modelId, options) => {
-            setModelList((prev) => prev.map((m) => (m.id === modelId ? { ...m, options } : m)));
-            post({ type: "saveModelOptions", modelId, options });
-          }}
-          onResetModelOptions={(modelId) => post({ type: "resetModelOptions", modelId })}
+          onSelectModel={composerOnSelectModel}
+          onSaveModelOptions={composerOnSaveModelOptions}
+          onResetModelOptions={composerOnResetModelOptions}
           isRunning={isRunning}
           isFirst={turns.length === 0}
           usedTokens={active.usedTokens}
           queuedCount={queued.filter(item => !isQueuedSteering(item)).length}
-          onRunNextQueued={() => runQueuedNow(queued.findIndex(item => !isQueuedSteering(item)))}
+          onRunNextQueued={composerOnRunNextQueued}
           draft={draft}
           tabDraft={draftsRef.current.get(draftKey) ?? null}
-          onTabDraft={(d) => setTabDraft(draftKey, d)}
-          onSubmit={(text, attachments) => {
-            setDraft(null);
-            draftsRef.current.delete(draftKey);
-            post({ type: "updateChatWorkspace", state: { drafts: Object.fromEntries(draftsRef.current) } });
-            onSubmit(text, attachments);
-          }}
-          onCancel={() => post({ type: "cancelRun", convId: activeId })}
+          onTabDraft={composerOnTabDraft}
+          onSubmit={composerOnSubmit}
+          onCancel={composerOnCancel}
           submitWithCtrlEnter={uiPrefs.submitWithCtrlEnter}
         />
       </div>

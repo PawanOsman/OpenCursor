@@ -37,6 +37,32 @@ import { initHookConsent } from './integrations/hookConsent';
 
 let activeSidebar: SidebarProvider | undefined;
 
+const TODO_COMMENT = /(?:\/\/|#|\/\*|\*|<!--)\s*TODO\b/;
+
+/**
+ * Zero-based lines below maxLines that hold a TODO comment. CodeLens runs on
+ * every edit of every open file, so jump between "TODO" occurrences instead of
+ * materialising and regex-testing each of up to 20k lines.
+ */
+export function todoCommentLines(text: string, maxLines: number, cancelled: () => boolean = () => false): number[] {
+  const lines: number[] = [];
+  let line = 0, lineStart = 0;
+  let at = text.indexOf('TODO');
+  while (at >= 0 && !cancelled()) {
+    let newline = text.indexOf('\n', lineStart);
+    while (newline >= 0 && newline < at) {
+      line++;
+      lineStart = newline + 1;
+      newline = text.indexOf('\n', lineStart);
+    }
+    if (line >= maxLines) break;
+    const lineEnd = newline < 0 ? text.length : newline;
+    if (TODO_COMMENT.test(text.slice(lineStart, lineEnd))) lines.push(line);
+    at = text.indexOf('TODO', lineEnd);
+  }
+  return lines;
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   registerRemoteJobs(context);
   initHookConsent(context);
@@ -83,19 +109,26 @@ export async function activate(context: vscode.ExtensionContext) {
     .catch((error) => logError("startup.embed-model", error))
     .finally(() => initIndexWatch(context, featureStore));
 
-  // Connect any enabled MCP servers in the background.
   configureMcpAuthentication(context);
-  await registerPluginManagement(context, featureStore).catch((error) => logError("startup.plugins", error));
-  void mcpManager.sync(featureStore.get().mcpServers).catch((error) => logError("startup.mcp", error));
 
   // llama.cpp local models: detect install, then auto-load flagged models.
+  // Probing spawns up to two processes, so skip it until a model is configured;
+  // the settings panel probes on open and models added later trigger the probe.
   initLlamacpp(context);
-  void checkInstalled().then(() => {
-    const f = featureStore.get();
-    for (const m of f.llamacppModels) {
-      if (m.autoLoad) void loadModel(m, f.llamacppConfig).catch((error) => logError("startup.llamacpp-load", error, { model: m.id }));
-    }
-  }).catch((error) => logError("startup.llamacpp-check", error));
+  let llamaProbed = false;
+  const probeLlamacpp = (autoLoad: boolean) => {
+    if (llamaProbed || !featureStore.get().llamacppModels.length) return;
+    llamaProbed = true;
+    void checkInstalled().then(() => {
+      if (!autoLoad) return;
+      const f = featureStore.get();
+      for (const m of f.llamacppModels) {
+        if (m.autoLoad) void loadModel(m, f.llamacppConfig).catch((error) => logError("startup.llamacpp-load", error, { model: m.id }));
+      }
+    }).catch((error) => logError("startup.llamacpp-check", error));
+  };
+  probeLlamacpp(true);
+  if (!llamaProbed) context.subscriptions.push(featureStore.onDidChange(() => probeLlamacpp(false)));
 
   const sidebarProvider = new SidebarProvider(context, settingsManager, featureStore);
   activeSidebar = sidebarProvider;
@@ -107,6 +140,16 @@ export async function activate(context: vscode.ExtensionContext) {
     })
 
   );
+
+  // Connect plugin and configured MCP servers in the background. The command
+  // registers synchronously; the reconcile spawns and initialises every enabled
+  // server (up to 15 s each) and must not hold activation open, because VS Code
+  // cannot resolve the chat view until activate() returns. The agent re-reads
+  // MCP tools every step, so servers that finish later are picked up.
+  void registerPluginManagement(context, featureStore)
+    .catch((error) => logError("startup.plugins", error))
+    .then(() => mcpManager.sync(featureStore.get().mcpServers))
+    .catch((error) => logError("startup.mcp", error));
 
   // Inline diff view for agent edits + changed-line decorations (no git needed).
   registerInlineReview(context);
@@ -135,12 +178,8 @@ export async function activate(context: vscode.ExtensionContext) {
       onDidChangeCodeLenses: todoLensesChanged.event,
       provideCodeLenses(document, token) {
         if (!vscode.workspace.getConfiguration('ocursor').get<boolean>('todoCodeLensEnabled', true)) return [];
-        const lenses: vscode.CodeLens[] = [];
-        for (let line = 0; line < Math.min(document.lineCount, 20_000) && !token.isCancellationRequested; line++) {
-          if (!/(?:\/\/|#|\/\*|\*|<!--)\s*TODO\b/.test(document.lineAt(line).text)) continue;
-          lenses.push(new vscode.CodeLens(new vscode.Range(line, 0, line, 0), { title: 'Implement with OpenCursor', command: 'ocursor.implementTodo', arguments: [document.uri, line] }));
-        }
-        return lenses;
+        return todoCommentLines(document.getText(), 20_000, () => token.isCancellationRequested).map((line) =>
+          new vscode.CodeLens(new vscode.Range(line, 0, line, 0), { title: 'Implement with OpenCursor', command: 'ocursor.implementTodo', arguments: [document.uri, line] }));
       },
     })
   );

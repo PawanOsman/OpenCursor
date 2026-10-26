@@ -117,52 +117,101 @@ function textDirections(html: string): string {
 }
 
 // Parsing + sanitizing is the single most expensive thing the webview does per
-// frame: during streaming the same message is re-rendered on every delta, each
-// time re-parsing the ENTIRE text from scratch (quadratic in message length).
+// frame: during streaming the same message is re-rendered on every delta.
+// Re-parsing, re-highlighting and re-sanitizing the ENTIRE text each time is
+// quadratic in message length, so the document is split into its top-level
+// blocks and each block is rendered (and cached) on its own: while streaming
+// only the trailing block changes and every earlier block is a cache hit.
 // Bound both entries and string storage: streaming revisions can each contain
 // hundreds of kilobytes even when the number of entries is small.
 const CACHE_LIMIT = 240;
 const CACHE_BYTES = 4 * 1024 * 1024;
 const MAX_ENTRY_BYTES = 512 * 1024;
-const cache = new Map<string, string>();
+interface Rendered { html: string; highlighted: number }
+const cache = new Map<string, Rendered>();
 let cacheBytes = 0;
 
-function cached(src: string, compute: () => string): string {
-  const hit = cache.get(src);
+function cached(key: string, compute: () => Rendered): Rendered {
+  const hit = cache.get(key);
   if (hit !== undefined) {
     // Refresh recency (Map preserves insertion order).
-    cache.delete(src);
-    cache.set(src, hit);
+    cache.delete(key);
+    cache.set(key, hit);
     return hit;
   }
-  const html = compute();
+  const entry = compute();
   // Account for UTF-16 source and output. Oversized documents still render, but
   // retaining their intermediate streaming revisions offers little reuse.
-  const bytes = (src.length + html.length) * 2;
-  if (bytes > MAX_ENTRY_BYTES) return html;
-  cache.set(src, html);
+  const bytes = (key.length + entry.html.length) * 2;
+  if (bytes > MAX_ENTRY_BYTES) return entry;
+  cache.set(key, entry);
   cacheBytes += bytes;
   while (cache.size > CACHE_LIMIT || cacheBytes > CACHE_BYTES) {
     const oldest = cache.keys().next().value as string | undefined;
     if (oldest === undefined) break;
-    cacheBytes -= (oldest.length + cache.get(oldest)!.length) * 2;
+    cacheBytes -= (oldest.length + cache.get(oldest)!.html.length) * 2;
     cache.delete(oldest);
   }
-  return html;
+  return entry;
+}
+
+/** Whole-document path, for documents whose blocks cannot be rendered independently. */
+export function renderWhole(src: string): string {
+  return cached("doc\u0000" + src, () => {
+    try {
+      highlightRemaining = HIGHLIGHT_BUDGET;
+      return { html: textDirections(sanitizeHtml(marked.parse(src, { async: false }) as string)), highlighted: 0 };
+    } catch {
+      // Fallback: render as escaped plain text on parser failure.
+      return { html: '<p dir="auto">' + src.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") + "</p>", highlighted: 0 };
+    }
+  }).html;
+}
+
+function renderBlocks(src: string): readonly string[] {
+  const tokens = marked.lexer(src);
+  // Raw HTML can open an element in one block and close it in a later one (and
+  // the HTML parser carries unclosed formatting tags across paragraphs), so
+  // only documents without raw HTML are split.
+  let rawHtml = false;
+  marked.walkTokens(tokens, token => { if (token.type === "html") rawHtml = true; });
+  if (rawHtml) return [renderWhole(src)];
+  // Reference definitions change how other blocks resolve their links.
+  const links = Object.keys(tokens.links).length ? JSON.stringify(tokens.links) : "";
+  const blocks: string[] = [];
+  let budget = HIGHLIGHT_BUDGET;
+  for (const token of tokens) {
+    if (token.type === "space" || token.type === "def") continue;
+    // The highlight budget is shared across blocks in document order, so it is
+    // part of the key: an identical block later in a long reply may get less.
+    const start = budget;
+    const entry = cached(`${start}\u0000${token.type}\u0000${links}\u0000${token.raw}`, () => {
+      highlightRemaining = start;
+      const html = textDirections(sanitizeHtml(marked.parser([token])));
+      return { html, highlighted: start - highlightRemaining };
+    });
+    budget = start - entry.highlighted;
+    if (entry.html) blocks.push(entry.html);
+  }
+  return blocks;
+}
+
+/**
+ * Render markdown as sanitized HTML fragments, one per top-level block.
+ * Joined together they equal the whole-document render.
+ */
+export function renderMarkdownBlocks(srcIn: string): readonly string[] {
+  const src = String(srcIn == null ? "" : srcIn);
+  if (!src) return [];
+  try {
+    return renderBlocks(src);
+  } catch {
+    return [renderWhole(src)];
+  }
 }
 
 export function renderMarkdown(srcIn: string): string {
-  const src = String(srcIn == null ? "" : srcIn);
-  if (!src) return "";
-  return cached(src, () => {
-    try {
-      highlightRemaining = HIGHLIGHT_BUDGET;
-      return textDirections(sanitizeHtml(marked.parse(src, { async: false }) as string));
-    } catch {
-      // Fallback: render as escaped plain text on parser failure.
-      return '<p dir="auto">' + src.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") + "</p>";
-    }
-  });
+  return renderMarkdownBlocks(srcIn).join("");
 }
 
 export function basename(p: string): string {

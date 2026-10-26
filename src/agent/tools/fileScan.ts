@@ -18,6 +18,7 @@
 
 import * as fs from "fs/promises";
 import * as path from "path";
+import * as os from "os";
 import type { Dirent } from "fs";
 import { IGNORE } from "./ignore";
 
@@ -142,9 +143,14 @@ function isIgnored(rules: IgnoreRule[], rel: string, isDir: boolean): boolean {
 /** Ignore policies shared by scans and incremental indexing. */
 export const IGNORE_POLICY_FILES = [".gitignore", ".cursorignore", ".cursorindexingignore"];
 
-async function directoryIgnoreRules(dir: string, base: string): Promise<IgnoreRule[]> {
+/**
+ * `present` (the directory's own entry names, when already listed) skips the
+ * failed open() for each absent policy file — three wasted syscalls per directory.
+ */
+async function directoryIgnoreRules(dir: string, base: string, present?: ReadonlySet<string>): Promise<IgnoreRule[]> {
   const rules: IgnoreRule[] = [];
   for (const name of IGNORE_POLICY_FILES) {
+    if (present && !present.has(name)) continue;
     try { rules.push(...parseGitignore(await fs.readFile(path.join(dir, name), "utf8"), base)); } catch { /* absent */ }
   }
   return rules;
@@ -295,7 +301,12 @@ export function normalizeGlobPattern(pattern: string): string {
 // Parallel directory walk
 // ---------------------------------------------------------------------------
 
-const DIR_CONCURRENCY = 24;
+/**
+ * Concurrent directory workers. libuv runs fs calls on a small shared thread
+ * pool (4 by default) used by the whole extension host, so a wide fan-out
+ * only queues work and starves other extensions; slow disks seek more.
+ */
+const DIR_CONCURRENCY = Math.max(4, Math.min(8, typeof os.availableParallelism === "function" ? os.availableParallelism() : 4));
 
 /**
  * Breadth-first, bounded-concurrency scan. Returns file metadata (size/mtime)
@@ -316,7 +327,6 @@ export async function scanFiles(root: string, opts: ScanOptions = {}): Promise<S
   const deadline = Date.now() + timeMs;
   const files: ScannedFile[] = [];
   let truncated = false;
-  let gitRules: IgnoreRule[] = [];
 
   const stop = (): boolean => {
     if (signal?.aborted || Date.now() > deadline || files.length >= maxFiles) {
@@ -326,12 +336,16 @@ export async function scanFiles(root: string, opts: ScanOptions = {}): Promise<S
     return false;
   };
 
-  if (useGitignore) gitRules = await directoryIgnoreRules(root, "");
+  // Each directory carries only its ancestors' rules (root first, then nested
+  // files in descent order). Rules declared elsewhere can never match below it,
+  // so this equals one global "last match wins" list without testing every
+  // .gitignore in the repository against every path.
+  const rootRules = useGitignore ? await directoryIgnoreRules(root, "") : [];
 
-  let level: Array<{ abs: string; rel: string; depth: number }> = [{ abs: root, rel: "", depth: 0 }];
+  let level: Array<{ abs: string; rel: string; depth: number; rules: IgnoreRule[] }> = [{ abs: root, rel: "", depth: 0, rules: rootRules }];
 
   while (level.length && !stop()) {
-    const next: Array<{ abs: string; rel: string; depth: number }> = [];
+    const next: Array<{ abs: string; rel: string; depth: number; rules: IgnoreRule[] }> = [];
     let cursor = 0;
 
     const worker = async (): Promise<void> => {
@@ -346,9 +360,9 @@ export async function scanFiles(root: string, opts: ScanOptions = {}): Promise<S
         }
 
         // Nested .gitignore files refine pruning for their subtree.
+        let gitRules = dir.rules;
         if (useGitignore && dir.rel) {
-          // Await before reading gitRules: concurrent workers append to the live array.
-          const nested = await directoryIgnoreRules(dir.abs, dir.rel);
+          const nested = await directoryIgnoreRules(dir.abs, dir.rel, new Set(entries.filter(e => !e.isDirectory()).map(e => e.name)));
           if (nested.length) gitRules = gitRules.concat(nested);
         }
 
@@ -365,7 +379,7 @@ export async function scanFiles(root: string, opts: ScanOptions = {}): Promise<S
             if (dir.depth + 1 > maxDepth) continue;
             if (useGitignore && gitRules.length && isIgnored(gitRules, rel, true)) continue;
             if (dirFilter && !dirFilter(rel)) continue;
-            next.push({ abs, rel, depth: dir.depth + 1 });
+            next.push({ abs, rel, depth: dir.depth + 1, rules: gitRules });
             continue;
           }
 
@@ -430,8 +444,23 @@ export async function scanFilesCached(root: string, opts: ScanOptions = {}): Pro
   if (!result.truncated && !opts.signal?.aborted) {
     scanCache.set(key, { at: Date.now(), result });
     if (scanCache.size > 8) scanCache.delete(scanCache.keys().next().value as string);
+    scheduleScanCacheExpiry();
   }
   return result;
+}
+
+// A large workspace listing holds tens of MB; expired entries must not stay
+// resident until the next search happens to evict them.
+let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleScanCacheExpiry(): void {
+  if (expiryTimer) return;
+  expiryTimer = setTimeout(() => {
+    expiryTimer = undefined;
+    const now = Date.now();
+    for (const [key, entry] of scanCache) if (now - entry.at >= SCAN_TTL_MS) scanCache.delete(key);
+    if (scanCache.size) scheduleScanCacheExpiry();
+  }, SCAN_TTL_MS + 1000);
+  expiryTimer.unref?.();
 }
 
 /** Drop cached scans (called by the workspace file watcher). */

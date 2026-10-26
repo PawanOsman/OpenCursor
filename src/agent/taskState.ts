@@ -110,7 +110,9 @@ const MAX_FILES = 10;
 const MAX_TODOS = 5;
 
 export class ActivityLedger {
+	/** Only the most recent entries can ever be rendered; older ones are counted. */
 	private readonly entries: Entry[] = [];
+	private total = 0;
 	/** path -> cumulative +added/-removed, so the file ledger stays one line each. */
 	private readonly files = new Map<string, { plus: number; minus: number; deleted: boolean }>();
 	private plan = "";
@@ -124,6 +126,8 @@ export class ActivityLedger {
 		const last = this.entries[this.entries.length - 1];
 		if (!last || last.name !== entry.name || last.target !== entry.target || last.note !== entry.note || last.ok !== entry.ok) {
 			this.entries.push(entry);
+			this.total++;
+			if (this.entries.length > MAX_ACTIONS) this.entries.shift();
 		}
 
 		if (ok && (name === "Write" || name === "StrReplace" || name === "EditNotebook" || name === "Delete")) {
@@ -202,10 +206,10 @@ export class ActivityLedger {
 
 		if (this.entries.length) {
 			const shown = maxActions ? this.entries.slice(-maxActions) : [];
-			const hidden = this.entries.length - shown.length;
+			const hidden = this.total - shown.length;
 			const lines = shown.map((e) => `  ${e.state === "running" ? "…" : e.ok ? "✓" : "✗"} ${concise(e.name, 32)}${e.target ? ` ${concisePath(e.target, 72)}` : ""} — ${concise(e.note, 80)}`);
 			parts.push(
-				`Actions so far (${this.entries.length} total${hidden ? `, ${hidden} older omitted` : ""}):\n${lines.join("\n")}`,
+				`Actions so far (${this.total} total${hidden ? `, ${hidden} older omitted` : ""}):\n${lines.join("\n")}`,
 			);
 		}
 

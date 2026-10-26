@@ -31,8 +31,28 @@ function duration(style: CSSStyleDeclaration, property: string, fallback: number
 }
 
 /** Animated thinking states driven by real activity updates. */
+/** Flag the status while it is scrolled out of view so its looping shimmer and
+ *  matrix animations pause instead of restyling every frame for nobody. */
+function usePauseOffscreen(ref: React.RefObject<HTMLElement | null>) {
+  React.useEffect(() => {
+    const element = ref.current;
+    if (!element || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(entries => {
+      const entry = entries[entries.length - 1];
+      if (entry) element.toggleAttribute("data-offscreen", !entry.isIntersecting);
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      element.removeAttribute("data-offscreen");
+    };
+  }, [ref]);
+}
+
 export function ThinkingStatus({ text, className = "" }: ThinkingStatusProps) {
   const reducedMotion = useReducedMotion();
+  const rootRef = React.useRef<HTMLSpanElement>(null);
+  usePauseOffscreen(rootRef);
   const thinkRef = React.useRef<HTMLSpanElement>(null);
   const incomingRef = React.useRef<HTMLSpanElement>(null);
   const measureRef = React.useRef<HTMLSpanElement>(null);
@@ -80,7 +100,7 @@ export function ThinkingStatus({ text, className = "" }: ThinkingStatusProps) {
     };
   }, [text, reducedMotion]);
 
-  return <span className={`activity-status ${className}`.trim()}>
+  return <span ref={rootRef} className={`activity-status ${className}`.trim()}>
     <MatrixLoader />
     <span className="t-think" ref={thinkRef} role="status" aria-live="polite" aria-atomic="true" aria-label={text}>
       <span className="t-think-announcement">{text}</span>

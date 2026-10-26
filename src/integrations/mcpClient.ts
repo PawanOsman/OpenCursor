@@ -152,6 +152,8 @@ export class McpConnection {
     // Keep the last stderr lines so a startup failure surfaces a real reason
     // instead of just "MCP server closed".
     let stderrTail = "";
+    // Decode as a stream so a multi-byte character split across pipe chunks stays intact.
+    proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", (d) => this._onData(d.toString()));
     proc.stderr.on("data", (d) => {
       stderrTail = (stderrTail + d.toString()).slice(-2000);
@@ -224,11 +226,11 @@ export class McpConnection {
   private async refreshTools(timeoutMs = 15000): Promise<void> {
     if (this.refresh) return this.refresh;
     this.refresh = (async () => {
-      const tools: McpToolDef[] = [], seen = new Set<string>();
+      const tools: McpToolDef[] = [], seen = new Set<string>(), names = new Set<string>();
       let cursor: string | undefined;
       do {
         const result = await this._request("tools/list", cursor ? { cursor } : {}, undefined, timeoutMs);
-        for (const tool of result?.tools ?? []) if (typeof tool.name === "string" && !tools.some((existing) => existing.name === tool.name)) tools.push({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema, annotations: tool.annotations });
+        for (const tool of result?.tools ?? []) if (typeof tool.name === "string" && !names.has(tool.name) && names.add(tool.name)) tools.push({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema, annotations: tool.annotations });
         cursor = typeof result?.nextCursor === "string" ? result.nextCursor : undefined;
         if (cursor && seen.has(cursor)) throw new Error("MCP tools pagination repeated a cursor.");
         if (cursor) seen.add(cursor);
@@ -326,11 +328,14 @@ export class McpConnection {
   }
 
   private _onData(chunk: string) {
-    this.buf += chunk;
-    if (this.buf.length > 16 * 1024 * 1024) { this.lastError = "MCP message exceeds 16 MiB."; this.dispose(); return; }
-    const lines = this.buf.split("\n");
-    this.buf = lines.pop() ?? "";
-    for (const line of lines) {
+    // Only the new chunk can complete a message: a large response arriving in
+    // many pipe chunks must not re-split the whole accumulated buffer each time.
+    if (this.buf.length + chunk.length > 16 * 1024 * 1024) { this.buf += chunk; this.lastError = "MCP message exceeds 16 MiB."; this.dispose(); return; }
+    const newline = chunk.lastIndexOf("\n");
+    if (newline < 0) { this.buf += chunk; return; }
+    const complete = this.buf + chunk.slice(0, newline);
+    this.buf = chunk.slice(newline + 1);
+    for (const line of complete.split("\n")) {
       const t = line.trim();
       if (!t) {
         continue;
@@ -457,6 +462,17 @@ export class McpManager {
     return next;
   }
 
+  /** Wait for in-flight connects (startup sync runs in the background), but never
+   * longer than `timeoutMs`: a slow server must not stall the first message. */
+  async whenSettled(timeoutMs: number): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      this.syncing.catch(() => {}),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+    ]);
+    clearTimeout(timer);
+  }
+
   private async applyConfigs(configs: McpServerConfig[], generation: number): Promise<void> {
     if (generation !== this.generation) return;
     // Dispose connections no longer present or disabled.
@@ -467,21 +483,22 @@ export class McpManager {
         this.connections.delete(name);
       }
     }
-    // Connect new enabled servers.
+    // Connect new enabled servers in parallel: one slow server (up to its
+    // connect timeout) no longer delays every server after it.
+    const pending: Promise<void>[] = [];
     for (const cfg of configs) {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation) break;
       if (!cfg.enabled || this.connections.has(cfg.name)) {
         continue;
       }
       const conn = new McpConnection(cfg, this.host);
       this.connections.set(cfg.name, conn);
-      try {
-        await conn.connect();
-      } catch (e) {
+      pending.push(conn.connect().catch((e) => {
         conn.lastError = e instanceof Error ? e.message : String(e);
         conn.dispose();
-      }
+      }));
     }
+    await Promise.all(pending);
   }
 
   /** Returns all tools across connected servers, namespaced as `mcp__<server>__<tool>`. */

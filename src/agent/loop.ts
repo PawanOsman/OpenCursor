@@ -11,6 +11,7 @@ import { streamChat, SamplingParams, ModelParams } from "./provider";
 import { responseTokenReservation } from "./providerLimits";
 import type { OAuthKind } from "./oauth";
 import { OAUTH_PROVIDER_DEFINITIONS, supportsOAuthTools } from "../shared/oauthProviders";
+import { noteUserActivity } from "./semanticIndex";
 import { TOOLS, schemasForMode, toolsForMode, disposeShellSession, EDIT_TOOLS, MULTITASK_TOOLS, toolTimeoutMs, withToolTimeout, type AskQuestionItem, type ToolContext } from "./tools";
 import { actionTypeForCall, rgPathOperands, setMcpReadOnlyResolver } from "./approvalPolicy";
 import * as nodePath from "path";
@@ -30,6 +31,7 @@ import {
 	isCompactionBoundary,
 } from "./contextEconomy";
 import { createHash } from "node:crypto";
+import { availableParallelism } from "node:os";
 import { BackgroundTasks } from "./backgroundTasks";
 import type { ToolOutcome } from "./toolOutcome";
 import { ActivityLedger } from "./taskState";
@@ -75,6 +77,51 @@ const PROJECT_REMINDER =
 	'(run_in_background=true, subagent_type set to the member name), batching independent launches with at most four active tasks and avoiding duplicate running work.\n</reminder>';
 
 const MAX_STEPS = 200;
+
+/** Logical CPUs, read once (availableParallelism is absent on very old runtimes). */
+const CPU_COUNT = Math.max(1, typeof availableParallelism === "function" ? availableParallelism() : 4);
+
+/**
+ * Parallel read-only tool calls per batch. Eight concurrent workers on a 4-core
+ * laptop only queue behind each other while starving the extension host.
+ */
+export const RO_CONCURRENCY = Math.max(4, Math.min(8, CPU_COUNT));
+
+/**
+ * Tools that walk or scan the workspace (directory walks, whole-file regex,
+ * ripgrep processes). One parent plus several subagents can each issue a batch
+ * of these at once, so they share a process-wide limit sized to the machine.
+ * Network-bound and cheap tools are not limited here.
+ */
+const SCAN_TOOLS = new Set(["Grep", "Rg", "Glob", "FileSearch", "SemanticSearch"]);
+export const SCAN_CONCURRENCY = Math.max(2, Math.min(6, CPU_COUNT - 1));
+let scanActive = 0;
+const scanWaiters: Array<() => void> = [];
+
+/** Run `work` holding a scan slot when `name` is a workspace-scanning tool. */
+export async function withScanSlot<T>(name: string, signal: AbortSignal, work: () => Promise<T>): Promise<T> {
+	if (!SCAN_TOOLS.has(name)) return work();
+	if (scanActive >= SCAN_CONCURRENCY) {
+		await new Promise<void>((resolve, reject) => {
+			const grant = () => { signal.removeEventListener("abort", onAbort); resolve(); };
+			const onAbort = () => {
+				const at = scanWaiters.indexOf(grant);
+				if (at >= 0) scanWaiters.splice(at, 1);
+				reject(signal.reason instanceof Error ? signal.reason : new Error("aborted: waiting for a search slot"));
+			};
+			scanWaiters.push(grant);
+			signal.addEventListener("abort", onAbort, { once: true });
+		});
+	} else scanActive++;
+	try {
+		signal.throwIfAborted();
+		return await work();
+	} finally {
+		// Hand the slot directly to the next waiter, or release it.
+		const next = scanWaiters.shift();
+		if (next) next(); else scanActive--;
+	}
+}
 
 /**
  * Register a per-call abort that goes inert once released, so a settled call
@@ -137,7 +184,7 @@ const VERBOSE_TOOL_DESCRIPTIONS = new Set([
  * per-tool policy — most tools only need one early update to title their card,
  * so their arg deltas are dropped instead of rendered frame after frame.
  */
-function coalesceEmit(raw: (e: AgentEvent) => void): (e: AgentEvent) => void {
+export function coalesceEmit(raw: (e: AgentEvent) => void): (e: AgentEvent) => void {
 	const pending = new Map<string, AgentEvent>();
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let timerDue = 0;
@@ -145,6 +192,12 @@ function coalesceEmit(raw: (e: AgentEvent) => void): (e: AgentEvent) => void {
 	const toolNames = new Map<string, string>();
 	// callIds whose "once" preview has already been sent.
 	const argsSent = new Set<string>();
+	// Clip limit for a pending args preview, and callIds whose shipped preview
+	// already reached that limit. Clipping happens once per flush, never per
+	// delta: slicing the cumulative args on every delta flattened the whole
+	// string each time (quadratic in the size of a streamed Write).
+	const argsLimit = new Map<string, number>();
+	const argsFull = new Set<string>();
 	const flush = () => {
 		timer = undefined;
 		timerDue = 0;
@@ -155,8 +208,14 @@ function coalesceEmit(raw: (e: AgentEvent) => void): (e: AgentEvent) => void {
 			// A "once" preview counts as spent only when it actually ships, so the
 			// single update carries the most complete args seen in the window
 			// (not the first 4-character fragment).
-			if (e.type === "tool-call-args") argsSent.add(e.callId);
-			try { raw(e); } catch { /* ignore */ }
+			let out = e;
+			if (e.type === "tool-call-args") {
+				argsSent.add(e.callId);
+				const limit = argsLimit.get(e.callId) ?? 0;
+				out = { type: "tool-call-args", callId: e.callId, argsText: clipArgsText(e.argsText, limit) };
+				if (limit > 0 && e.argsText.length >= limit) argsFull.add(e.callId);
+			}
+			try { raw(out); } catch { /* ignore */ }
 		}
 	};
 	// Earliest deadline wins: a pending fast event must not be delayed by a
@@ -197,11 +256,18 @@ function coalesceEmit(raw: (e: AgentEvent) => void): (e: AgentEvent) => void {
 			const policy = streamPolicyFor(toolNames.get(event.callId));
 			if (policy.args === "off") return;
 			if (policy.args === "once" && argsSent.has(event.callId)) return;
+			// Cumulative args only grow, so a preview already clipped at the limit
+			// cannot change; skip re-sending the identical text.
+			if (argsFull.has(event.callId)) {
+				if (event.argsText.length >= policy.maxChars) return;
+				argsFull.delete(event.callId); // A restarted stream begins a new preview.
+			}
 			// Latest full argsText wins (provider sends cumulative chunks).
+			argsLimit.set(event.callId, policy.maxChars);
 			pending.set(`args:${event.callId}`, {
 				type: "tool-call-args",
 				callId: event.callId,
-				argsText: clipArgsText(event.argsText, policy.maxChars),
+				argsText: event.argsText,
 			});
 			schedule(policy.intervalMs);
 			return;
@@ -247,6 +313,8 @@ function coalesceEmit(raw: (e: AgentEvent) => void): (e: AgentEvent) => void {
 		if (event.type === "tool-call-completed") {
 			toolNames.delete(event.callId);
 			argsSent.delete(event.callId);
+			argsLimit.delete(event.callId);
+			argsFull.delete(event.callId);
 		}
 		try { raw(event); } catch { /* ignore */ }
 	};
@@ -592,6 +660,9 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 		},
 	}));
 
+	// MCP servers connect in the background after activation; give a message sent
+	// right after startup a brief chance to see their tools.
+	if (!isSubagent && !chatOnly) await mcpManager.whenSettled?.(4000);
 	let mcpSchemas = readMcpSchemas();
 	const usedMcpNames = new Set(history.flatMap((s) => s.kind === "assistant" ? s.calls.map((c) => c.name) : []));
 	deferredTools = new DeferredToolSchemas(archive, mcpSchemas, usedMcpNames);
@@ -924,7 +995,11 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				: 0;
 			const fittingBudget = Math.floor(budget / promptTokenRatio);
 			const overheadTokens = Math.ceil(system.length / 4) + toolSchemaTokens() + 128;
-			const latestUser = [...history].reverse().find(s => s.kind === "user" && !s.synthetic);
+			let latestUser: Step | undefined;
+			for (let k = history.length - 1; k >= 0 && !latestUser; k--) {
+				const candidate = history[k];
+				if (candidate.kind === "user" && !candidate.synthetic) latestUser = candidate;
+			}
 			const requiredContextTokens = latestUser?.kind === "user" && latestUser.context ? stepsTokens([{ kind: "user", text: "", context: latestUser.context }]) : 0;
 			if (limitedContext && fittingBudget <= overheadTokens + requiredContextTokens + 64) {
 				throw new Error("The context window is too small for the instructions, tools, and response limit. Increase the context window or reduce the response limit or workspace instructions.");
@@ -1030,6 +1105,8 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 					if (chatOnly && (ev.type === "tool-call" || ev.type === "tool-call-start" || ev.type === "tool-call-args-delta")) {
 						throw new Error("This chat-only provider returned an unsupported tool call. No action was executed.");
 					}
+					// Background indexing yields to an active run, as it does to typing.
+					noteUserActivity();
 					if (ev.type === "text-delta") {
 						assistantText += ev.text;
 						emit({ type: "text-delta", text: ev.text });
@@ -1470,7 +1547,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 					let timedOut = false;
 					try {
 						r = await withToolTimeout(
-							Promise.resolve().then(() => { toolAc.signal.throwIfAborted(); return tool.execute(input, toolAc.signal, call.id, toolCtx); }),
+							Promise.resolve().then(() => { toolAc.signal.throwIfAborted(); return withScanSlot(resolvedName, toolAc.signal, () => tool.execute(input, toolAc.signal, call.id, toolCtx)); }),
 							limitMs,
 							resolvedName,
 							() => {
@@ -1560,7 +1637,6 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			// Worker pool (not batch-wait): a long Task doesn't block the next free slot.
 			// Emission order is preserved: only contiguous read-only runs between
 			// mutating calls run in parallel, so a read after a write sees the write.
-			const RO_CONCURRENCY = 8;
 			const isReadOnly = (i: number) => {
 				const name = parsed[i].resolvedName ?? parsed[i].call.name;
 				const tool = TOOLS[name];

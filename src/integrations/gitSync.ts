@@ -58,8 +58,8 @@ export function registerGitSync(context: vscode.ExtensionContext) {
     const hook = (repo: any) => {
       const root: string | undefined = repo.rootUri?.fsPath;
       if (root) repoRoots.add(root);
-      sync(repo);
-      context.subscriptions.push(repo.state.onDidChange(() => sync(repo)));
+      syncRepository(repo);
+      context.subscriptions.push(repo.state.onDidChange(() => syncRepository(repo)));
     };
     // Register every root first so the initial sync already knows nested repos.
     for (const repo of api.repositories) if (repo.rootUri?.fsPath) repoRoots.add(repo.rootUri.fsPath);
@@ -71,29 +71,40 @@ export function registerGitSync(context: vscode.ExtensionContext) {
   });
 }
 
-function sync(repo: any) {
+/**
+ * Git state events fire after every `git status` run (each save, focus change,
+ * fetch), and large repositories can report thousands of changed or untracked
+ * files. Only pending agent edits matter here, so look up just those paths
+ * instead of materialising every change on every event.
+ */
+export function syncRepository(repo: any, roots: Iterable<string> = repoRoots) {
+  const pending = pendingChanges.list();
+  if (!pending.length) return;
   const root: string = repo.rootUri?.fsPath ?? "";
-  const dirty = new Set<string>(
-    [
-      ...(repo.state.workingTreeChanges ?? []),
-      ...(repo.state.indexChanges ?? []),
-      ...(repo.state.mergeChanges ?? []),
-    ].map((c: any) => (c.uri as vscode.Uri).fsPath)
-  );
-  for (const abs of dirty) seenDirty.add(abs);
-
-  for (const change of pendingChanges.list()) {
-    let abs: string;
+  const pendingByPath = new Map<string, string>();
+  for (const change of pending) {
     try {
-      abs = safePath(change.path);
+      pendingByPath.set(safePath(change.path), change.path);
     } catch {
       continue;
     }
-    if (!root || owningRoot(abs, repoRoots) !== root) continue;
+  }
+  const dirty = new Set<string>();
+  for (const group of [repo.state.workingTreeChanges, repo.state.indexChanges, repo.state.mergeChanges]) {
+    for (const c of group ?? []) {
+      const abs = (c.uri as vscode.Uri).fsPath;
+      if (pendingByPath.has(abs)) dirty.add(abs);
+    }
+  }
+  for (const abs of dirty) seenDirty.add(abs);
+
+  if (!root) return;
+  for (const [abs, relative] of pendingByPath) {
     // Never seen dirty => git ignores it (or it predates this session): leave it
     // to the user rather than silently dropping the review.
     if (!seenDirty.has(abs) || dirty.has(abs)) continue;
-    pendingChanges.accept(change.path);
+    if (owningRoot(abs, roots) !== root) continue;
+    pendingChanges.accept(relative);
     seenDirty.delete(abs);
   }
 }

@@ -17,17 +17,22 @@ export async function* sseData(reader: ReadableStreamDefaultReader<Uint8Array>):
       const { done, value } = await reader.read();
       buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
       if (done && buffer && !buffer.endsWith("\n")) buffer += "\n";
+      // Walk the lines with a cursor and drop the consumed prefix once per read,
+      // instead of re-slicing the remaining buffer after every line.
+      let start = 0;
       let end: number;
-      while ((end = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, end).replace(/\r$/, "");
-        buffer = buffer.slice(end + 1);
-        if (!line) {
+      while ((end = buffer.indexOf("\n", start)) >= 0) {
+        const lineEnd = end > start && buffer.charCodeAt(end - 1) === 13 ? end - 1 : end;
+        if (lineEnd === start) {
           if (data.length) yield data.join("\n");
           data = [];
-        } else if (line.startsWith("data:")) {
-          data.push(line.slice(5).replace(/^ /, ""));
+        } else if (buffer.startsWith("data:", start)) {
+          const from = start + 5 < lineEnd && buffer.charCodeAt(start + 5) === 32 ? start + 6 : start + 5;
+          data.push(buffer.slice(from, lineEnd));
         }
+        start = end + 1;
       }
+      if (start) buffer = buffer.slice(start);
       if (done) {
         if (data.length) yield data.join("\n");
         return;

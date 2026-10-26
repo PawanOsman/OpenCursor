@@ -45,9 +45,28 @@ export function initModelRegistry(featureStore: FeatureStore, settingsManager: S
     refreshQueued = true;
     void refreshAllModels();
   };
-  featureStore.onDidChange(invalidate);
+  // Every settings change (UI prefs, approvals, MCP, personas…) used to refetch
+  // from every provider. Only the inputs of the fetched list warrant that.
+  let lastInputs = registryInputsKey(featureStore);
+  featureStore.onDidChange(() => {
+    const inputs = registryInputsKey(featureStore);
+    if (inputs === lastInputs) return;
+    lastInputs = inputs;
+    invalidate();
+  });
   oauth.onOAuthStatus(invalidate);
   invalidate();
+}
+
+/** What providers are asked (endpoints, enablement, keys/accounts epoch). */
+export function modelSourcesKey(featureStore: Pick<FeatureStore, "get"> & { sourceEpoch?: number }): string {
+  return JSON.stringify([featureStore.get().providers, featureStore.sourceEpoch ?? 0]);
+}
+
+/** Sources plus everything the registry bakes into its result (names, options, embed model). */
+function registryInputsKey(featureStore: FeatureStore): string {
+  const features = featureStore.get();
+  return JSON.stringify([modelSourcesKey(featureStore), features.customModels, features.modelOptions, features.embedModel]);
 }
 
 /**

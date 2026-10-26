@@ -17,10 +17,12 @@ import { runtimeManifest } from "./runtimeManifest";
 
 let rootDir: string | undefined;
 const imports = new Map<string, Promise<any>>();
+const entries = new Map<string, Promise<string>>();
 
 export function initRuntimeDeps(storageDir: string): void {
   rootDir = path.join(storageDir, "runtime-deps-v2");
   imports.clear();
+  entries.clear();
 }
 
 /** Prefer the Node ESM condition without flattening a package's native layout. */
@@ -72,9 +74,38 @@ export function localDevPackageDir(name: string, root = extensionRoot()): string
   }
 }
 
-async function importPackageDir(directory: string): Promise<any> {
+async function packageEntryUrl(directory: string): Promise<string> {
   const pkg = JSON.parse(await fs.readFile(path.join(directory, "package.json"), "utf8"));
-  return await import(pathToFileURL(path.join(directory, entryOf(pkg))).href);
+  return pathToFileURL(path.join(directory, entryOf(pkg))).href;
+}
+
+async function importPackageDir(directory: string): Promise<any> {
+  return await import(await packageEntryUrl(directory));
+}
+
+/**
+ * Installs a pinned runtime dependency when needed and returns its entry file
+ * URL without importing it, so it can be loaded in a worker thread instead of
+ * the extension host's main thread.
+ */
+export function resolveRuntimeDepEntry(name: string): Promise<string> {
+  if (!(name in runtimeManifest.roots)) return Promise.reject(new Error(`Unpinned runtime dependency: ${name}`));
+  let pending = entries.get(name);
+  if (!pending) {
+    pending = (async () => {
+      const local = localDevPackageDir(name);
+      if (local) return await packageEntryUrl(local);
+      if (!rootDir) throw new Error(`Runtime dependency ${name} is not installed`);
+      const directory = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "OpenCursor: installing feature runtime" },
+        progress => installRuntime(name, rootDir!, { report: message => progress.report({ message }) }),
+      );
+      return await packageEntryUrl(directory);
+    })();
+    entries.set(name, pending);
+    void pending.catch(() => { entries.delete(name); });
+  }
+  return pending;
 }
 
 /** Install only the requested feature's pinned graph, and import its original files. */

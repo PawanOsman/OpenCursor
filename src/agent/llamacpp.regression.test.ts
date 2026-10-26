@@ -16,7 +16,8 @@ import { spawn } from "child_process";
 import { createServer } from "net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} } }));
+const statusEvents = vi.hoisted(() => ({ fired: 0 }));
+vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() { statusEvents.fired++; } } }));
 vi.mock("child_process", () => ({ spawn: vi.fn(), execFile: vi.fn() }));
 vi.mock("../runtimeDeps", () => ({ importRuntimeDep: vi.fn() }));
 import { downloadGguf, importGguf, initLlamacpp, loadModel, ensureLoaded, unloadModel, disposeLlamacpp, isRunning, getStatus, parseExtraArgs, validateServerConfig, llamacppInstallPlan, isLoopbackHost, exposedWithoutApiKey, type LlamacppModel } from "./llamacpp";
@@ -81,6 +82,16 @@ describe("GGUF storage integrity", () => {
 });
 
 describe("local server lifetime", () => {
+  it("coalesces server log output into a bounded number of status events", async () => {
+    await loadModel(model);
+    const before = statusEvents.fired;
+    for (let i = 0; i < 200; i++) procs[0].stdout.emit("data", Buffer.from(`slot ${i}: token\n`));
+    expect(statusEvents.fired - before).toBeLessThanOrEqual(1);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(statusEvents.fired - before).toBe(1);
+    expect(getStatus().logs[model.id].at(-1)).toBe("slot 199: token");
+  });
+
   it("removes a ready server after it crashes and reloads on the next request", async () => {
     await loadModel(model);
     expect(isRunning(model.id)).toBe(true);

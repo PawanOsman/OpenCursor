@@ -8,7 +8,7 @@
  */
 
 import { afterEach, expect, it, vi } from "vitest";
-const host = vi.hoisted(() => ({ commands: new Map<string, (...args: any[]) => any>(), provider: undefined as any, tabs: [] as any[], close: vi.fn(async () => true), execute: vi.fn(async (..._args: any[]) => undefined), pick: vi.fn(async (items: any[]) => items.at(-1)) }));
+const host = vi.hoisted(() => ({ commands: new Map<string, (...args: any[]) => any>(), provider: undefined as any, tabs: [] as any[], close: vi.fn(async () => true), execute: vi.fn(async (..._args: any[]) => undefined), pick: vi.fn(async (items: any[]) => items.at(-1)), onChange: undefined as any }));
 vi.mock("vscode", () => {
   class Uri {
     constructor(readonly scheme: string, readonly path: string, readonly query = "") {}
@@ -19,8 +19,8 @@ vi.mock("vscode", () => {
   }
   class EventEmitter { event = () => ({ dispose() {} }); fire() {} dispose() {} }
   class TabInputTextDiff { constructor(readonly original: Uri, readonly modified: Uri) {} }
-  return { Uri, EventEmitter, TabInputTextDiff, ThemeColor: class {}, OverviewRulerLane: {}, DecorationRangeBehavior: {}, ViewColumn: {}, ConfigurationTarget: {},
-    workspace: { textDocuments: [], workspaceFolders: [], getConfiguration: () => ({ inspect: () => ({}), get: () => false, update: async () => {} }), registerTextDocumentContentProvider: (_scheme: string, provider: any) => { host.provider = provider; return { dispose() {} }; }, onDidChangeTextDocument: () => ({ dispose() {} }) },
+  return { Uri, EventEmitter, TabInputTextDiff, Range: class { constructor(...range: number[]) { Object.assign(this, { range }); } }, ThemeColor: class {}, OverviewRulerLane: {}, DecorationRangeBehavior: {}, ViewColumn: {}, ConfigurationTarget: {},
+    workspace: { textDocuments: [], workspaceFolders: [], getConfiguration: () => ({ inspect: () => ({}), get: () => false, update: async () => {} }), registerTextDocumentContentProvider: (_scheme: string, provider: any) => { host.provider = provider; return { dispose() {} }; }, onDidChangeTextDocument: (listener: any) => { host.onChange = listener; return { dispose() {} }; } },
     commands: { registerCommand: (name: string, callback: any) => { host.commands.set(name, callback); return { dispose() {} }; }, executeCommand: host.execute },
     window: { visibleTextEditors: [], tabGroups: { all: [{ tabs: host.tabs }], close: host.close }, createTextEditorDecorationType: () => ({ dispose() {} }), onDidChangeVisibleTextEditors: () => ({ dispose() {} }), showQuickPick: host.pick },
   };
@@ -31,7 +31,7 @@ import { pendingChanges } from "../stores/pendingChanges";
 import { registerInlineReview } from "./inlineReview";
 
 const subscriptions: Array<{ dispose(): unknown }> = [];
-afterEach(() => { for (const subscription of subscriptions.splice(0)) subscription.dispose(); pendingChanges.acceptAll(); host.tabs.length = 0; host.execute.mockClear(); host.close.mockClear(); vi.useRealTimers(); });
+afterEach(() => { for (const subscription of subscriptions.splice(0)) subscription.dispose(); pendingChanges.acceptAll(); host.tabs.length = 0; (vscode.window.visibleTextEditors as any[]).length = 0; host.execute.mockClear(); host.close.mockClear(); vi.useRealTimers(); });
 
 it("isolates A/B/A snapshots and closes only the accepted conversation's native diff", async () => {
   vi.useFakeTimers();
@@ -73,4 +73,25 @@ it("labels standalone file reviews as an aggregate and retains the live file doc
   expect(call[2].scheme).toBe("file");
   expect(call[3]).toContain("all pending changes");
   expect(host.provider.provideTextDocumentContent(call[1])).toBe("before");
+});
+
+it("refreshes only the typed editor's highlights and never re-publishes diff originals per keystroke", async () => {
+  vi.useFakeTimers(); registerInlineReview({ subscriptions } as any);
+  const file = "C:/fixture/typing.txt";
+  pendingChanges.record(file, "one", "one\ntwo", true, { conversationId: "chat" });
+  await host.commands.get("ocursor.viewDiff")!(file);
+  await vi.advanceTimersByTimeAsync(100);
+  const fire = vi.spyOn(vscode.EventEmitter.prototype, "fire");
+  let text = "one\ntwo";
+  const editorFor = (path: string, read: () => string) => ({ setDecorations: vi.fn(), document: { uri: vscode.Uri.file(path), getText: read, get lineCount() { return read().split("\n").length; }, lineAt: (line: number) => ({ text: read().split("\n")[line] ?? "" }) } });
+  const typed = editorFor(pendingChanges.list()[0].path, () => text), other = editorFor("C:/fixture/unrelated.txt", () => "plain");
+  (vscode.window.visibleTextEditors as any[]).push(typed, other);
+  for (let i = 0; i < 20; i++) { text += "x"; host.onChange({ document: typed.document, contentChanges: [{}] }); }
+  host.onChange({ document: other.document, contentChanges: [{}] });
+  await vi.advanceTimersByTimeAsync(200);
+  expect(typed.setDecorations).toHaveBeenCalledTimes(1);
+  expect(typed.setDecorations.mock.calls[0][1]).toHaveLength(1);
+  expect(other.setDecorations).not.toHaveBeenCalled();
+  expect(fire).not.toHaveBeenCalled();
+  fire.mockRestore();
 });

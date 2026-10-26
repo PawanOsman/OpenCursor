@@ -188,7 +188,20 @@ function appendLog(id: string, chunk: string): void {
   if (!lines.length) return;
   const next = [...cur, ...lines];
   logs.set(id, next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next);
-  emit();
+  emitLogs();
+}
+
+/**
+ * llama-server writes many lines per second while loading and serving. Each
+ * status event snapshots every model's log tail and posts it to the settings
+ * webview, so log-only updates are coalesced; state changes still emit at once.
+ */
+const LOG_EMIT_MS = 250;
+let logEmitTimer: ReturnType<typeof setTimeout> | undefined;
+function emitLogs(): void {
+  if (logEmitTimer) return;
+  logEmitTimer = setTimeout(() => { logEmitTimer = undefined; _onStatus.fire(snapshot()); }, LOG_EMIT_MS);
+  logEmitTimer.unref?.();
 }
 
 async function ensureDir(): Promise<string> {
@@ -214,6 +227,7 @@ function snapshot(): LlamacppStatus {
 }
 
 function emit() {
+  if (logEmitTimer) { clearTimeout(logEmitTimer); logEmitTimer = undefined; }
   _onStatus.fire(snapshot());
 }
 

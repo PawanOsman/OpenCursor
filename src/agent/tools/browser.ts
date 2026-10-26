@@ -25,6 +25,14 @@ interface BrowserSession {
 }
 
 const sessions = new Map<string, Promise<BrowserSession>>();
+/**
+ * A headless Chrome holds hundreds of MB and keeps renderer processes busy.
+ * Close a run's browser after this long without a browser action; the next
+ * BrowserNavigate starts a fresh one.
+ */
+export const BROWSER_IDLE_MS = 5 * 60_000;
+const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const idleClosed = new Set<string>();
 const MAX_TEXT = 24_000;
 const MAX_SCREENSHOT = 8 * 1024 * 1024;
 
@@ -81,14 +89,35 @@ async function createSession(): Promise<BrowserSession> {
   } catch (error) { await browser.close(); throw error; }
 }
 
-export async function disposeBrowserSession(key: string): Promise<void> {
+function clearIdle(key: string): void {
+  const timer = idleTimers.get(key);
+  if (timer) clearTimeout(timer);
+  idleTimers.delete(key);
+}
+
+function armIdle(key: string): void {
+  clearIdle(key);
+  if (!sessions.has(key)) return;
+  const timer = setTimeout(() => {
+    idleTimers.delete(key);
+    if (!sessions.has(key)) return;
+    idleClosed.add(key);
+    void disposeBrowserSession(key, true);
+  }, BROWSER_IDLE_MS);
+  timer.unref?.();
+  idleTimers.set(key, timer);
+}
+
+export async function disposeBrowserSession(key: string, idle = false): Promise<void> {
+  clearIdle(key);
+  if (!idle) idleClosed.delete(key);
   const session = sessions.get(key);
   sessions.delete(key);
   if (session) await session.then((value) => value.browser.close(), () => {}).catch(() => {});
 }
 
 export async function disposeAllBrowserSessions(): Promise<void> {
-  await Promise.all([...sessions.keys()].map(disposeBrowserSession));
+  await Promise.all([...sessions.keys()].map((key) => disposeBrowserSession(key)));
 }
 
 function sessionKey(ctx?: ToolContext): string {
@@ -103,13 +132,17 @@ async function useBrowser(signal: AbortSignal | undefined, ctx: ToolContext | un
   try {
     key = sessionKey(ctx);
     if (signal?.aborted) throw new Error("Browser action cancelled.");
+    clearIdle(key);
     let pending = sessions.get(key);
     if (!pending && create) {
+      idleClosed.delete(key);
       pending = createSession();
       sessions.set(key, pending);
       void pending.catch(() => { if (sessions.get(key!) === pending) sessions.delete(key!); });
     }
-    if (!pending) throw new Error("No browser page is open for this run. Call BrowserNavigate first.");
+    if (!pending) throw new Error(idleClosed.has(key)
+      ? `The browser was closed after ${BROWSER_IDLE_MS / 60_000} idle minutes to free memory. Call BrowserNavigate to open the page again.`
+      : "No browser page is open for this run. Call BrowserNavigate first.");
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => { void disposeBrowserSession(key!); reject(new Error("Browser action cancelled; its isolated browser was closed.")); };
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -125,7 +158,10 @@ async function useBrowser(signal: AbortSignal | undefined, ctx: ToolContext | un
     return await Promise.race([work, aborted]);
   } catch (error) {
     return { output: `error: ${error instanceof Error ? error.message : String(error)}`, outcome: { status: signal?.aborted ? "aborted" : "failed" } };
-  } finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
+  } finally {
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+    if (key) armIdle(key);
+  }
 }
 
 async function inspect(session: BrowserSession): Promise<ToolResult> {

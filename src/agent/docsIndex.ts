@@ -373,8 +373,56 @@ export async function indexDocSource(doc: DocSource, options: { signal?: AbortSi
 
 export async function deleteDocIndex(id: string): Promise<void> {
   if (activeJob?.id === id) { const job = activeJob; cancelDocIndex(id); await job.settled; }
-  if (storageDir) await fs.rm(fileFor(id), { force: true });
+  if (storageDir) { forgetDocIndex(fileFor(id)); await fs.rm(fileFor(id), { force: true }); }
   docLogs.delete(id);
+}
+
+/**
+ * Parsed documentation indexes, packed as Float32Array rows. Each search used to
+ * re-read and JSON.parse the whole file (tens of MB of number text for a large
+ * source) on the extension host. Entries are keyed by file identity, so a
+ * reindex is picked up automatically, and dropped after a few idle minutes.
+ */
+interface LoadedDocIndex {
+  key: string;
+  fingerprint: string;
+  source?: DocIndexFile["source"];
+  dim: number;
+  rows: { url: string; title: string; text: string }[];
+  vecs: Float32Array;
+  timer?: ReturnType<typeof setTimeout>;
+}
+const DOC_CACHE_IDLE_MS = 5 * 60_000;
+const docCache = new Map<string, LoadedDocIndex>();
+
+function forgetDocIndex(file: string): void {
+  const entry = docCache.get(file);
+  if (entry?.timer) clearTimeout(entry.timer);
+  docCache.delete(file);
+}
+
+async function loadDocIndex(file: string): Promise<LoadedDocIndex | undefined> {
+  let info;
+  try { info = await fs.stat(file); } catch { forgetDocIndex(file); return undefined; }
+  const key = `${info.mtimeMs}:${info.ctimeMs}:${info.size}`;
+  let entry = docCache.get(file);
+  if (entry?.key !== key) {
+    forgetDocIndex(file);
+    let idx: DocIndexFile;
+    try { idx = JSON.parse(await fs.readFile(file, "utf8")); } catch { return undefined; }
+    if (!idx || !Array.isArray(idx.chunks)) return undefined;
+    const valid = idx.chunks.filter((c) => c && typeof c.url === "string" && typeof c.text === "string" && Array.isArray(c.vec) && c.vec.length > 0 && c.vec.every(Number.isFinite));
+    const dim = valid[0]?.vec.length ?? 0;
+    const kept = valid.filter((c) => c.vec.length === dim);
+    const vecs = new Float32Array(kept.length * dim);
+    kept.forEach((c, r) => vecs.set(c.vec, r * dim));
+    entry = { key, fingerprint: idx.fingerprint, source: idx.source, dim, vecs, rows: kept.map((c) => ({ url: c.url, title: c.title, text: c.text })) };
+    docCache.set(file, entry);
+  }
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => { if (docCache.get(file) === entry) docCache.delete(file); }, DOC_CACHE_IDLE_MS);
+  entry.timer.unref?.();
+  return entry;
 }
 
 /** Cosine top-k over one doc source's chunks. */
@@ -384,13 +432,8 @@ export async function searchDocs(
   k = 6
 ): Promise<{ url: string; title: string; text: string; score: number }[]> {
   if (!storageDir) return [];
-  let idx: DocIndexFile;
-  try {
-    idx = JSON.parse(await fs.readFile(fileFor(id), "utf8"));
-  } catch {
-    return [];
-  }
-  if (!idx || !Array.isArray(idx.chunks)) return [];
+  const idx = await loadDocIndex(fileFor(id));
+  if (!idx) return [];
   const source = listDocSources().find(doc => doc.id === id);
   const policy = source ? createDocPolicy(source.url, source) : undefined;
   if (source && idx.source && (idx.source.url !== source.url || idx.source.scope !== policy!.origin + policy!.scopePath)) {
@@ -399,15 +442,22 @@ export async function searchDocs(
   const fingerprint = getEmbedFingerprint();
   if (idx.fingerprint !== fingerprint) throw new Error("Documentation index uses a different embedding configuration. Reindex this source in Settings.");
   const qv = await embedQuery(query);
-  if (!qv || !idx.chunks.length || getEmbedFingerprint() !== fingerprint) return [];
-  const scored = idx.chunks
-    .filter((c) => c && typeof c.url === "string" && typeof c.text === "string" && Array.isArray(c.vec) && c.vec.length === qv.length && c.vec.every(Number.isFinite) && (!policy || policy.allows(c.url)))
-    .map((c) => {
-      let dot = 0;
-      for (let i = 0; i < qv.length; i++) dot += qv[i] * c.vec[i];
-      return { c, score: dot };
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k);
-  return scored.map(({ c, score }) => ({ url: c.url, title: c.title, text: c.text, score }));
+  if (!qv || !idx.rows.length || getEmbedFingerprint() !== fingerprint || qv.length !== idx.dim) return [];
+  const { dim, vecs, rows } = idx;
+  const allowed = new Map<string, boolean>();
+  const scored: { r: number; score: number }[] = [];
+  for (let r = 0; r < rows.length; r++) {
+    const url = rows[r].url;
+    if (policy) {
+      let ok = allowed.get(url);
+      if (ok === undefined) allowed.set(url, ok = policy.allows(url));
+      if (!ok) continue;
+    }
+    const base = r * dim;
+    let dot = 0;
+    for (let i = 0; i < dim; i++) dot += qv[i] * vecs[base + i];
+    scored.push({ r, score: dot });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, k).map(({ r, score }) => ({ ...rows[r], score }));
 }

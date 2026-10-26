@@ -238,8 +238,10 @@ export function envFor(context: Record<string, string>): NodeJS.ProcessEnv {
  */
 export function runHooks(hooks: HookDef[], event: TriggerEvent, context: Record<string, string> = {}, tool?: string): void {
 	const root = getWorkspaceRoot();
-	const env = envFor(context);
 	void launchesFor(hooks, event, root, context, tool).then((launches) => {
+		if (!launches.length) return;
+		// Copying the whole process environment is only worth it when a hook runs.
+		const env = envFor(context);
 		for (const l of launches) void runHook(l.command, root, env, l.payload);
 	}, () => {});
 }
@@ -255,9 +257,10 @@ export async function runBlockingHooks(hooks: HookDef[], event: TriggerEvent, co
 		return undefined;
 	}
 	const root = getWorkspaceRoot();
-	const env = envFor(context);
 	const launches = await launchesFor(hooks, event, root, context, tool);
 	if (signal?.aborted) return "hook cancelled";
+	if (!launches.length) return undefined;
+	const env = envFor(context);
 	const results = await Promise.all(launches.map((l) => runHook(l.command, root, env, l.payload, signal)));
 	for (const r of results) {
 		const reason = verdictOf(r);

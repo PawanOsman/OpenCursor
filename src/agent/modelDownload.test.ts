@@ -36,6 +36,20 @@ describe("verified resumable model transfers", () => {
     expect(await fs.readFile(destination)).toEqual(bytes);
     expect(await fs.readdir(root)).toEqual(["fixture.gguf"]);
   });
+  it("reports progress at a bounded rate and always reports completion", async () => {
+    const chunk = Buffer.alloc(16 * 1024, 1); chunk.write("GGUF");
+    const parts = 200, total = chunk.length * parts;
+    server.on("request", async (_, response) => {
+      response.setHeader("content-length", total);
+      for (let i = 0; i < parts; i++) { response.write(chunk); await new Promise(resolve => setImmediate(resolve)); }
+      response.end();
+    });
+    const reports: number[] = [];
+    await downloadModelFile(url, destination, { onProgress: received => reports.push(received) });
+    expect(reports.length).toBeGreaterThan(0);
+    expect(reports.length).toBeLessThan(parts / 4);
+    expect(reports.at(-1)).toBe(total);
+  });
   it("retains a validated partial on cancellation and requests exactly the remaining range", async () => {
     const ranges: (string | undefined)[] = [];
     server.on("request", (request, response) => {

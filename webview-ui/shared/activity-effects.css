@@ -97,6 +97,10 @@
   15% { background-color: var(--matrix-active); }
 }
 
+/* Scrolled out of view (see ThinkingStatus): hold the loops instead of restyling every frame. */
+.activity-status[data-offscreen] .t-think-text::before,
+.activity-status[data-offscreen] .t-matrix i { animation-play-state: paused; }
+
 html[data-motion="reduced"] .t-think-text { transition: none !important; transform: none !important; filter: none !important; }
 html[data-motion="reduced"] .t-think-text::before { display: none !important; }
 html[data-motion="reduced"] .t-matrix i { animation: none !important; }

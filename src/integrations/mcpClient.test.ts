@@ -98,6 +98,20 @@ describe("MCP request lifetime", () => {
     await vi.waitFor(() => expect(requests.at(-1)).toMatchObject({ id: "server-form", result: { action: "decline" } }));
   });
 
+  it("reassembles responses split across chunks, including multi-byte characters and batched lines", async () => {
+    const first = connection.callTool("fixture", {});
+    const firstId = requests.at(-1).id;
+    const second = connection.callTool("fixture", {});
+    const secondId = requests.at(-1).id;
+    const big = "é→✓".repeat(50_000);
+    const bytes = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: firstId, result: { content: [{ type: "text", text: big }] } }) + "\n"
+      + JSON.stringify({ jsonrpc: "2.0", id: secondId, result: { content: [{ type: "text", text: "second" }] } }) + "\n");
+    // Odd chunk size so multi-byte sequences straddle chunk boundaries.
+    for (let offset = 0; offset < bytes.length; offset += 4093) proc.stdout.write(bytes.subarray(offset, offset + 4093));
+    expect(await first).toBe(big);
+    expect(await second).toBe("second");
+  });
+
   it("does not launch queued connections after manager disposal", async () => {
     const manager = new McpManager();
     const before = vi.mocked(spawn).mock.calls.length;
@@ -105,6 +119,25 @@ describe("MCP request lifetime", () => {
     manager.disposeAll();
     await sync;
     expect(vi.mocked(spawn).mock.calls).toHaveLength(before);
+  });
+});
+
+describe("MCP startup sync", () => {
+  it("bounds how long a run waits for servers that are still connecting", async () => {
+    const manager = new McpManager();
+    (manager as any).syncing = new Promise(() => {});
+    const started = Date.now();
+    await manager.whenSettled(30);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it("returns as soon as the sync finishes", async () => {
+    const manager = new McpManager();
+    let finish!: () => void;
+    (manager as any).syncing = new Promise<void>((resolve) => { finish = resolve; });
+    const settled = manager.whenSettled(60_000);
+    finish();
+    await expect(settled).resolves.toBeUndefined();
   });
 });
 
