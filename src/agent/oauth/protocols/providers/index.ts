@@ -8821,13 +8821,11 @@ export const PROVIDER_OAUTH: Record<string, ProtocolRecord> = {
     },
     "windsurf": {
         "clientId": "3GUryQ7ldAeKEuD2obYnppsnmj58eP5u",
-        "firebaseSignInUrl": "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword",
         "registerUrl": "https://register.windsurf.com/exa.seat_management_pb.SeatManagementService/RegisterUser",
         "apiServerUrl": "https://server.codeium.com",
         "auth1ApiServerUrl": "https://server.self-serve.windsurf.com",
         "platform": "windsurf",
-        "quotaUrl": "https://windsurf.com/_backend/exa.seat_management_pb.SeatManagementService/GetPlanStatus",
-        "firebaseApiKey": "AIzaSyDsOl-1XpT5err0Tcn0TFFod1H8gVGIycY"
+        "quotaUrl": "https://windsurf.com/_backend/exa.seat_management_pb.SeatManagementService/GetPlanStatus"
     },
     "cline": {
         "appBaseUrl": "https://app.cline.bot",
