@@ -85,6 +85,11 @@ const PRESETS = {
     "baseUrl": "https://api-us-ca.umodelverse.ai/v1",
     "needsKey": true
   },
+  "cheaperinference": {
+    "label": "Cheaper Inference",
+    "baseUrl": "https://api.cheaperinference.com/v1",
+    "needsKey": true
+  },
   "xai": {
     "label": "xAI",
     "baseUrl": "https://api.x.ai/v1",
@@ -444,5 +449,5 @@ const PRESETS = {
 } as const;
 export type ProviderKind = keyof typeof PRESETS;
 export const PROVIDER_PRESETS: Record<ProviderKind, ProviderPreset> = PRESETS;
-export const POPULAR_KINDS: ProviderKind[] = ["anthropic","openai","google","xai","deepseek","moonshot","z-ai","minimax","qwen","openrouter","mimo","atlascloud","astraflow","alicode-intl","alicode","azure","blackbox","byteplus","cerebras","chutes","cloudflare-ai","cohere","commandcode","featherless","fireworks","glm-cn","glm","groq","hyperbolic","kimchi","minimax-cn","mistral","nebius","nvidia","ollama-cloud","opencode-go","opencode-zen","perplexity","perplexity-agent","siliconflow","together","venice","vercel-ai-gateway","vertex-partner","vertex","volcengine-ark","alims-intl","api-airforce","baidu","bazaarlink","kilo-gateway","llm7","tencent","morph","poolside","tokenrouter","alitp-intl"];
+export const POPULAR_KINDS: ProviderKind[] = ["anthropic","openai","google","xai","deepseek","moonshot","z-ai","minimax","qwen","openrouter","mimo","atlascloud","astraflow","cheaperinference","alicode-intl","alicode","azure","blackbox","byteplus","cerebras","chutes","cloudflare-ai","cohere","commandcode","featherless","fireworks","glm-cn","glm","groq","hyperbolic","kimchi","minimax-cn","mistral","nebius","nvidia","ollama-cloud","opencode-go","opencode-zen","perplexity","perplexity-agent","siliconflow","together","venice","vercel-ai-gateway","vertex-partner","vertex","volcengine-ark","alims-intl","api-airforce","baidu","bazaarlink","kilo-gateway","llm7","tencent","morph","poolside","tokenrouter","alitp-intl"];
 export const FREE_KINDS: ProviderKind[] = ["opencode"];

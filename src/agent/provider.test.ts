@@ -53,7 +53,7 @@ describe("kindMatches", () => {
 
 describe("PROVIDER_PRESETS", () => {
   it("has all expected providers", () => {
-    const expected = ["openai", "anthropic", "google", "openrouter", "ollama", "llamacpp", "mimo", "atlascloud", "astraflow"] as const;
+    const expected = ["openai", "anthropic", "google", "openrouter", "ollama", "llamacpp", "mimo", "atlascloud", "astraflow", "cheaperinference"] as const;
     for (const key of expected) {
       expect(PROVIDER_PRESETS[key]).toBeDefined();
     }
