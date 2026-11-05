@@ -391,6 +391,13 @@ const PRESETS = {
     "adapterId": "kilo-gateway",
     "protocol": "adapter"
   },
+  "llm-buzz": {
+    "label": "llm.buzz",
+    "baseUrl": "https://api.llm.buzz/api/v1",
+    "needsKey": true,
+    "adapterId": "llm-buzz",
+    "protocol": "adapter"
+  },
   "llm7": {
     "label": "LLM7",
     "baseUrl": "https://api.llm7.io/v1",
@@ -414,7 +421,7 @@ const PRESETS = {
   },
   "poolside": {
     "label": "Poolside",
-    "baseUrl": "https://inference.poolside.ai/v1",
+    "baseUrl": "https://api.poolside.ai/v1",
     "needsKey": true,
     "adapterId": "poolside",
     "protocol": "adapter"
@@ -444,5 +451,5 @@ const PRESETS = {
 } as const;
 export type ProviderKind = keyof typeof PRESETS;
 export const PROVIDER_PRESETS: Record<ProviderKind, ProviderPreset> = PRESETS;
-export const POPULAR_KINDS: ProviderKind[] = ["anthropic","openai","google","xai","deepseek","moonshot","z-ai","minimax","qwen","openrouter","mimo","atlascloud","astraflow","alicode-intl","alicode","azure","blackbox","byteplus","cerebras","chutes","cloudflare-ai","cohere","commandcode","featherless","fireworks","glm-cn","glm","groq","hyperbolic","kimchi","minimax-cn","mistral","nebius","nvidia","ollama-cloud","opencode-go","opencode-zen","perplexity","perplexity-agent","siliconflow","together","venice","vercel-ai-gateway","vertex-partner","vertex","volcengine-ark","alims-intl","api-airforce","baidu","bazaarlink","kilo-gateway","llm7","tencent","morph","poolside","tokenrouter","alitp-intl"];
+export const POPULAR_KINDS: ProviderKind[] = ["anthropic","openai","google","xai","deepseek","moonshot","z-ai","minimax","qwen","openrouter","mimo","atlascloud","astraflow","alicode-intl","alicode","azure","blackbox","byteplus","cerebras","chutes","cloudflare-ai","cohere","commandcode","featherless","fireworks","glm-cn","glm","groq","hyperbolic","kimchi","minimax-cn","mistral","nebius","nvidia","ollama-cloud","opencode-go","opencode-zen","perplexity","perplexity-agent","siliconflow","together","venice","vercel-ai-gateway","vertex-partner","vertex","volcengine-ark","alims-intl","api-airforce","baidu","bazaarlink","kilo-gateway","llm-buzz","llm7","tencent","morph","poolside","tokenrouter","alitp-intl"];
 export const FREE_KINDS: ProviderKind[] = ["opencode"];
