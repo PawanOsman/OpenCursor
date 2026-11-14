@@ -176,6 +176,12 @@ describe("audited approval bypasses", () => {
     expect(matchPattern("a?c*", "abcd", true)).toBe(false);
     expect(matchPattern("a?c*", "a?cd", true)).toBe(true);
   });
+  it("matches path rules written with Windows backslashes", () => {
+    expect(matchPattern("secrets\\prod.json", "secrets/prod.json", false, "edits")).toBe(true);
+    expect(matchPattern("secrets\\**", "secrets/a/b.txt", false, "edits")).toBe(true);
+    expect(matchPattern("secrets\\*.json", "secrets\\prod.json", false, "edits")).toBe(true);
+    expect(matchPattern("secrets\\*.json", "other/prod.json", false, "edits")).toBe(false);
+  });
   it("requires an exact MCP name unless the rule uses *", () => {
     const p = allowPolicy(); p.mcp = { mode: "ask", allowlist: ["mcp__srv__read"], denylist: [] };
     expect(evaluateApproval(p, "mcp__srv__read", {})).toBe("allow");
