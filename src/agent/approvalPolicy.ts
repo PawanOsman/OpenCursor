@@ -435,9 +435,11 @@ function matchWebPattern(p: string, subject: string): boolean {
  * URL patterns use origin + path-boundary rules; MCP needs `*` to go beyond exact.
  */
 export function matchPattern(pattern: string, subject: string, prefixOk: boolean, type?: ApprovalActionType): boolean {
-	const p = pattern.trim();
-	if (!p) return false;
-	if (prefixOk && type !== "mcp" && type !== "shell" && /^https?:\/\//i.test(p)) return matchWebPattern(p, subject.trim());
+	const raw = pattern.trim();
+	if (!raw) return false;
+	if (prefixOk && type !== "mcp" && type !== "shell" && /^https?:\/\//i.test(raw)) return matchWebPattern(raw, subject.trim());
+	// The subject is compared with `/` separators, so a Windows-style pattern must be too.
+	const p = raw.replace(/\\/g, "/");
 	const s = subject.replace(/\\/g, "/");
 	if (p.includes("*")) {
 		const esc = escapeRx(p);
